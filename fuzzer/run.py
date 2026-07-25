@@ -165,6 +165,8 @@ class Campaign:
     ended_at: float | None = field(default=None, init=False)
     outputs_before: int = field(default=0, init=False)
     crashes_before: int = field(default=0, init=False)
+    # outputs/ count per tick -- the unbuffered coverage-growth signal.
+    new_coverage_events: list[int] = field(default_factory=list, init=False)
 
     @classmethod
     def from_snapshot_ref(
@@ -220,10 +222,24 @@ class Campaign:
         self.started_at = time.time()
 
         logs = cfg.artifacts_dir / "logs"
+
+        # Module bases, so a fault can be attributed rather than blindly
+        # de-slid with our module's offset (see CrashWatcher).
+        module_ranges: dict[str, int] = {}
+        symbol_store = cfg.target_dir / "state" / "symbol-store.json"
+        if symbol_store.exists():
+            module_ranges = {
+                name: int(addr, 16)
+                for name, addr in json.loads(
+                    symbol_store.read_text(encoding="utf-8")
+                ).items()
+            }
+
         self.watcher = CrashWatcher(
             crashes_dir=cfg.target_dir / "crashes",
             space=self.space,
             backend=cfg.backend,  # type: ignore[arg-type]
+            module_ranges=module_ranges,
         )
         self.watcher.prime()  # do not attribute pre-existing crashes to this run
 
@@ -256,9 +272,32 @@ class Campaign:
         )
         self.pool.start()
 
+    def sample_new_coverage_events(self) -> int:
+        """Count new-coverage events from the filesystem.
+
+        **This is the reliable coverage-growth signal.** The master saves a
+        testcase into ``outputs/`` exactly when a testcase produced NEW coverage
+        (``server.h:830-836`` -> ``Corpus_t::SaveTestcase``), and a file
+        appearing on disk is not buffered.
+
+        Its stdout is: wtf block-buffers through C stdio and does not flush on
+        exit, so a 123-second run left a **0-byte** master log while the fuzzer
+        was healthily saving 30 new-coverage testcases (D-033). Ctrl+Break does
+        not help. So the stat lines are a bonus when they arrive, and this is the
+        signal that is always there.
+
+        What it measures, precisely: the number of *new-coverage events*, not the
+        number of covered edges. Monotonic, and enough to answer "is coverage
+        growing" and to detect a plateau.
+        """
+        return Corpus(self.config.target_dir).output_count()
+
     def tick(self) -> CoverageSummary | None:
-        """Sample the master's aggregate coverage once."""
+        """One sample: master stat lines if flushed, plus the filesystem signal."""
         assert self.master is not None
+        events = self.sample_new_coverage_events()
+        self.new_coverage_events.append(events)
+
         stats = self.master.latest()
         if stats is None:
             return None
@@ -273,9 +312,31 @@ class Campaign:
             self.master.stop()
         self.ended_at = time.time()
 
+    def rebuild_history(self) -> CoverageTracker:
+        """Rebuild the coverage history from EVERY master stat line.
+
+        The per-tick sampling in :meth:`tick` is for live display only and
+        systematically under-resolves: the master block-buffers its log
+        (D-033), so one tick can absorb several minutes of stat lines and the
+        growth inside them becomes invisible. Measured -- a 663-second run with
+        30 new-coverage saves reported no growth at all when judged from ticks.
+
+        The log has every line, so the log is what the artifacts come from.
+        """
+        tracker = CoverageTracker()
+        if self.master is not None:
+            for stats in self.master.snapshot_stats():
+                tracker.observe(stats)
+        return tracker
+
     def write_artifacts(self) -> dict[str, Path]:
         out: dict[str, Path] = {}
         cfg = self.config
+
+        # Replace the sampled history with the full one before writing.
+        rebuilt = self.rebuild_history()
+        if rebuilt.history:
+            self.tracker = rebuilt
         if self.tracker.history:
             out["coverage"] = self.tracker.write_jsonl(
                 cfg.artifacts_dir / "coverage_summaries.jsonl"
@@ -323,7 +384,25 @@ class Campaign:
             "outputs_after": corpus.output_count(),
             "crashes_before": self.crashes_before,
             "crashes_after": corpus.crash_count(),
-            "coverage_grew": self.tracker.is_growing,
+            # PRIMARY growth evidence: new-coverage events counted from the
+            # filesystem, which is unbuffered. See sample_new_coverage_events.
+            "new_coverage_events": corpus.output_count() - self.outputs_before,
+            "new_coverage_events_series": self.new_coverage_events,
+            "coverage_grew": (
+                corpus.output_count() > self.outputs_before or self.tracker.is_growing
+            ),
+            # Secondary, and only meaningful when the master happened to flush.
+            "coverage_grew_per_stat_lines": self.tracker.is_growing,
+            "coverage_grew_after_first_sample": (
+                self.tracker.grew_after_the_first_sample
+            ),
+            "master_stat_lines_observed": len(stats),
+            # If Ctrl+Break was ignored we had to terminate, and the master's
+            # buffered tail was lost (D-033). Flagged so a short observed
+            # history is not read as a short run.
+            "master_log_truncated": (
+                self.master.terminated_without_flush if self.master else None
+            ),
             "worker_restarts": (
                 sum(w.restarts for w in self.pool.workers) if self.pool else 0
             ),

@@ -1047,3 +1047,186 @@ presenting the binary-only oracle as uniformly blind.
 **Action:** adopted in `fuzzer/module/fuzzer_snapfuzz.cc` and recorded in
 `config/target.yaml` as `injection.page_tail_align`. Worth applying to any
 target whose buffer placement we control.
+
+---
+
+## D-032 — Hyper-V is unavailable on this host; VMware is already installed
+
+**Confirmed 2026-07-25.** CLAUDE.md section 13.6 step 1 says *"Target in a
+Hyper-V VM, one virtual CPU, 4GB RAM"*, and CP3's acquisition path depends on it.
+
+This host is **Windows 11 Home** (build 26200; `Get-ComputerInfo` reports the
+product name as "Windows 10 Home"). **Hyper-V and Hyper-V Manager are
+Pro/Enterprise features and are not available on Home.** `HyperVisorPresent` is
+`False`, so no hypervisor is currently running. The hardware is fully capable —
+DEP, SLAT, virtualization firmware and VM monitor mode extensions all report
+available — so this is purely an edition restriction. (`Get-WindowsOptionalFeature`
+needs administrator rights and was not run.)
+
+**But the requirement is weaker than the README implies.** What the snapshot
+procedure actually needs is a Windows guest with **KD attached**, one virtual
+CPU and 4 GB of RAM. KD attaches over a serial port mapped to a named pipe,
+which is not a Hyper-V-specific facility. Hyper-V is what the author used, not
+an inherent dependency.
+
+And two of the three pieces are already on this machine:
+
+| Piece | Status |
+|---|---|
+| Hypervisor | **VMware Workstation 17.6.2** — installed (it is what put the stray quote adjacent to `PATH`, D-020) |
+| Kernel debugger | **`kd.exe` 10.0.26100.7705** — installed, in the Windows 10 SDK Debuggers directory. This is also why wtf found `dbgeng.dll`/`symsrv.dll` to copy (`debugger.h:195-230`) |
+| `!snapshot` extension | **`snapshot.dll` v0.2.5** — now downloaded to `D:\tools\snapshot` |
+| A Windows guest VM | **MISSING** — no VMs exist on disk |
+
+So the remaining work is *creating a guest*, not installing virtualisation:
+
+1. obtain a Windows ISO (~5.5 GB) — interactive, and a licensing decision;
+2. create the VM with **one vCPU** and 4 GB RAM, install Windows;
+3. in the guest, run `scripts/disable-kva.cmd` and reboot (D-028);
+4. add a serial port mapped to a named pipe and enable kernel debugging in the
+   guest (`bcdedit /debug on /dbgsettings serial`), then attach `kd.exe`;
+5. `.load D:\tools\snapshot\snapshot.dll` and `!snapshot <state_path>`.
+
+Steps 1–2 need GUI interaction and a product key, so they are the user's; steps
+3–5 are scripted by `prep/snapshot_win.py`'s `build_kd_commands` and
+`GUEST_PREP_NOTES`.
+
+**Consequence for DEC-005.** That decision pins the scaled GATE 4b run to the
+`whv` backend because it is the only local backend that consumes the CP2
+coverage file. `whv` needs the Windows Hypervisor Platform, which needs the
+hypervisor running — and `HyperVisorPresent` is `False`. Whether WHP can be
+enabled on Home was **not** established (it requires admin to query). If it
+cannot, GATE 4b's options narrow to bochscpu with N workers, which exercises
+coverage aggregation but **not** edge 22, since bochscpu ignores `.cov` files
+(D-004). Flagged now rather than discovered at CP4b.
+
+---
+
+## D-033 — wtf block-buffers stdout, and terminating it loses the last buffer
+
+**Measured.** wtf prints through C stdio, which block-buffers when stdout is not
+a console. Consequences that broke a working-looking campaign runner:
+
+* Through a **pipe**, a 90-second run produced **zero** parsable stat lines. The
+  runner ticked six times, saw nothing, and reported `coverage grew: False` —
+  while the fuzzer was in fact running at 360 exec/s the whole time.
+* `terminate()` is `TerminateProcess` on Windows, which **never flushes**. So
+  the final buffer is lost, and with it the last few minutes of stat lines.
+* Flushes arrive roughly every 4 KB. At ~130 bytes per stat line every 10 s
+  that is one flush per ~5 minutes.
+
+This also explains the truncated tail (`Sa`) in the GATE 1 log, which at the
+time looked like an artefact of killing the process mid-write.
+
+**It is worse than block buffering, and three fixes failed before the right one.**
+
+1. **Pipe → file.** Redirecting to a file and tailing it by offset is what the
+   GATE 1 manual test happened to do, and it worked there. It is not enough: a
+   663-second run left only **8 stat lines covering the first 72 seconds**.
+2. **Ctrl+Break instead of terminate.** `TerminateProcess` never flushes, so the
+   master is sent `CTRL_BREAK_EVENT` in its own process group first, on the
+   theory that the C runtime's default handler exits normally and flushes. The
+   master *accepts* it and exits — and a 123-second run still produced a
+   **0-byte** log.
+3. So **wtf's stat lines cannot be relied on at all**: not for short runs, and
+   never for the tail of any run.
+
+**The signal that does work is the filesystem.** The master writes a testcase
+into `outputs/` exactly when one produced **new coverage**
+(`server.h:830-836` → `Corpus_t::SaveTestcase`), and a file appearing on disk is
+not buffered. During that same 0-byte-log run the fuzzer saved **30**
+new-coverage testcases — it was perfectly healthy and entirely unobservable
+through stdout.
+
+**Actions:**
+
+* `fuzzer/run.py` counts `outputs/` per tick as the **primary** coverage-growth
+  signal, and records `new_coverage_events` in `artifacts/run_metadata.json`.
+  Stat lines are parsed when they happen to arrive and treated as a bonus.
+* Precisely what that counts: **new-coverage events**, not covered edges. It is
+  monotonic, and sufficient to answer "is coverage growing" and to detect a
+  plateau — which is what CP7 needs.
+* `fuzzer/run.py` records its own `duration_s` rather than the master's
+  `uptime`, which truncates with the log.
+* `master_log_truncated` is recorded so a short observed history is never
+  mistaken for a short run.
+
+**Consequence for CP7.** Section 12.1 suggests watching an aggregated
+`coverage.cov` for growth, and section 12.3 wants plateau on aggregate coverage.
+No such file is written (D-021) and the master's stdout is unusable, so
+`outputs/` growth is the plateau input. It is still genuinely *aggregate* —
+the master owns `outputs/` and writes there on behalf of every worker — so
+section 12.3's requirement is met, just by a different route than suggested.
+
+The same buffering trap applies to our own Python output through a pipe, which is
+why the first campaign's progress prints were invisible; `-u` fixes that side.
+
+---
+
+## D-034 — Structured output needs the schema, not a description of it
+
+**Measured** while building CP5. `complete_json` originally instructed
+"respond with a single JSON object" and described the wanted fields in prose.
+The model returned well-formed JSON with **invented neighbouring field names**:
+`memcpy_offset` where the contract said `length_offset`, and a required field
+simply absent.
+
+The retry could not recover, because the feedback said validation failed without
+ever stating what the property names were meant to be. Two attempts, two
+failures, allocation spent for nothing.
+
+**Action:** `complete_json` now embeds `model_cls.model_json_schema()` in the
+prompt and instructs the model to use exactly those property names. The same
+call then succeeds first try.
+
+Worth carrying into CP6 and CP9: every structured call goes through this path,
+so `FuzzEntry` and `TriageVerdict` get their schemas handed to the model rather
+than paraphrased. Paraphrasing a contract is how the contract and the prompt
+drift apart.
+
+---
+
+## D-035 — Most faults are not in the target module, so de-sliding needs attribution
+
+**Measured** on the GATE 4 run: 55 crash records, and **48 of them faulted in
+`0x7ff8aa3812de`–`0x7ff8aa38167c`**. That range is nothing to do with
+`tlv_server` (base `0x7ff719e50000`). It sits about **192 KB below
+`verifier.dll`** (base `0x7ff8aa3b0000`) and matches no module
+`symbol-store.json` lists — most plausibly part of the Application Verifier
+stack the snapshot was taken with (D-014).
+
+Section 9 says convert runtime addresses to static before hashing. Applied
+naively that is wrong, because **the conversion is per-module**: de-sliding a
+non-target address with the target's slide gave
+
+```
+0x7ff8aa3812de - 0x7ff719e50000 + 0x140000000 = 0x2d05312de
+```
+
+a number that means nothing. It would have hashed cleanly, bucketed
+consistently, and been entirely fictitious — the failure mode is invisible.
+
+**Fixed** in `engine_bridge/crash_watch.py`: a fault is de-slid **only** when it
+falls inside the target module's range, and attributed only when it falls inside
+some declared range. Otherwise `fault_static_addr` is 0 and `fault_module` is
+None. `CrashRecord` gained `fault_module` so the distinction survives to CP8.
+
+**Three consequences for CP8, which is where this really bites:**
+
+1. **Fault-address bucketing is even weaker than D-024 suggested.** Not only did
+   1113 crash events collapse to 38 files spanning 926 bytes of one function —
+   that function is not even in the code under test. Bucketing on it groups by
+   *where the heap manager noticed*, not by *what the parser did wrong*.
+2. **The stack hash must skip non-target frames**, or every bug in the target
+   will share the verifier-side prefix and collapse into one bucket. Section 8
+   says hash the top N frames; the useful N here starts after the frames that
+   are not ours.
+3. **This is the no-ASAN limitation showing its other face.** We are not seeing
+   the overflow; we are seeing a guard mechanism react to it several frames
+   later. That is *why* CP8 needs the execution trace (signal 4) to walk back to
+   the origin, and it is concrete evidence for that design rather than an
+   assertion.
+
+Also observed: `STATUS_HEAP_CORRUPTION` appeared as a fault type, which is not in
+our name map. It passes through verbatim by design — an unfamiliar fault class is
+information, not noise.

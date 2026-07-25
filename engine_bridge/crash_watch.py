@@ -82,12 +82,62 @@ class CrashWatcher:
     Polling rather than a filesystem watcher: the master writes at most a
     handful of files per second (it deduplicates by name), and a poll cannot
     miss an event or need a platform-specific API.
+
+    ``module_ranges`` maps module name -> runtime base, straight out of
+    ``state/symbol-store.json``. It exists because **most faults do not land in
+    the target module.** Measured on tlv_server: 48 of 55 crashes faulted in
+    0x7ff8aa3812de-0x7ff8aa38167c, which is not the target and is not any module
+    the symbol store lists -- it sits ~192 KB below verifier.dll and is most
+    likely part of the Application Verifier stack the snapshot was taken with.
+
+    Applying the target's slide to such an address produces a garbage "static"
+    address (0x7ff8aa3812de became 0x2d05312de), and hashing that would corrupt
+    every bucket while looking perfectly normal.
+
+    So a fault is de-slid **only** when it falls inside the target module, and
+    attributed only when it falls inside a declared range. Otherwise
+    ``fault_static_addr`` is 0 and ``fault_module`` is None -- admitting we do
+    not know beats guessing, and CP8's replay can recover the real answer.
     """
 
     crashes_dir: Path
     space: AddressSpace
     backend: Backend
+    module_ranges: dict[str, int] = field(default_factory=dict)
+    max_image_size: int = 0x1000_0000  # 256 MB; a sanity bound, not a real size
     seen: set[str] = field(default_factory=set)
+
+    def attribute(self, runtime_addr: int) -> str | None:
+        """Which module a runtime address most likely belongs to.
+
+        Nearest declared base at or below the address. Returns None when there
+        is nothing plausible, rather than guessing.
+        """
+        if not runtime_addr:
+            return None
+        best: tuple[int, str] | None = None
+        for name, base in self.module_ranges.items():
+            if "!" in name:  # symbol entry, not a module base
+                continue
+            if base <= runtime_addr and (best is None or base > best[0]):
+                best = (base, name)
+        if best is None:
+            return None
+        return best[1] if runtime_addr - best[0] <= self.max_image_size else None
+
+    def _to_static(self, runtime_addr: int) -> tuple[int, str | None]:
+        """De-slide only if the fault is inside OUR module."""
+        module = self.attribute(runtime_addr)
+        if not runtime_addr:
+            return 0, None
+        in_our_module = (
+            self.space.module_base
+            <= runtime_addr
+            < self.space.module_base + self.max_image_size
+        )
+        if not in_our_module:
+            return 0, module
+        return self.space.to_static(runtime_addr), module or self.space.module
 
     def prime(self) -> int:
         """Mark everything already present as seen. Returns how many.
@@ -129,21 +179,25 @@ class CrashWatcher:
         except OSError:
             return None
 
+        # Static addresses only for faults inside our module -- section 10
+        # forbids hashing runtime addresses, and cross-module de-sliding is
+        # worse than not de-sliding at all.
+        static_addr, fault_module = self._to_static(runtime_addr)
+
         return CrashRecord(
             input_bytes=input_bytes,
             fault_type=fault_type,
             fault_runtime_addr=runtime_addr,
-            # Static, always: hashing runtime addresses breaks bucketing across
-            # runs (section 10). 0 stays 0 -- an unknown address is not slid.
-            fault_static_addr=(
-                self.space.to_static(runtime_addr) if runtime_addr else 0
-            ),
+            fault_static_addr=static_addr,
             registers={},  # needs a replay -- CP8
             backtrace=[],  # needs a replay -- CP8
             coverage_delta=0,
             worker_id=None,  # not recoverable from disk -- D-018
             backend=self.backend,
             timestamp=path.stat().st_mtime,
+            # Which module the fault landed in. Usually NOT ours: Application
+            # Verifier raises from verifier.dll when it catches a heap overflow.
+            fault_module=fault_module,
         )
 
     def collect_all(self) -> list[CrashRecord]:

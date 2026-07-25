@@ -15,8 +15,11 @@ Aggregate coverage is read from the master's stdout, parsed by
 
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -53,6 +56,10 @@ class MasterProcess:
     proc: subprocess.Popen | None = field(default=None, init=False)
     stats: list[MasterStats] = field(default_factory=list, init=False)
     lines: list[str] = field(default_factory=list, init=False)
+    # True when Ctrl+Break was ignored and we had to terminate, meaning the tail
+    # of the log was lost. Recorded so a short history is not mistaken for a
+    # short run.
+    terminated_without_flush: bool = field(default=False, init=False)
     _handle: object | None = field(default=None, init=False)
     _offset: int = field(default=0, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
@@ -78,12 +85,23 @@ class MasterProcess:
 
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = self.log_path.open("w", encoding="utf-8", errors="replace")
+
+        # CREATE_NEW_PROCESS_GROUP so we can send CTRL_BREAK to the master
+        # alone at shutdown. TerminateProcess never flushes C stdio, and the
+        # master's buffer holds minutes of stat lines -- measured: a 663-second
+        # run left only 8 lines covering the first 72 seconds. A Ctrl+Break
+        # reaches the CRT's default handler, which exits and flushes.
+        flags = 0
+        if os.name == "nt":
+            flags = subprocess.CREATE_NEW_PROCESS_GROUP
+
         self.proc = subprocess.Popen(
             self.command(),
             cwd=self.target_dir,
             env=self.env,
             stdout=self._handle,
             stderr=subprocess.STDOUT,
+            creationflags=flags,
         )
 
     def drain(self) -> list[MasterStats]:
@@ -130,16 +148,43 @@ class MasterProcess:
     def is_running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
-    def stop(self, timeout: float = 10.0) -> int | None:
+    def stop(self, timeout: float = 20.0) -> int | None:
+        """Stop the master, trying to keep its buffered log.
+
+        Ctrl+Break first: it reaches the C runtime's handler, which exits
+        normally and therefore FLUSHES stdio. Only if that is ignored do we fall
+        back to terminate, which loses whatever is still buffered (D-033).
+        """
         if self.proc is None:
             return None
+
         if self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait(timeout=timeout)
+            graceful = False
+            if os.name == "nt":
+                try:
+                    os.kill(self.proc.pid, signal.CTRL_BREAK_EVENT)
+                    self.proc.wait(timeout=timeout)
+                    graceful = True
+                except (subprocess.TimeoutExpired, OSError, ValueError):
+                    graceful = False
+            else:
+                try:
+                    self.proc.send_signal(signal.SIGINT)
+                    self.proc.wait(timeout=timeout)
+                    graceful = True
+                except (subprocess.TimeoutExpired, OSError):
+                    graceful = False
+
+            if not graceful:
+                self.terminated_without_flush = True
+                self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+                    self.proc.wait(timeout=timeout)
+            # Give the OS a moment to land the flushed bytes on disk.
+            time.sleep(0.5)
 
         # Close our handle so the final buffer lands, then take one last read.
         if self._handle is not None:

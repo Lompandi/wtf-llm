@@ -144,11 +144,36 @@ itself.
 
 ## Missing — and what each one blocks
 
-### 1. `0vercl0k/snapshot` KD extension — blocks GATE 3
+### 1. A Windows guest VM — blocks the snapshot *acquisition* path
 
-DEVIATIONS D-007: snapshots are taken by a **separate** project's `snapshot.dll`
-loaded into KD, not by any script in this repo. Also needs Debugging Tools for
-Windows (WinDbg/KD) and a Windows VM to snapshot.
+Most of this is already here. What is missing is a guest, not virtualisation.
+
+| Piece | Status |
+|---|---|
+| Hypervisor | **VMware Workstation 17.6.2** — installed |
+| Kernel debugger | **`kd.exe` 10.0.26100.7705** — installed (Windows 10 SDK Debuggers) |
+| `!snapshot` extension | **`snapshot.dll` v0.2.5** — `D:\tools\snapshot` |
+| Windows guest VM | **missing** |
+
+**Hyper-V is not available on this host** (Windows 11 **Home**;
+`HyperVisorPresent: False`), so CLAUDE.md section 13.6's "Hyper-V VM" cannot be
+followed literally. It does not have to be: KD attaches over a serial port
+mapped to a named pipe, which VMware provides. See DEVIATIONS D-032.
+
+Remaining steps, and who does them:
+
+1. **(user)** obtain a Windows ISO — interactive, and a licensing decision;
+2. **(user)** create the VM with **one vCPU** and 4 GB RAM, install Windows;
+3. in the guest: run `scripts/disable-kva.cmd`, reboot (D-028);
+4. in the guest: `bcdedit /debug on` + `bcdedit /dbgsettings serial debugport:1`,
+   map the VM's serial port to a named pipe, attach `kd.exe`;
+5. `.load D:\tools\snapshot\snapshot.dll` then `!snapshot <state>`.
+
+Steps 3–5 are scripted: `python -m prep.snapshot_win kd-script --help`.
+
+Note this blocks only *taking our own* snapshots — edges 1, 6 and 7. CP4 through
+CP9 can all be built against the existing tlv_server snapshot, and GATE 3
+already passes on it.
 
 ### 2. `symbolizer-rs` — blocks GATE 4 and GATE 8
 
@@ -166,16 +191,23 @@ twice:
 
 Recorded in `config/fuzz.yaml` as `tools.symbolizer_rs: null`.
 
-### 3. Windows Hypervisor Platform — needed for GATE 4b
+### 3. Windows Hypervisor Platform — needed for GATE 4b, and in doubt
 
-DECISIONS DEC-005 pins the scaled fuzzing run to the whv backend, because it is
-the only backend on this host that actually consumes the CP2 coverage file.
-`Get-WindowsOptionalFeature -FeatureName HypervisorPlatform` requires
-administrator rights and has **not** been checked. Confirm before CP4b; CP1–CP4
-all run on bochscpu with a single worker.
+DECISIONS DEC-005 pins the scaled fuzzing run to the `whv` backend, because it
+is the only backend on this host that consumes the CP2 coverage file — bochscpu
+ignores `.cov` files entirely (D-004), so a bochscpu-only GATE 4b would never
+exercise edge 22.
 
-Note `kvm` is Linux-only, so on this host the worker backend choices are
-`bochscpu` (deterministic, slow) and `whv`.
+**This is now uncertain.** `whv` needs the Windows Hypervisor Platform, which
+needs the hypervisor running, and `HyperVisorPresent` is **`False`** on this
+Windows **Home** host (D-032). Whether WHP can be enabled on Home was not
+established — `Get-WindowsOptionalFeature` requires administrator rights.
+
+Resolve before CP4b. If WHP is unavailable, GATE 4b can still prove coverage
+aggregation across N workers on bochscpu, but edge 22 would need another route —
+worth deciding deliberately rather than discovering at the gate.
+
+`kvm` is Linux-only, so the local choices are `bochscpu` and possibly `whv`.
 
 ### 4. LLM endpoint details — blocks GATE 5
 

@@ -14,9 +14,9 @@ table and `arch/graph.yaml` agree, so they cannot drift apart.
 | 1 | Build wtf, run a bundled example | **PASS** | 2026-07-25 | tlv_server, 150 s, bochscpu: cov 12,636 and growing, corpus 0→32, 38 crashes, ~360 exec/s |
 | 2 | Ghidra headless BB enumeration -> A3 | **PASS** | 2026-07-25 | 17 tests. Closure 58 blocks / module 613; 97.4% recall vs wtf's own `.cov` |
 | 3 | Snapshot acquisition -> A1 | **PASS** | 2026-07-25 | **Scoped.** 19 tests; all four gate conditions met, but only edge 11 goes live — the *acquisition* path is unexercised, see the log below |
-| 4 | Fuzzer module + first real run (1 worker) | in progress | — | Module builds, registers, fuzzes, and **passes harness validation**. Remaining: the Python bridge modules and a >=10-min run |
-| 5 | LLM client | ready to start | — | Endpoint verified; `config/llm.yaml` filled in from live probes |
-| 4b | Distributed bring-up (>= 2 workers) | not started | — | New checkpoint; resolves the corpus ingest path |
+| 4 | Fuzzer module + first real run (1 worker) | **PASS** | 2026-07-25 | 33 tests. 663 s run, 32 new-coverage events, harness validation passes. Edge 22 held pending — bochscpu ignores `.cov` (D-004) |
+| 4b | Distributed bring-up (>= 2 workers) | not started | — | Resolves edge 22 and the whv question (D-032) |
+| 5 | LLM client | **PASS** | 2026-07-25 | 19 tests including live endpoint calls. All 5 roles answer; JSON round-trips into a contract; usage log and budget caps verified |
 | 6 | GhidraMCP + A2 + LLM entry selection | not started | — | |
 | 7 | Plateau detection + LLM seed gen | not started | — | |
 | 8 | Dedup, classification, replay, traces | not started | — | Needs `symbolizer-rs` |
@@ -43,28 +43,28 @@ sub-edges), plus 3 derived edges recorded in [DEVIATIONS.md](DEVIATIONS.md).
 | 10 | ghidra.bb_enumerate | a3_bp_list | 2 | live |
 | 11 | a1_snapshot | fuzz_target.snapshot | 3 | live |
 | 12 | a2_pseudoc_cache | fuzzer_module.llm_input_struct | 6 | pending |
-| 13 | a3_bp_list | fuzz_target.bp_list | 4 | pending |
-| 14 | fuzzer_module.llm_input_struct | fuzzer_module.bus | 4 | pending |
-| 15 | fuzzer_module.insert_testcase | fuzzer_module.bus | 4 | pending |
-| 16 | fuzzer_module.restore_hook | fuzzer_module.bus | 4 | pending |
-| 17 | fuzzer_module.manual_tweaks | fuzzer_module.bus | 4 | pending |
-| 18 | fuzzer_module.bus | fuzz_target.fuzzer_module | 4 | pending |
-| 19 | fuzz_target.fuzzer_config | master.corpus *(interface 1 — master only)* | 4, 4b | pending |
-| 20 | fuzz_target.snapshot | worker.execute *(interface 2 — per worker)* | 4, 4b | pending |
-| 21a | fuzz_target.fuzzer_module | master.mutator *(interface 2 — master)* | 4, 4b | pending |
-| 21b | fuzz_target.fuzzer_module | worker.execute *(interface 2 — per worker)* | 4, 4b | pending |
+| 13 | a3_bp_list | fuzz_target.bp_list | 4 | live |
+| 14 | fuzzer_module.llm_input_struct | fuzzer_module.bus | 4 | live |
+| 15 | fuzzer_module.insert_testcase | fuzzer_module.bus | 4 | live |
+| 16 | fuzzer_module.restore_hook | fuzzer_module.bus | 4 | live |
+| 17 | fuzzer_module.manual_tweaks | fuzzer_module.bus | 4 | live |
+| 18 | fuzzer_module.bus | fuzz_target.fuzzer_module | 4 | live |
+| 19 | fuzz_target.fuzzer_config | master.corpus *(interface 1 — master only)* | 4, 4b | live |
+| 20 | fuzz_target.snapshot | worker.execute *(interface 2 — per worker)* | 4, 4b | live |
+| 21a | fuzz_target.fuzzer_module | master.mutator *(interface 2 — master)* | 4, 4b | live |
+| 21b | fuzz_target.fuzzer_module | worker.execute *(interface 2 — per worker)* | 4, 4b | live |
 | 22 | fuzz_target.bp_list | worker.execute *(interface 3 — per worker)* | 4, 4b | pending |
-| 23 | master.corpus | master.mutator *(generation on the MASTER)* | 4, 4b | pending |
-| 23b | master.mutator | worker.execute *(over the wire)* | 4, 4b | pending |
-| 24 | worker.execute | worker.coverage | 4, 4b | pending |
-| 25 | worker.coverage | master.aggregate_coverage | 4, 4b | pending |
-| 26 | master.aggregate_coverage | master.corpus *(requeue, fast clock)* | 4, 4b | pending |
+| 23 | master.corpus | master.mutator *(generation on the MASTER)* | 4, 4b | live |
+| 23b | master.mutator | worker.execute *(over the wire)* | 4, 4b | live |
+| 24 | worker.execute | worker.coverage | 4, 4b | live |
+| 25 | worker.coverage | master.aggregate_coverage | 4, 4b | live |
+| 26 | master.aggregate_coverage | master.corpus *(requeue, fast clock)* | 4, 4b | live |
 | 27 | master.aggregate_coverage | slow_clock.llm_seed_gen *(plateau)* | 7 | pending |
 | 28 | a2_pseudoc_cache | slow_clock.llm_seed_gen | 6 | pending |
 | 29 | slow_clock.llm_seed_gen | master.corpus *(new seeds)* | 7 | pending |
-| 30 | master.corpus | a4_corpus | 4, 4b | pending |
-| 31 | worker.execute | master.crash_collect | 4, 4b | pending |
-| 31b | master.crash_collect | a5_crashes *(derived)* | 4, 4b | pending |
+| 30 | master.corpus | a4_corpus | 4, 4b | live |
+| 31 | worker.execute | master.crash_collect | 4, 4b | live |
+| 31b | master.crash_collect | a5_crashes *(derived)* | 4, 4b | live |
 | 32 | a4_corpus | analysis.cov_trace_gen | 10 | pending |
 | 32b | analysis.cov_trace_gen | analysis.symbolize_cov | 10 | pending |
 | 32c | analysis.symbolize_cov | analysis.lighthouse_report | 10 | pending |
@@ -121,6 +121,111 @@ One modelling note worth flagging: the §3.1 diagram marks the custom
 The mutator *consumes* LLM seeds on the master's hot path and must never call
 the LLM itself. `graph.yaml` therefore separates `ours: llm_layer` from
 `calls_llm`, and the gate enforces it.
+
+### 2026-07-25 (8) — GATE 4 PASS; 18 edges live
+
+**GATE 4 PASS**, 33 tests. Final run: **663 s**, one worker on bochscpu, module
+`snapfuzz`, **32 new-coverage events**, corpus 41 → 42, harness validation
+passing. 18 edges now live (13–21b, 23–26, 30–31b).
+
+**Edge 22 is deliberately held pending.** It delivers the coverage breakpoint
+list to a worker, and bochscpu **ignores `.cov` files entirely** (D-004), so CP4
+never exercised it. This is precisely what DEC-005 predicted and why it exists;
+marking it live because the file is in place would be the "done because the code
+exists" failure RULE 3 prohibits. It resolves at CP4b on `whv` — assuming WHP can
+be enabled on Windows Home, which D-032 leaves open.
+
+**Getting to a trustworthy result took three failed measurement approaches**, and
+the lesson generalises past this checkpoint:
+
+1. **Reading the master through a pipe.** A 90-second run yielded **zero**
+   parsable stat lines while the fuzzer ran at 360 exec/s. The runner reported
+   `coverage grew: False` about a completely healthy campaign.
+2. **Redirecting to a file and tailing it.** Better, but a 663-second run left
+   only **8 lines covering the first 72 seconds** — `TerminateProcess` never
+   flushes C stdio.
+3. **Ctrl+Break for a graceful exit.** The master accepts it and exits, and the
+   log was still **0 bytes** after 123 seconds.
+
+The signal that works is the **filesystem**: the master writes to `outputs/`
+exactly when a testcase produces new coverage, and that is not buffered. During
+the 0-byte-log run it had saved 30 new-coverage testcases. All of this is D-033.
+
+Worth stating plainly because it nearly went the other way: at step 1 the
+evidence said "coverage did not grow", and the correct conclusion was that the
+*measurement* was wrong, not the fuzzer. The tell was `outputs/` growing by 30
+while the metric said zero.
+
+**A second measurement bug, caught the same way.** `CrashWatcher` de-slid every
+fault address with the target module's slide. But 48 of 55 crashes faulted at
+`0x7ff8aa3812de`–`0x7ff8aa38167c`, which is not the target and not any module in
+`symbol-store.json` — ~192 KB below `verifier.dll`, most likely the Application
+Verifier stack. De-sliding those produced `0x2d05312de`: a fictitious address
+that would have hashed cleanly and bucketed consistently. Now a fault is de-slid
+only when it lies inside the target module, and `CrashRecord.fault_module` records
+the attribution. Full detail and the CP8 consequences in D-035.
+
+That finding strengthens D-024's case considerably: fault-address bucketing does
+not merely split one bug into 38 buckets, it buckets on *where the guard
+mechanism noticed* rather than *what the parser did wrong*. It is also concrete
+evidence for CP8's signal 4 — the execution trace is what walks back from the
+verifier frame to the origin.
+
+### 2026-07-25 (7) — GATE 5 PASS; VM prerequisites resolved
+
+**GATE 5 PASS.** `llm/client.py` takes a **role**, never a model name. 19 tests,
+including live endpoint calls behind `SNAPFUZZ_LIVE_LLM=1` so a normal test run
+spends no allocation.
+
+All four gate conditions met. Measured latencies for the same trivial prompt:
+
+| role | model | latency |
+|---|---|---|
+| triage | nemotron-3-ultra-550b | 0.1 s |
+| seed_gen / entry_select / dspy_bootstrap | nemotron-cascade-2-30b | 0.3 s |
+| crash_prefilter | gemma-4-26b | 1.9 s |
+
+Two findings went into the client rather than being worked around:
+
+- **D-030** — `content` can be `null` on an HTTP 200 when a reasoning model
+  exhausts `max_tokens`. The client treats that plus `finish_reason == "length"`
+  as a retryable error and **doubles the budget**, rather than reporting an empty
+  answer. A gate test asserts every reasoning model's role has >= 4096 tokens.
+- **D-034** — describing the wanted fields in prose got well-formed JSON with
+  *invented* field names (`memcpy_offset` for `length_offset`, one required field
+  omitted), and the retry could not recover because it never learned the real
+  names. `complete_json` now embeds `model_json_schema()` in the prompt. Same
+  call, first-try success. This matters for CP6 and CP9, where `FuzzEntry` and
+  `TriageVerdict` go through the same path.
+
+The token is read from a gitignored `.env` (tolerating the BOM that PowerShell
+5.1's `Set-Content -Encoding utf8` writes), and a gate test refuses a config with
+an inline `api_key`.
+
+**VM prerequisites — mostly already satisfied (D-032).** CLAUDE.md section 13.6
+says "Hyper-V VM", and Hyper-V is **not available on this host** (Windows 11
+Home; `HyperVisorPresent: False`) — though the CPU meets every requirement, so
+it is purely an edition limit.
+
+The requirement is weaker than the README implies: what is needed is a Windows
+guest with KD attached over a serial-to-named-pipe, which is not Hyper-V
+specific. Three of the four pieces were already here or are now:
+
+| Piece | Status |
+|---|---|
+| Hypervisor | VMware Workstation 17.6.2 — already installed |
+| Kernel debugger | `kd.exe` 10.0.26100.7705 — already installed |
+| `!snapshot` extension | `snapshot.dll` v0.2.5 — downloaded to `D:\tools\snapshot` |
+| **Windows guest VM** | **missing** — needs an ISO and an interactive install |
+
+So no hypervisor to install; a guest to create. Steps 3–5 of the procedure are
+scripted (`python -m prep.snapshot_win kd-script`).
+
+**This does put DEC-005 in doubt**, and it is better flagged now than discovered
+at CP4b: that decision pins the scaled run to `whv` because it is the only local
+backend that consumes the CP2 coverage file, but `whv` needs the hypervisor
+running. If WHP cannot be enabled on Home, GATE 4b proves coverage aggregation
+on bochscpu but leaves edge 22 unexercised.
 
 ### 2026-07-25 (6) — CP4 in progress; LLM endpoint verified; symbolizer-rs installed
 

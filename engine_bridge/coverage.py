@@ -155,10 +155,36 @@ class CoverageTracker:
 
     @property
     def is_growing(self) -> bool:
-        """Did coverage increase at any point? GATE 4 requires growth."""
-        return any(s.new_edges > 0 for s in self.history[1:]) or (
-            len(self.history) == 1 and self.history[0].total_edges > 0
+        """Did coverage increase beyond its first observed value?
+
+        Compares first and last totals rather than looking for a nonzero delta
+        after tick 1. The earlier version did the latter and got the answer
+        WRONG on a real 663-second run: because the master block-buffers its log
+        (D-033), the entire coverage ramp arrived inside tick 1, so every
+        subsequent delta was 0 and growth was reported as False -- while 30 new
+        testcases had been saved to outputs/, which the master only does on new
+        coverage.
+
+        Feed this every stat line the master emitted, not one sample per tick,
+        or the resolution problem comes back.
+        """
+        if not self.history:
+            return False
+        totals = [s.total_edges for s in self.history]
+        return max(totals) > min(totals) or (
+            len(totals) == 1 and totals[0] > 0
         )
+
+    @property
+    def grew_after_the_first_sample(self) -> bool:
+        """Stricter: new coverage found after the initial ramp was observed.
+
+        This is the interesting question for CP7 -- it distinguishes "the
+        harness reached the baseline" from "the fuzzer is still discovering".
+        Kept separate from :attr:`is_growing` because it is only meaningful when
+        sampling resolution is good enough to see the ramp.
+        """
+        return any(s.new_edges > 0 for s in self.history[1:])
 
     def write_jsonl(self, path: Path) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)

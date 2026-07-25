@@ -381,41 +381,41 @@ edges:
   - id: "13"
     from: a3_bp_list
     to: fuzz_target.bp_list
-    status: pending
+    status: live
     gates: [4]
 
   # --- stage 2: module construction -------------------------------------
   - id: "14"
     from: fuzzer_module.llm_input_struct
     to: fuzzer_module.bus
-    status: pending
+    status: live
     gates: [4]
   - id: "15"
     from: fuzzer_module.insert_testcase
     to: fuzzer_module.bus
-    status: pending
+    status: live
     gates: [4]
   - id: "16"
     from: fuzzer_module.restore_hook
     to: fuzzer_module.bus
-    status: pending
+    status: live
     gates: [4]
   - id: "17"
     from: fuzzer_module.manual_tweaks
     to: fuzzer_module.bus
-    status: pending
+    status: live
     gates: [4]
   - id: "18"
     from: fuzzer_module.bus
     to: fuzz_target.fuzzer_module
-    status: pending
+    status: live
     gates: [4]
 
   # --- stage 2: the three interfaces, with their fan-out ----------------
   - id: "19"
     from: fuzz_target.fuzzer_config
     to: master.corpus
-    status: pending
+    status: live
     gates: [4, "4b"]
     interface: 1
     interface_name: initial seeds
@@ -423,7 +423,7 @@ edges:
   - id: "20"
     from: fuzz_target.snapshot
     to: worker.execute
-    status: pending
+    status: live
     gates: [4, "4b"]
     interface: 2
     interface_name: target executable
@@ -432,7 +432,7 @@ edges:
   - id: "21a"
     from: fuzz_target.fuzzer_module
     to: master.mutator
-    status: pending
+    status: live
     gates: [4, "4b"]
     interface: 2
     interface_name: target executable
@@ -443,7 +443,7 @@ edges:
   - id: "21b"
     from: fuzz_target.fuzzer_module
     to: worker.execute
-    status: pending
+    status: live
     gates: [4, "4b"]
     interface: 2
     interface_name: target executable
@@ -465,14 +465,14 @@ edges:
   - id: "23"
     from: master.corpus
     to: master.mutator
-    status: pending
+    status: live
     gates: [4, "4b"]
     clock: fast
     note: MUTATION/GENERATION HAPPENS ON THE MASTER, not on the worker.
   - id: "23b"
     from: master.mutator
     to: worker.execute
-    status: pending
+    status: live
     gates: [4, "4b"]
     clock: fast
     fanout: per_worker
@@ -480,14 +480,14 @@ edges:
   - id: "24"
     from: worker.execute
     to: worker.coverage
-    status: pending
+    status: live
     gates: [4, "4b"]
     clock: fast
     fanout: per_worker
   - id: "25"
     from: worker.coverage
     to: master.aggregate_coverage
-    status: pending
+    status: live
     gates: [4, "4b"]
     clock: fast
     fanout: per_worker
@@ -495,7 +495,7 @@ edges:
   - id: "26"
     from: master.aggregate_coverage
     to: master.corpus
-    status: pending
+    status: live
     gates: [4, "4b"]
     clock: fast
     note: Requeue on new coverage -- decided at the MASTER. No LLM.
@@ -527,18 +527,18 @@ edges:
   - id: "30"
     from: master.corpus
     to: a4_corpus
-    status: pending
+    status: live
     gates: [4, "4b"]
   - id: "31"
     from: worker.execute
     to: master.crash_collect
-    status: pending
+    status: live
     gates: [4, "4b"]
     fanout: per_worker
   - id: "31b"
     from: master.crash_collect
     to: a5_crashes
-    status: pending
+    status: live
     gates: [4, "4b"]
     derived: true
     note: >-

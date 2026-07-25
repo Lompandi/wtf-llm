@@ -126,7 +126,14 @@ class CrashRecord(BaseModel):
     input_bytes: bytes
     fault_type: str  # access-violation / abort / illegal-insn / timeout
     fault_runtime_addr: int
-    fault_static_addr: int  # de-slid -- see CLAUDE.md section 9
+    # De-slid (section 9) -- but ONLY when the fault lands inside the target
+    # module. 0 means "not attributable to our module", which is the common case:
+    # Application Verifier raises from verifier.dll when it catches a heap
+    # overflow, and applying our slide to that address yields garbage.
+    fault_static_addr: int
+    # Which module the fault address belongs to, when it can be determined.
+    # Distinguishes "faulted in the parser" from "the heap manager noticed".
+    fault_module: str | None = None
     registers: dict[str, int] = Field(default_factory=dict)
     backtrace: list[int] = Field(default_factory=list)  # static addrs where recoverable
     coverage_delta: int = 0
