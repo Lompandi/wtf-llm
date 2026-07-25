@@ -1,0 +1,30 @@
+# snapfuzz Python dependencies (CLAUDE.md section 4).
+#
+# Only what a passed checkpoint actually needs is uncommented. The rest are
+# listed here, at the checkpoint that first requires them, so the full set from
+# section 4 stays visible without installing tools we cannot yet exercise.
+#
+#   .venv\Scripts\python.exe -m pip install -r requirements.txt
+
+# --- CP0: contracts, config, gates ---
+pydantic>=2.7          # data contracts (section 6)
+pyyaml>=6.0            # config and arch/graph.yaml
+pytest>=8.0            # the interface gates (RULE 3)
+
+# --- CP4: fuzzer run + engine bridge ---
+# loguru>=0.7          # structured logging with a clock=fast|slow field
+
+# --- CP5: LLM client ---
+# httpx>=0.27          # HTTP client for the OpenAI-compatible endpoint
+# openai>=1.30         # optional convenience client for the same endpoint
+
+# --- CP8: crash classification ---
+# capstone>=5.0        # disassembly around a fault address
+
+# --- CP9: triage + report ---
+# dspy>=2.5            # triage prompt program + optimisation
+# jinja2>=3.1          # GHSA Markdown report templating
+
+# --- CP10: optional dashboard ---
+# fastapi>=0.111
+# uvicorn>=0.30

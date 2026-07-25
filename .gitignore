@@ -37,3 +37,25 @@ src/build/
 src/build_msvc/
 src/out
 targets/
+
+# --- snapfuzz (CLAUDE.md section 5) ---
+# NOTE: `src/wtf/fuzzer_*` above is upstream's and is deliberately left alone.
+# It means our CP4 module must NOT live at src/wtf/fuzzer_snapfuzz.cc as its
+# home -- git would silently ignore it. The source of record is
+# fuzzer/module/; fuzzer/build.py copies it into src/wtf/ at build time, where
+# being ignored is correct. See docs/DEVIATIONS.md D-012.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# SECRETS. The LLM token lives here and must NEVER be committed
+# (CLAUDE.md section 7.1, section 10). config/llm.yaml holds the base URL and
+# model routing; the token is read from the environment only.
+.env
+.env.*
+!.env.example
+
+# Generated pipeline artifacts (A1-A5) and logs.
+artifacts/
+logs/
