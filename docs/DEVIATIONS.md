@@ -1325,17 +1325,42 @@ incompatibilities, both fixed by repacking:
    instead, and a manifest holding only a comment is valid (see the bundled
    `BSimFeatureVisualizer`).
 
-**Repacked and installed** to
-`D:\tools\ghidra_12.1.2_PUBLIC\Ghidra\Extensions\GhidraMCP` with
-`ghidraVersion=12.1.2` and a comment-only manifest. Ghidra 12 now loads without
-manifest errors or exceptions.
+3. **The `extension.properties` schema itself changed**, and this is the one
+   that actually mattered. A first repack set `version=1.4` and
+   `ghidraVersion=12.1.2`, on the assumption that `version` was the extension's
+   own version. Ghidra 12 **silently ignored the extension** — no log line, no
+   dialog, and the extension-point count unchanged. It simply never appeared in
+   File → Configure.
 
-**API compatibility looks likely but is UNVERIFIED.** `javap` shows the plugin
-extends `ghidra.framework.plugintool.Plugin` and touches
-`ghidra.program.model.pcode.HighFunction` / `HighSymbol` and
-`ghidra.program.model.listing.Program` — all long-stable core APIs. Nothing
-suggests a break, but "the class references stable packages" is not the same as
-"the server answers a request".
+   Comparing against a bundled Ghidra 12 extension (`SampleTablePlugin`) showed
+   the real schema:
+
+   ```properties
+   name=SampleTablePlugin
+   description=Sample plugin for creating and manipulating a table
+   author=Ghidra Team
+   createdOn=pre-4/6/2015
+   version=12.1.2          <- the GHIDRA version; this is the compatibility key
+   ```
+
+   There is **no `ghidraVersion` key at all** in Ghidra 12, and `Module.manifest`
+   is **0 bytes**. So the correct repack is `version=12.1.2`, no `ghidraVersion`,
+   and an empty manifest.
+
+**Installed** at `D:\tools\ghidra_12.1.2_PUBLIC\Ghidra\Extensions\GhidraMCP`,
+which is the right location (matches the bundled extensions' layout; there is no
+user-level extension directory and no extension entry in `preferences`).
+
+**API compatibility: checked, not assumed.** Every `ghidra/*` class the plugin
+references was extracted from its constant pool and looked up across all 203
+Ghidra 12 jars (55,793 classes): **51 referenced, 0 missing**, including
+`ghidra.app.decompiler.DecompInterface` and `DecompileResults`, which is what
+the `/decompile` endpoint needs. So the class will link.
+
+Confirmed from the bytecode rather than the README: `DEFAULT_PORT = 8080`,
+configurable via a "Server Port" option, and the endpoints are `/methods`,
+`/classes`, `/decompile`, `/segments`, `/renameFunction`, `/renameData`,
+`/renameVariable`.
 
 **What is genuinely not yet verified, and why:** GhidraMCP is a **GUI plugin**.
 Its embedded HTTP server starts only when the plugin is enabled inside a running

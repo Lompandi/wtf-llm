@@ -223,15 +223,31 @@ Installed at CP6 as CLAUDE.md section 4 requires (not before).
 
 `D:\tools\ghidra_12.1.2_PUBLIC\Ghidra\Extensions\GhidraMCP`, from
 `LaurieWired/GhidraMCP` release **1.4** (2025-06-23). It needed **repacking** for
-Ghidra 12 — see DEVIATIONS D-039:
+Ghidra 12 — see DEVIATIONS D-039. The final, working files are:
 
-- `extension.properties` declared `ghidraVersion=11.3.2`; set to `12.1.2`;
-- `Module.manifest` used the old `KEY=VALUE` form, which Ghidra 12 rejects
-  outright; replaced with a comment-only manifest.
+```properties
+# extension.properties -- `version` is the GHIDRA version, and there is
+# no `ghidraVersion` key in Ghidra 12.
+name=GhidraMCP
+description=A plugin that runs an embedded HTTP server to expose program data.
+author=LaurieWired
+createdOn=2025-03-22
+version=12.1.2
+```
 
-Ghidra 12 now loads it with no manifest errors and no exceptions, and the plugin
-only touches long-stable APIs (`Plugin`, `HighFunction`, `HighSymbol`,
-`Program`).
+plus a **0-byte `Module.manifest`** (the old `KEY=VALUE` form is rejected
+outright).
+
+Getting `version` wrong makes Ghidra ignore the extension **silently** — no log
+line, no dialog, and it just never appears in File → Configure.
+
+**API compatibility checked, not assumed:** all 51 `ghidra/*` classes the plugin
+references were resolved against Ghidra 12's 203 jars — 0 missing, including
+`DecompInterface` and `DecompileResults`, which `/decompile` needs.
+
+From the bytecode: `DEFAULT_PORT = 8080` (configurable via a "Server Port"
+option), endpoints `/methods`, `/classes`, `/decompile`, `/segments`,
+`/renameFunction`, `/renameData`, `/renameVariable`.
 
 **Still unverified, and it needs a person.** GhidraMCP is a GUI plugin: its HTTP
 server starts only when the plugin is enabled inside a running Ghidra GUI with a
