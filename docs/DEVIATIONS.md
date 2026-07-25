@@ -1362,11 +1362,45 @@ configurable via a "Server Port" option, and the endpoints are `/methods`,
 `/classes`, `/decompile`, `/segments`, `/renameFunction`, `/renameData`,
 `/renameVariable`.
 
-**What is genuinely not yet verified, and why:** GhidraMCP is a **GUI plugin**.
-Its embedded HTTP server starts only when the plugin is enabled inside a running
-Ghidra GUI with a program open (File → Configure → check GhidraMCP). Headless
-never instantiates it, so `analyzeHeadless` cannot exercise it and GATE 6's
-"GhidraMCP answers a live decompile request" needs an interactive step.
+4. **It is listed under the `Developer` plugin package, not `Miscellaneous`.**
+   This cost the most time, because "the extension is installed but does not
+   appear in File → Configure" looks exactly like a load failure. It was not.
+   From the `@PluginInfo` annotation in the bytecode:
+
+   ```
+   status      = RELEASED
+   packageName = Developer
+   category    = Analysis
+   ```
+
+   Ghidra's Configure dialog groups by **package**, so it appears under
+   **Developer**. Nothing was wrong by the time we looked there.
+
+**Verified working, 2026-07-25.** `/methods` returns 200 functions including
+`ProcessPacket`; `POST /decompile` with the function name as the request **body**
+returns 4,867 characters of pseudo-C. GATE 6's "GhidraMCP answers a live
+decompile request" is satisfied.
+
+The endpoint contract, for `llm/ghidra_mcp.py`:
+
+| | |
+|---|---|
+| base | `http://127.0.0.1:8080` (`DEFAULT_PORT`, configurable via the "Server Port" option) |
+| `/methods` | function names, one per line; takes `limit` |
+| `/decompile` | **POST**, function **name** as the raw body, returns pseudo-C |
+| others | `/classes`, `/segments`, `/renameFunction`, `/renameData`, `/renameVariable` |
+
+**The operational constraint remains, and it shapes CP6/CP8.** GhidraMCP is a GUI
+plugin: the server runs only while a Ghidra GUI is open with the program loaded
+and the plugin enabled. `analyzeHeadless` never instantiates it. So it cannot be
+part of an unattended pipeline, which is why A2 is built by **batch headless
+decompilation** and GhidraMCP serves only the interactive on-demand lookup for an
+address missing from the cache.
+
+Note also that this pseudo-C is unusually good because `tlv_server.pdb` ships
+alongside the binary — real parameter and function names. A genuine no-source
+target yields `FUN_140001150(long param_1, ...)`, which is the material
+`entry_select` and triage must actually cope with (DEC-007).
 
 **Scope consequence, worth being clear about.** GhidraMCP is *not* on the
 critical path for **A2**: CP6 builds the pseudo-C cache by **batch headless

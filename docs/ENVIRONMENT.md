@@ -249,21 +249,36 @@ From the bytecode: `DEFAULT_PORT = 8080` (configurable via a "Server Port"
 option), endpoints `/methods`, `/classes`, `/decompile`, `/segments`,
 `/renameFunction`, `/renameData`, `/renameVariable`.
 
-**Still unverified, and it needs a person.** GhidraMCP is a GUI plugin: its HTTP
-server starts only when the plugin is enabled inside a running Ghidra GUI with a
-program open. To finish GATE 6's "GhidraMCP answers a live decompile request":
+**VERIFIED working 2026-07-25.** `/methods` returned 200 functions including
+`ProcessPacket`, and `POST /decompile` returned 4,867 characters of pseudo-C.
+
+To bring it up (it is a GUI plugin — the server runs only while Ghidra is open):
 
 1. `D:\tools\ghidra_12.1.2_PUBLIC\ghidraRun.bat`
-2. open `targets/tlv_server/target/tlv_server.exe` in the CodeBrowser
-3. File → Configure → Miscellaneous → tick **GhidraMCP**
-4. check the server is up (default `http://127.0.0.1:8080/`)
+2. File → Open Project → `D:\wtf-llm\artifacts\ghidra\snapfuzz.gpr`
+   (pre-built and analysed headlessly, so no import or analysis wait)
+3. double-click `tlv_server.exe`
+4. **File → Configure… → `Developer`** → tick **GhidraMCP**
+   — it is under **Developer**, *not* Miscellaneous; the plugin declares
+   `packageName=Developer`. Looking in the wrong group is indistinguishable from
+   a load failure and cost real time.
 
-The bridge script for an MCP client is at
+Endpoint contract for `llm/ghidra_mcp.py`:
+
+| | |
+|---|---|
+| base | `http://127.0.0.1:8080` (configurable via the "Server Port" option) |
+| `/methods` | function names, one per line; takes `limit` |
+| `/decompile` | **POST**, function **name** as the raw body → pseudo-C |
+| others | `/classes`, `/segments`, `/renameFunction`, `/renameData`, `/renameVariable` |
+
+The MCP bridge script (for an MCP client rather than raw HTTP) is at
 `D:\tools\ghidramcp\GhidraMCP-release-1-4\bridge_mcp_ghidra.py`.
 
-**Not a blocker for most of CP6.** A2 is built by batch *headless*
-decompilation, which needs no plugin. GhidraMCP serves only the on-demand lookup
-for an address missing from the cache, which CP8 needs at triage time.
+**Not usable unattended, by design.** `analyzeHeadless` never instantiates a GUI
+plugin, so GhidraMCP cannot be part of an automated run. A2 is therefore built by
+batch *headless* decompilation, and GhidraMCP serves only the interactive
+on-demand lookup for an address missing from the cache (CP8 triage).
 
 ## Reproducing the CP0 environment
 
