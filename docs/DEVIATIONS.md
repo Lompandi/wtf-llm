@@ -1302,3 +1302,55 @@ after the fact.
 Worth generalising: a gate that reads a mutable shared path is not reproducible,
 and CP7 and CP10 both need before/after comparisons across runs. Every future
 gate run gets a label.
+
+---
+
+## D-039 — GhidraMCP predates Ghidra 12 and needs repacking
+
+**Confirmed.** GhidraMCP's latest release is **1.4 (2025-06-23)**; our Ghidra is
+**12.1.2 (2026-06-05)**, a year and a major version newer. Two independent
+incompatibilities, both fixed by repacking:
+
+1. **Declared version.** `extension.properties` says `ghidraVersion=11.3.2`, and
+   Ghidra refuses to load an extension whose declared version does not match.
+2. **`Module.manifest` format changed.** GhidraMCP ships the old `KEY=VALUE`
+   form and Ghidra 12 rejects it outright:
+
+   ```
+   Module manifest file error on line 2 of .../GhidraMCP/Module.manifest
+       -> Invalid line encountered: GHIDRA_MODULE_NAME=GhidraMCP
+   ```
+
+   Ghidra 12 manifests contain `MODULE FILE LICENSE:` and `##MODULE IP:` lines
+   instead, and a manifest holding only a comment is valid (see the bundled
+   `BSimFeatureVisualizer`).
+
+**Repacked and installed** to
+`D:\tools\ghidra_12.1.2_PUBLIC\Ghidra\Extensions\GhidraMCP` with
+`ghidraVersion=12.1.2` and a comment-only manifest. Ghidra 12 now loads without
+manifest errors or exceptions.
+
+**API compatibility looks likely but is UNVERIFIED.** `javap` shows the plugin
+extends `ghidra.framework.plugintool.Plugin` and touches
+`ghidra.program.model.pcode.HighFunction` / `HighSymbol` and
+`ghidra.program.model.listing.Program` — all long-stable core APIs. Nothing
+suggests a break, but "the class references stable packages" is not the same as
+"the server answers a request".
+
+**What is genuinely not yet verified, and why:** GhidraMCP is a **GUI plugin**.
+Its embedded HTTP server starts only when the plugin is enabled inside a running
+Ghidra GUI with a program open (File → Configure → check GhidraMCP). Headless
+never instantiates it, so `analyzeHeadless` cannot exercise it and GATE 6's
+"GhidraMCP answers a live decompile request" needs an interactive step.
+
+**Scope consequence, worth being clear about.** GhidraMCP is *not* on the
+critical path for **A2**: CP6 builds the pseudo-C cache by **batch headless
+decompilation**, which needs no plugin. GhidraMCP serves only the **on-demand**
+lookup for an address missing from the cache, which CP8 needs at triage time when
+a fault lands somewhere uncached. So A2, `get_by_addr`, and `entry_select` can all
+be built and gated before the GUI step happens.
+
+If the plugin turns out to be broken on Ghidra 12, the fallback is a small
+headless decompile service of our own — the same `analyzeHeadless` machinery CP2
+already drives, exposed over a socket. Recorded now so the decision is not made
+under pressure at CP8.

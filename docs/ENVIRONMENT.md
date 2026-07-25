@@ -217,9 +217,37 @@ worth deciding deliberately rather than discovering at the gate.
 scheme, exact model names, context limits, rate limits and streaming support
 here. Deliberately not guessed.
 
-### 5. GhidraMCP — CP6, deliberately not yet
+### 5. GhidraMCP 1.4 — installed, repacked, not yet verified
 
-CLAUDE.md section 4 is explicit: install at CP6, not before.
+Installed at CP6 as CLAUDE.md section 4 requires (not before).
+
+`D:\tools\ghidra_12.1.2_PUBLIC\Ghidra\Extensions\GhidraMCP`, from
+`LaurieWired/GhidraMCP` release **1.4** (2025-06-23). It needed **repacking** for
+Ghidra 12 — see DEVIATIONS D-039:
+
+- `extension.properties` declared `ghidraVersion=11.3.2`; set to `12.1.2`;
+- `Module.manifest` used the old `KEY=VALUE` form, which Ghidra 12 rejects
+  outright; replaced with a comment-only manifest.
+
+Ghidra 12 now loads it with no manifest errors and no exceptions, and the plugin
+only touches long-stable APIs (`Plugin`, `HighFunction`, `HighSymbol`,
+`Program`).
+
+**Still unverified, and it needs a person.** GhidraMCP is a GUI plugin: its HTTP
+server starts only when the plugin is enabled inside a running Ghidra GUI with a
+program open. To finish GATE 6's "GhidraMCP answers a live decompile request":
+
+1. `D:\tools\ghidra_12.1.2_PUBLIC\ghidraRun.bat`
+2. open `targets/tlv_server/target/tlv_server.exe` in the CodeBrowser
+3. File → Configure → Miscellaneous → tick **GhidraMCP**
+4. check the server is up (default `http://127.0.0.1:8080/`)
+
+The bridge script for an MCP client is at
+`D:\tools\ghidramcp\GhidraMCP-release-1-4\bridge_mcp_ghidra.py`.
+
+**Not a blocker for most of CP6.** A2 is built by batch *headless*
+decompilation, which needs no plugin. GhidraMCP serves only the on-demand lookup
+for an address missing from the cache, which CP8 needs at triage time.
 
 ## Reproducing the CP0 environment
 
