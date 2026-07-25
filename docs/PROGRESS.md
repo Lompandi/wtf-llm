@@ -23,6 +23,7 @@ table and `arch/graph.yaml` agree, so they cannot drift apart.
 | 9 | DSPy triage (5 signals) + report | **PASS** | 2026-07-25 | 30 tests. All 4 real buckets triaged with **all five signals**; reads rated CWE-125/info_leak and writes CWE-122/possible_rce. Held-out split **4/4** (precision 1.00, recall 1.00) — but **n=4** and the negatives are synthetic, so the number is indicative only. GHSA advisory renders confirmed-only; discards logged |
 | 11 | LLM-derived input structure (edges 12, 14) | **PASS** | 2026-07-26 | **Scoped**, like GATE 3. 33 tests. **NOT A GATE IN CLAUDE.md** -- section 8 lists neither edge, which is why this was the last component built (D-055). Edge 12 **live**: the derived spec reproduces the hand-written layout exactly. Edge 14 held **pending** -- and CORRECTED from live: it was never the LLM-derived struct that reached the bus |
 | 10 | Evaluation harness | **PASS** | 2026-07-25 | 22 tests. 5 arms (both built-in mutators + system + both ablations), identical budget/seed/workers. **4 distinct bugs vs 2 and 1**, **+3,095 coverage** over the best baseline, at **70×/366× fewer executions per bug** — despite 10–31× lower throughput. **LLM seed gen's contribution is NOT demonstrated** (4 vs 4 buckets against the no-seedgen ablation). Curves plotted; numbers in docs/RESULTS.md |
+| 12 | Pipeline driver, end to end (`orchestrator/pipeline.py`) | **PASS** | 2026-07-26 | 61 tests, almost all **negative**. **NOT A GATE IN CLAUDE.md** -- section 8 defines no checkpoint for a driver, which is why the eleven false-success holes in D-057 existed at all: nothing could go red. Now every stage names the artifact that proves it ran, content is checked (not just existence), stages whose work is *time* are never skipped as up-to-date, `--only`/`--from` typos are errors, and the summary returns non-zero if anything failed, was blocked or was never reached. Stage 07a (KD acquisition) is **written and unexercised** -- edges 1/6/6b/7/8 stay `pending` |
 
 ## Edges
 
@@ -88,6 +89,76 @@ sub-edges), plus 3 derived edges recorded in [DEVIATIONS.md](DEVIATIONS.md).
 | 1000 | ghidra.analyze | ghidra.fuzz_entry_selection *(derived)* | 6 | live |
 
 ## Log
+
+### 2026-07-26 (16) — snapshot acquisition automated, and setup collapsed to one command
+
+**Two things that had been "a person does this" became code**, and a third was
+deliberately left as a person's job because it cannot be anything else.
+
+**1. Snapshot acquisition now drives KD instead of printing its commands.**
+`build_kd_commands` emitted a command list to paste; `acquire_snapshot` runs the
+session unattended:
+
+```
+kd.exe -k com:pipe,port=\\.\pipe\snapfuzz,resets=0,reconnect
+       -c ".load <snapshot.dll>; bp <mod>!<entry> \"!snapshot -k full <state>; qq\"; g"
+```
+
+The load-bearing detail is that **the work hangs off the breakpoint, not off the
+`-c` string after `g`.** Sequencing `!snapshot` after `g` assumes KD resumes
+executing that string once the break fires, which it does not promise. Attaching the
+command list to `bp` is the reliable idiom — and it also removes the last thing that
+looked like human judgement: the breakpoint **is** the definition of "the state worth
+snapshotting", so hitting it is the judgement.
+
+**Verified against `kd -?`** (RULE 2 applied to a companion tool): `-c` executes a
+command at the first debugger prompt, `-k` gives the transport, `-y` the symbol path,
+`-logo` a transcript.
+
+**It has never run against a guest.** There is no VM on this host, so what is tested
+is the argv it produces, each refusal, and the Windows quoting — not the
+orchestration. Edges 1/6/6b/7/8 therefore stay `pending`, and both the code and the
+README say "NEVER EXERCISED" rather than implying otherwise. Two bugs were caught
+before any VM existed, purely by printing the command in `--dry-run`: **D-058** (the
+`<ENTRY>` placeholder embedded in a larger argument, which would have produced an
+unbindable breakpoint whose symptom is identical to "no stimulus arrived") and
+**D-059** (POSIX shell splitting turning `tools\poke.py` into `toolspoke.py`).
+
+**2. What genuinely cannot be automated, stated once:** something must drive the
+target to its parser. For a service, `g` never returns until a client connects.
+`--kd-stimulus` runs a command for that and `tools/poke_tcp.py` is a generic
+implementation, but *what* to send and *on which port* is not derivable from the
+binary. That is target-specific stimulus, not judgement, and it is the honest edge of
+the automation.
+
+**3. Setup is one command, and Ghidra is now mandatory.** `tools/bootstrap.py` checks
+the Python packages and JDK, **fetches Ghidra if absent** (pinned 12.1.2, sha256
+verified, into `third_party/`), and — the part that actually matters — **records**
+every tool path into config. That recording step is the fix for a mistake this
+project made three times (D-050): a tool installed, its path written nowhere, every
+consumer reporting it missing.
+
+Ghidra moved from "a prerequisite" to load-bearing: it supplies the pseudo-C the
+model reads to derive the input format *and* the harness, so without it there is no
+`InsertTestcase` and the fuzzer has nothing to run. The README now says so instead of
+listing it among optional tools.
+
+Two more findings from writing the bootstrap, both D-050's shape again. **D-060** —
+it reported "Hyper-V is not available" on a host where Hyper-V is installed and
+working, because `Get-VM` returns a *permission* error and the check could not tell
+that from absence; the advice was to enable an already-enabled feature. **D-061** —
+`requirements.txt` had every dependency past CP4 commented out while five of them
+are imported by shipped modules; harmless until the bootstrap started pointing people
+at it, at which point a fresh venv would fail on the first import. A stale file
+becomes a bug the moment something trusts it.
+
+**GATE 12 recorded** for the pipeline driver: 61 tests, almost all negative, after an
+adversarial pass found **eleven** ways it could report success without doing the work
+(D-057). Like GATE 11 this is not a gate CLAUDE.md defines — and that is precisely
+why the holes were there: RULE 3 makes the gate the definition of done, so a
+component with no gate has no definition of done and cannot go red.
+
+Suite: **424 passed, 12 skipped**.
 
 ### 2026-07-25 (14) — GATE 10 PASS: the central claim, measured, and one half of it fails
 

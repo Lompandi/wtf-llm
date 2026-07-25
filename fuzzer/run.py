@@ -130,6 +130,7 @@ class CampaignConfig:
         worker_count: int | None = None,
         backend: str | None = None,
         runs: int | None = None,
+        module: str | None = None,
     ) -> CampaignConfig:
         fuzz = yaml.safe_load(fuzz_yaml.read_text(encoding="utf-8"))
         target = yaml.safe_load(target_yaml.read_text(encoding="utf-8"))
@@ -142,7 +143,11 @@ class CampaignConfig:
         # tree wtf reads. Conflating them made a campaign silently run wtf's own
         # tlv_server module instead of snapfuzz.
         tgt = target["target"]
-        module = tgt.get("module") or tgt["name"]
+        # An explicit override wins. Without one there is no way to run a
+        # DIFFERENT wtf target than config/target.yaml names -- and a campaign
+        # that silently loads the wrong module reports perfectly healthy numbers
+        # about code you did not mean to test (D-056).
+        module = module or tgt.get("module") or tgt["name"]
         target_dir = repo_root / tgt.get("target_dir", f"targets/{module}")
 
         # --limit means different things per backend and the values are orders

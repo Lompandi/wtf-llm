@@ -254,6 +254,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tick-seconds", type=float, default=20.0)
     ap.add_argument("--label", required=True)
     ap.add_argument("--target-dir", type=Path, help="override config target_dir")
+    ap.add_argument(
+        "--module",
+        help="wtf --name to load; overrides config/target.yaml (D-056)",
+    )
     ap.add_argument("--a1", type=Path, default=REPO_ROOT / "artifacts/a1_snapshot.json")
     ap.add_argument("--plateau-execs", type=int, default=20000)
     ap.add_argument("--seeds", type=int, default=8)
@@ -267,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
         REPO_ROOT / "config" / "fuzz.yaml",
         REPO_ROOT / "config" / "target.yaml",
         worker_count=args.workers,
+        module=args.module,
     )
     if args.target_dir:
         config = dataclasses.replace(config, target_dir=args.target_dir)

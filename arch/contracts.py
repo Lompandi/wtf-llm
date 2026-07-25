@@ -391,6 +391,155 @@ class InputSpec(BaseModel):
         )
 
 
+# --- the harness itself, derived rather than hand-written ----------------
+#
+# CP11 generated the input STRUCT and left ~550 lines of harness logic
+# hand-written, filed under section 3.1's "Manual tweaks" box. That framing was
+# half true and half an excuse: recounting the module showed most of those lines
+# ARE derivable, and some are not even target-specific.
+#
+#   crash oracle          ONE line -- SetupUsermodeCrashDetectionHooks(), wtf's own
+#                         helper. The fault sites it hooks (nt!KeBugCheck2,
+#                         ntdll!RtlDispatchException, verifier!VerifierStopMessage)
+#                         are Windows-generic, not target-generic.
+#   Restore               a no-op, and that is the GENERAL case: wtf's snapshot
+#                         restore already covers guest memory and registers.
+#   mutator Generate/Mutate  entirely field-driven -- derivable from an InputSpec.
+#   entry / I/O silencing dervivable from FuzzEntry plus Ghidra's call references.
+#
+# What is left is small enough to declare. Leaving it hand-written contradicts
+# contribution 1, which is explicitly about removing "snapshot fuzzing's main
+# usability barrier" -- and 550 hand-written lines per target is that barrier.
+#
+# The model still does NOT write C++ (see InputSpec's note). It fills this in, and
+# fuzzer/codegen.py renders it.
+
+BreakpointPurpose = Literal[
+    "fuzz_entry",        # where a test-case is delivered
+    "end_of_testcase",   # reaching here means the input was consumed cleanly
+    "silence_io",        # console/file output: pure noise, and slow
+    "nondeterminism",    # rdrand/rdtsc/GetTickCount -- must be pinned for replay
+]
+BreakpointAction = Literal[
+    "deliver_next_input",  # write the next structure into guest memory
+    "restore_context",     # reset GPRs so the next structure starts clean
+    "stop_ok",             # Backend->Stop(Ok_t()) -- end of test-case, NOT a crash
+    "simulate_return",     # skip the function, returning a fixed value
+]
+
+
+class HarnessBreakpoint(BaseModel):
+    """One breakpoint the generated Init installs."""
+
+    symbol: str  # "module!Function", resolved by wtf through dbgeng
+    purpose: BreakpointPurpose
+    action: BreakpointAction
+    # `simulate_return` only: what the skipped function should appear to return.
+    return_value: int | None = None
+    rationale: str = ""
+
+    @model_validator(mode="after")
+    def _action_suits_purpose(self) -> HarnessBreakpoint:
+        if not self.symbol or "!" not in self.symbol:
+            raise ValueError(
+                f"breakpoint symbol {self.symbol!r} must be 'module!Function' -- wtf "
+                f"resolves it by name through dbgeng and a bare name will not bind"
+            )
+        if self.action == "simulate_return" and self.return_value is None:
+            raise ValueError(
+                f"{self.symbol}: simulate_return needs a return_value; skipping a "
+                f"function while leaving its result undefined corrupts the caller"
+            )
+        if self.purpose == "silence_io" and self.action != "simulate_return":
+            raise ValueError(
+                f"{self.symbol}: silencing output means returning from it, not "
+                f"{self.action!r}"
+            )
+        return self
+
+
+class HarnessSpec(BaseModel):
+    """Everything the generated fuzzer module needs that is not the input format.
+
+    Deliberately declarative. Each field answers a question that would otherwise
+    be answered by a human reading the binary, and every one of them is a question
+    Ghidra plus the snapshot can answer.
+    """
+
+    module: str  # the binary, e.g. "tlv_server"
+    target_name: str  # wtf's --name for this module
+    entry_symbol: str  # "module!Function"
+
+    # From FuzzEntry, and RULE 4's first two table rows: is the register a pointer
+    # to the buffer or the buffer itself, and is the size in bytes?
+    input_param: str
+    size_param: str | None = None
+    input_is_pointer: bool = True
+
+    breakpoints: list[HarnessBreakpoint] = Field(default_factory=list)
+
+    # Deliver several structures per test-case to the same live process. Comes from
+    # InputSpec.supports_sequence -- kept here too because the harness is what
+    # implements it, and a mismatch between the two is a bug worth catching.
+    deliver_sequence: bool = True
+
+    # Globals the parser mutates that survive wtf's snapshot restore. Normally
+    # EMPTY: restoring guest memory covers them, and restoring twice is as wrong as
+    # not restoring (DECISIONS R2). Non-empty is a claim that needs its rationale.
+    restore_globals: list[str] = Field(default_factory=list)
+
+    # A structure larger than this is dropped rather than delivered. Bounded
+    # because the delivery buffer is page-backed.
+    max_input_bytes: int = 4096
+
+    rationale: str = ""
+    source_functions: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _harness_is_coherent(self) -> HarnessSpec:
+        if "!" not in self.entry_symbol:
+            raise ValueError(
+                f"entry_symbol {self.entry_symbol!r} must be 'module!Function'"
+            )
+
+        entries = [b for b in self.breakpoints if b.purpose == "fuzz_entry"]
+        if len(entries) != 1:
+            raise ValueError(
+                f"exactly one fuzz_entry breakpoint is required, got {len(entries)}. "
+                f"Without it nothing is ever delivered and the campaign runs happily "
+                f"executing the snapshot untouched -- which reports coverage and "
+                f"finds nothing."
+            )
+        if entries[0].symbol != self.entry_symbol:
+            raise ValueError(
+                f"the fuzz_entry breakpoint is on {entries[0].symbol!r} but the "
+                f"entry is {self.entry_symbol!r}"
+            )
+        if entries[0].action != "deliver_next_input":
+            raise ValueError(
+                f"the fuzz_entry breakpoint must deliver input, not "
+                f"{entries[0].action!r}"
+            )
+
+        symbols = [b.symbol for b in self.breakpoints]
+        duplicates = sorted({s for s in symbols if symbols.count(s) > 1})
+        if duplicates:
+            raise ValueError(f"duplicate breakpoint symbols: {duplicates}")
+
+        if self.max_input_bytes <= 0:
+            raise ValueError("max_input_bytes must be positive")
+
+        # A `restore_globals` entry without a reason is usually a guess, and a
+        # spurious reset can mask the very state a stateful bug depends on.
+        if self.restore_globals and not self.rationale.strip():
+            raise ValueError(
+                "restore_globals is non-empty but no rationale is given. wtf's "
+                "snapshot restore already covers guest memory, so claiming extra "
+                "state needs an argument (DECISIONS R2)."
+            )
+        return self
+
+
 # The five independent triage signals (CLAUDE.md section 3.2, edges 38-41b).
 # Signals 4 and 5 are deliberately separate: one is dynamic (what executed),
 # one is static (what the code says). Collapsing them is an anti-pattern.

@@ -74,6 +74,29 @@ class GhidraExport:
         )
 
 
+def _ghidra_from_config(repo_root: Path | None = None) -> str | None:
+    """``ghidra.install_dir`` from config/target.yaml, or None.
+
+    Consulted LAST -- after the explicit argument, ``GHIDRA_INSTALL_DIR`` and PATH --
+    so an env var still wins where the committed path is wrong. Added because the
+    key sat at ``null`` while Ghidra was installed, and every consumer reported it
+    missing: the same shape as D-050 (symbolizer-rs) and the snapshot extension,
+    making this the third time in this project that a working tool looked absent
+    because nothing wrote its path down.
+    """
+    repo_root = repo_root or Path(__file__).resolve().parents[1]
+    config = repo_root / "config" / "target.yaml"
+    if not config.exists():
+        return None
+    try:
+        import yaml
+
+        data = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None
+    return (data.get("ghidra") or {}).get("install_dir")
+
+
 def find_ghidra(explicit: str | None = None) -> Path:
     """Locate a Ghidra install, preferring an explicit path then the env var.
 
@@ -91,9 +114,21 @@ def find_ghidra(explicit: str | None = None) -> Path:
             return root
         raise GhidraError(f"no analyzeHeadless under {root}")
 
+    configured = _ghidra_from_config()
+    if configured:
+        root = Path(configured)
+        if (root / "support" / "analyzeHeadless.bat").exists() or (
+            root / "support" / "analyzeHeadless"
+        ).exists():
+            return root
+        raise GhidraError(
+            f"config/target.yaml names Ghidra at {configured}, which has no "
+            f"analyzeHeadless. Fix the config or set GHIDRA_INSTALL_DIR."
+        )
+
     raise GhidraError(
-        "Ghidra not found. Pass --ghidra or set GHIDRA_INSTALL_DIR. "
-        "See docs/ENVIRONMENT.md."
+        "Ghidra not found. Pass --ghidra, set GHIDRA_INSTALL_DIR, or set "
+        "ghidra.install_dir in config/target.yaml. See docs/ENVIRONMENT.md."
     )
 
 

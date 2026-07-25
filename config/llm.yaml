@@ -85,6 +85,24 @@ roles:
       7.2 sanctions for reasoning over pseudo-C. max_tokens matches seed_gen's
       because this is the same reasoning model that spends 28k-60k characters
       thinking before it answers (D-043).
+  harness_derive:
+    # The 550B, not the 30B that input_struct uses. This is the hardest reasoning
+    # task in the pipeline: it has to work out which functions are I/O noise, where
+    # a test-case is finished, and what is non-deterministic -- from decompiler
+    # output, for a target it has never seen. Getting it wrong produces a harness
+    # that RUNS and reports coverage while never delivering input, which is the
+    # silent failure CP4's trace validation exists to catch.
+    model: ais3/nemotron-3-ultra-550b
+    # 0.0 for the same reason as input_struct: there is one right answer about how
+    # a given binary must be driven, so sampling diversity only costs correctness.
+    temperature: 0.0
+    max_tokens: 16384
+    why: >-
+      Section 3.1's harness decisions -- the ones section 11 calls "snapshot
+      fuzzing's main usability barrier". Section 7.2 reserves the 550B for "where
+      judgment matters", and choosing what to silence and when a test-case has
+      ended is judgement over lossy pseudo-C, not lookup. Runs once per target, so
+      the cost is irrelevant next to a human doing it.
   crash_prefilter:
     model: ais3/gemma-4-26b
     temperature: 0.0

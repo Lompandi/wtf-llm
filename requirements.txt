@@ -1,30 +1,33 @@
 # snapfuzz Python dependencies (CLAUDE.md section 4).
 #
-# Only what a passed checkpoint actually needs is uncommented. The rest are
-# listed here, at the checkpoint that first requires them, so the full set from
-# section 4 stays visible without installing tools we cannot yet exercise.
-#
 #   .venv\Scripts\python.exe -m pip install -r requirements.txt
+#
+# Everything the code actually imports is uncommented. This file used to comment
+# out every dependency past CP4 -- "only what a passed checkpoint needs" -- which
+# stopped being true several checkpoints ago and left `tools/bootstrap.py` pointing
+# people at an install command that would not install what they needed.
+# Optional extras stay commented, and say what turns them on.
 
-# --- CP0: contracts, config, gates ---
+# --- contracts, config, gates (CP0) ---
 pydantic>=2.7          # data contracts (section 6)
 pyyaml>=6.0            # config and arch/graph.yaml
 pytest>=8.0            # the interface gates (RULE 3)
 
-# --- CP4: fuzzer run + engine bridge ---
-# loguru>=0.7          # structured logging with a clock=fast|slow field
+# --- fuzzer run + engine bridge (CP4) ---
+loguru>=0.7            # structured logging with a clock=fast|slow field
 
-# --- CP5: LLM client ---
-# httpx>=0.27          # HTTP client for the OpenAI-compatible endpoint
-# openai>=1.30         # optional convenience client for the same endpoint
+# --- LLM client (CP5) ---
+httpx>=0.27            # HTTP client for the OpenAI-compatible endpoint
 
-# --- CP8: crash classification ---
-# capstone>=5.0        # disassembly around a fault address
+# --- crash classification (CP8) ---
+capstone>=5.0          # disassembly around a fault address
 
-# --- CP9: triage + report ---
-# dspy>=2.5            # triage prompt program + optimisation
-# jinja2>=3.1          # GHSA Markdown report templating
+# --- triage + report (CP9) ---
+dspy>=2.5              # triage prompt program + optimisation
+jinja2>=3.1            # GHSA Markdown report templating
 
-# --- CP10: optional dashboard ---
-# fastapi>=0.111
+# --- optional ---
+# openai>=1.30         # convenience client for the same endpoint; httpx suffices
+# matplotlib>=3.8      # eval/plot_curves.py falls back to a text table without one
+# fastapi>=0.111       # dashboard/app.py (CP10, optional)
 # uvicorn>=0.30

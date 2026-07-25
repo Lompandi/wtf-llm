@@ -39,6 +39,10 @@ from prep.snapshot_linux import (
 )
 from prep.snapshot_linux import ingest_state_dir as linux_ingest
 from prep.snapshot_win import (
+    AcquireError,
+    acquire_snapshot,
+    build_acquire_argv,
+    split_windows_command,
     SnapshotError,
     ingest_state_dir,
     parse_symbol_store,
@@ -324,3 +328,155 @@ def test_wtf_loads_the_snapshot_and_executes() -> None:
     assert cov_line, f"no coverage line:\n{proc.stdout[-2000:]}"
     coverage = int(cov_line.split("cov:")[1].split()[0])
     assert coverage > 0, f"snapshot loaded but covered nothing: {cov_line}"
+
+
+# --- snapshot ACQUISITION: driving KD rather than printing its commands ----
+#
+# None of this can run end to end here: there is no guest VM on this host, so the
+# only checkable surface is the command line that WOULD be issued, plus the refusals
+# that happen before kd is ever launched. That is stated rather than papered over --
+# these tests pin the argv, not the acquisition.
+
+KD = Path("C:/kits/kd.exe")
+DLL = Path("C:/tools/snapshot.dll")
+
+
+def _argv(**kwargs):
+    defaults = dict(
+        kd_exe=KD,
+        snapshot_dll=DLL,
+        break_at="tlv_server!ProcessPacket",
+        pipe=r"\\.\pipe\snapfuzz",
+    )
+    defaults.update(kwargs)
+    return build_acquire_argv(Path("targets/t/state"), **defaults)
+
+
+def test_acquire_argv_hangs_the_work_off_the_breakpoint():
+    """The command list belongs to `bp`, not to the -c sequence after `g`.
+
+    Sequencing `!snapshot` after `g` in the -c string assumes KD resumes executing
+    that string once the break fires, which it does not promise. If this regresses
+    the session runs `g` and hangs, having taken no snapshot -- and the failure
+    looks exactly like "nothing drove the target", so it would be misdiagnosed.
+    """
+    argv = _argv()
+    command = argv[argv.index("-c") + 1]
+    assert 'bp tlv_server!ProcessPacket "!snapshot' in command
+    assert command.rstrip().endswith("; g"), command
+    # `g` is LAST. Nothing may follow it, because nothing after it is guaranteed.
+    assert command.index("!snapshot") < command.index("; g")
+
+
+def test_acquire_argv_quits_after_snapshotting():
+    """`qq` inside the breakpoint command, or kd waits forever with the snapshot
+    already on disk and the caller times out on a run that actually succeeded."""
+    command = _argv()[_argv().index("-c") + 1]
+    assert "; qq" in command
+
+
+def test_acquire_argv_uses_a_reconnecting_pipe_transport():
+    argv = _argv()
+    transport = argv[argv.index("-k") + 1]
+    assert transport.startswith("com:pipe,port=")
+    # The guest rebooting mid-session must not end the session.
+    assert "resets=0" in transport and "reconnect" in transport
+
+
+def test_acquire_argv_switches_context_before_snapshotting_wow64():
+    """`!wow64exts.sw` must precede `bp`/`!snapshot` (section 13.6).
+
+    After the fact the captured state is the 32-bit view, which wtf cannot use --
+    and the snapshot still exists, so this fails as a puzzling wtf error much later
+    rather than at acquisition.
+    """
+    command = _argv(wow64=True)[_argv(wow64=True).index("-c") + 1]
+    assert command.index("!wow64exts.sw") < command.index("bp ")
+    assert command.index("!wow64exts.sw") < command.index("!snapshot")
+
+
+def test_acquire_argv_omits_wow64_by_default():
+    assert "!wow64exts" not in _argv()[_argv().index("-c") + 1]
+
+
+def test_acquire_argv_rejects_a_bare_symbol_name():
+    """`bp ProcessPacket` binds to whatever module KD's context happens to be in.
+
+    Usually that is the kernel, so the breakpoint never fires and this looks like
+    a stimulus problem.
+    """
+    with pytest.raises(ValueError, match="module!Function"):
+        _argv(break_at="ProcessPacket")
+
+
+def test_acquire_argv_accepts_a_raw_address():
+    argv = _argv(break_at="0x7ff612340000")
+    assert "bp 0x7ff612340000" in argv[argv.index("-c") + 1]
+
+
+def test_acquire_argv_rejects_an_unknown_dump_kind():
+    with pytest.raises(ValueError, match="full"):
+        _argv(kind="everything")
+
+
+def test_acquire_argv_passes_symbol_paths_and_log():
+    argv = _argv(
+        symbol_paths=["srv*C:/sym*https://msdl.microsoft.com/download/symbols", "C:/pdbs"],
+        log_path=Path("logs/kd.log"),
+    )
+    assert argv[argv.index("-y") + 1].count(";") == 1, "symbol paths join with ;"
+    assert Path(argv[argv.index("-logo") + 1]) == Path("logs/kd.log")
+
+
+def test_split_windows_command_keeps_path_separators():
+    """POSIX shlex ate the backslash the first time a stimulus was written.
+
+    `python tools\\poke.py 1337` became `python toolspoke.py 1337`, which fails as
+    file-not-found -- a quoting bug wearing a missing-file costume.
+    """
+    assert split_windows_command(r"python tools\poke.py 1337") == [
+        "python",
+        r"tools\poke.py",
+        "1337",
+    ]
+
+
+def test_split_windows_command_strips_quotes_it_used_for_grouping():
+    assert split_windows_command(r'"C:\Program Files\p.exe" "a b"') == [
+        r"C:\Program Files\p.exe",
+        "a b",
+    ]
+
+
+def test_acquire_refuses_to_overwrite_an_existing_snapshot(tmp_path):
+    """Two campaigns against the same state/ must not silently share a file.
+
+    Overwriting in place makes it impossible to say afterwards which state a
+    finished campaign actually fuzzed.
+    """
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "mem.dmp").write_bytes(b"old")
+    kd = tmp_path / "kd.exe"
+    kd.write_bytes(b"")
+    dll = tmp_path / "snapshot.dll"
+    dll.write_bytes(b"")
+    with pytest.raises(AcquireError, match="already holds"):
+        acquire_snapshot(
+            state,
+            break_at="m!f",
+            pipe="p",
+            kd_exe=kd,
+            snapshot_dll=dll,
+        )
+
+
+def test_acquire_refuses_a_missing_kd(tmp_path):
+    with pytest.raises(AcquireError, match="does not exist"):
+        acquire_snapshot(
+            tmp_path / "state",
+            break_at="m!f",
+            pipe="p",
+            kd_exe=tmp_path / "nope" / "kd.exe",
+            snapshot_dll=DLL,
+        )

@@ -121,7 +121,12 @@ ghidra:
   project_dir: artifacts/ghidra
   project_name: snapfuzz
   # Set GHIDRA_INSTALL_DIR, or pass --ghidra. See docs/ENVIRONMENT.md.
-  install_dir: null
+  # Recorded here, like tools.symbolizer_rs and tools.snapshot_dll in
+  # fuzz.yaml. This sat at null while Ghidra was installed -- the THIRD
+  # instance of D-050 in this project: a tool on disk that every consumer
+  # reported as missing. Consulted LAST, after GHIDRA_INSTALL_DIR and PATH,
+  # so a machine where this path is wrong can still override it.
+  install_dir: D:\tools\ghidra_12.1.2_PUBLIC
 
 symbols:
   # Required, and wtf does not set it (D-023).

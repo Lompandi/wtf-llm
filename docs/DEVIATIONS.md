@@ -2156,3 +2156,111 @@ The lesson for the writeup: a box on an architecture diagram is not a deliverabl
 until something can fail. Two of the three checkpoints in this project that came in
 partial or late -- this one and GATE 7's coverage claim -- were the two whose
 success criteria were least mechanically checkable.
+
+## D-056 — the campaign ran the wrong module and reported success
+
+**Observed at CP11.** The first campaign against the fully generated module printed
+77,630 executions and a growing corpus, which read as a clean pass. It was not the
+generated module. `run_metadata.json` recorded `module: snapfuzz` — the *hand-written*
+one — because `orchestrator/scheduler.py` had no way to say which module to load:
+it took the module name from config and nothing else.
+
+So `fuzzer.build` staged `fuzzer_gen.cc`, the build registered `snapfuzz_gen`, and
+the campaign then loaded `snapfuzz`. Both exist in the same binary, both work, and
+wtf reports coverage either way. The only thing that distinguishes them is a field
+in a metadata file nobody had reason to read.
+
+**Resolution:** `--module` on the scheduler, threaded through to both `wtf master`
+and `wtf fuzz`, and recorded in `run_metadata.json`. The near-miss is the finding:
+**a generated artifact that is never loaded looks exactly like one that works**, and
+the evidence that distinguishes them has to be checked deliberately.
+
+## D-057 — eleven ways the pipeline driver reported success without doing the work
+
+**Observed at CP12**, from an adversarial pass over `orchestrator/pipeline.py` whose
+only brief was "make this claim success falsely". It found eleven, all fixed and
+re-tested:
+
+| Hole | What it did |
+|---|---|
+| stale artifact + exit 0 | thirteen stages "ran", exit 0, nothing written |
+| `--only` typo | silent no-op; a mistyped stage key ran nothing and passed |
+| `--from 1` | prefix-matched stage **10**, skipping nine stages |
+| build up-to-date | `wtf.exe` from a previous build satisfied a requested rebuild |
+| campaign up-to-date | a requested 15-minute campaign became zero seconds of fuzzing |
+| campaign with 0 executions | `scheduler_result.json` exists, exit 0, "all workers dead" |
+| zero-byte artifact | existence checked, content not |
+| directory where a file belongs | same |
+| scope absent from filenames | a module-scoped export satisfied `--scope function-closure`, and the reverse silently dropped 555 breakpoints |
+| `GHIDRA_INSTALL_DIR` merely *set* | pointing at the wrong directory passed the pre-flight check and failed twenty minutes later |
+| commented-out key in `.env` | `# KEY=...` satisfied a substring check whose whole job is to fail before Ghidra runs |
+
+The pattern across all eleven: **exit code 0 and "the file is there" are not
+evidence.** Stages now name what they must produce, content is checked, stages whose
+work is *time* are never skipped as up-to-date, and the summary returns non-zero if
+anything failed, was blocked, or was never reached.
+
+## D-058 — the entry placeholder embedded in a larger argument is substituted silently never
+
+**Observed at CP12**, while wiring snapshot acquisition. `resolve_entry` substitutes
+`<ENTRY>` for the LLM-chosen symbol by **whole argv element**. Stage 07a first built
+its breakpoint as one string:
+
+```python
+"--break-at", f"{module}!{entry_for_scoping}"      # "tlv_server!<ENTRY>"
+```
+
+That is not an exact element, so substitution left it alone and kd would have
+received `bp tlv_server!<ENTRY>` — an unbindable breakpoint. The symptom is that
+`g` never returns and acquisition times out, which is **indistinguishable from the
+one failure everybody expects there**: nothing drove the target to its parser. It
+would have been misdiagnosed as a stimulus problem indefinitely.
+
+**Resolution, two parts.** The module became a separate `--module` argument so the
+symbol stays substitutable; and `resolve_entry` now *refuses* an argv where the
+placeholder appears inside a larger argument, rather than passing it through. The
+first part fixes this instance, the second makes the class of mistake loud.
+
+## D-059 — POSIX shell splitting ate the Windows path separator in the stimulus
+
+`shlex.split` defaults to POSIX rules, where `\` is an escape character. The first
+stimulus command written by hand, `python tools\poke.py 1337`, was split into
+`["python", "toolspoke.py", "1337"]`. It would have failed as a file-not-found — a
+quoting bug wearing a missing-file costume, on a code path that only runs when a
+guest VM is attached and therefore is hard to observe.
+
+Caught by printing the split command in `--dry-run` before ever running it.
+`split_windows_command` now splits with `posix=False` and strips the grouping quotes
+that mode leaves behind.
+
+## D-060 — Hyper-V reported as unavailable while installed and working
+
+The third recurrence of D-050's shape, and the first where the *check* was at fault
+rather than the config. `tools/bootstrap.py` first tested Hyper-V with:
+
+```powershell
+(Get-Command Get-VM -ErrorAction SilentlyContinue) -and (Get-VM | Measure-Object).Count
+```
+
+On this host `Get-VM` exists and fails with *"You do not have the required
+permission"*. The expression evaluated to `False`, the script printed **"Hyper-V is
+not available"**, and the advice was to enable a feature that was already enabled.
+
+Three states have to be distinguished, because each needs a different action:
+cmdlet absent (not installed), cmdlet present but denied (installed; this shell
+cannot see it — elevate or join *Hyper-V Administrators*), and cmdlet present with
+zero VMs (installed; create a guest). Conflating them sends people to fix the wrong
+thing, which is the same cost D-050 had.
+
+## D-061 — requirements.txt commented out the dependencies the code imports
+
+`requirements.txt` listed everything past CP4 commented out, under the rule "only
+what a passed checkpoint actually needs is uncommented". That rule stopped being
+true around CP8: `httpx`, `dspy`, `jinja2`, `capstone` and `loguru` are all imported
+by shipped modules. Nothing failed, because the venv had them installed by hand.
+
+It surfaced only when `tools/bootstrap.py` started telling people to run
+`pip install -r requirements.txt` as *the* setup step — at which point the file
+became load-bearing for a fresh machine and would have produced a venv that fails on
+the first import. **A stale file becomes a bug the moment something starts trusting
+it.**

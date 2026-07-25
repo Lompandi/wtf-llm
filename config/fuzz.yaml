@@ -91,7 +91,14 @@ symbols:
 # Companion tools -- NOT wtf (section 3.1).
 tools:
   # 0vercl0k/snapshot: KD extension DLL, `.load` then `!snapshot <state_path>`.
-  snapshot_dll: null # TODO(CP3)
+  # Installed and recorded here. This sat at `null` while the DLL was already on
+  # disk -- the same shape as D-050, where symbolizer-rs was installed at CP4 and
+  # never written into this file, so the pipeline reported a missing prerequisite
+  # for a tool it could have used all along.
+  snapshot_dll: D:\tools\snapshot\snapshot.dll
+  # Debugging Tools for Windows. wtf does not need this, but taking a snapshot
+  # does: it is the debugger the `!snapshot` extension loads into.
+  kd_exe: C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\kd.exe
   # 0vercl0k/symbolizer-rs: required to symbolize traces (section 13.3).
   # Without it, traces load into neither lighthouse nor Tenet. The binary was
   # already extracted at CP4 but never recorded here, so CP8 would have looked

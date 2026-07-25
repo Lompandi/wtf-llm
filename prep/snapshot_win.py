@@ -200,6 +200,22 @@ def write_snapshot_ref(ref: SnapshotRef, path: Path) -> Path:
     return path
 
 
+def _snapshot_dll_from_config(repo_root: Path | None = None) -> Path | None:
+    """``tools.snapshot_dll`` from config/fuzz.yaml, or None."""
+    repo_root = repo_root or Path(__file__).resolve().parents[1]
+    config = repo_root / "config" / "fuzz.yaml"
+    if not config.exists():
+        return None
+    try:
+        import yaml
+
+        data = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None
+    configured = (data.get("tools") or {}).get("snapshot_dll")
+    return Path(configured) if configured else None
+
+
 def build_kd_commands(
     state_dir: Path,
     *,
@@ -232,6 +248,238 @@ def build_kd_commands(
         f"!snapshot -k {kind} {state_dir}",
     ]
     return commands
+
+
+# --- acquisition: driving KD instead of printing its commands -------------
+#
+# `build_kd_commands` EMITS a command list for a human to paste, and for a long
+# while that was the whole acquisition story -- edges 1/6/7 pending because the
+# step needed hands. It does not, once the pieces are in place: `kd -k <transport>
+# -c "<commands>"` runs a kernel-debugging session non-interactively (verified
+# against `kd -?`: `-c` executes a command at the first debugger prompt, `-k` gives
+# the transport, `-logo` takes a transcript).
+#
+# THE ORDERING TRICK, because the obvious form is unreliable. Writing
+#   -c ".load dll; bp mod!Func; g; !snapshot ...; qq"
+# assumes the commands after `g` run once the breakpoint fires, which is not a
+# guarantee KD makes. The reliable idiom attaches the work to the breakpoint
+# itself:
+#   bp mod!Func "!snapshot -k full <state>; qq"
+# The breakpoint IS the definition of "the state worth snapshotting", so nothing
+# has to judge when to act -- hitting it is the judgement.
+#
+# WHAT STILL IS NOT AUTOMATIC, stated plainly because it is the real remaining
+# gap: something must make the target REACH the parser. For a network service that
+# means a client connecting and sending a packet; until then `g` never returns and
+# this times out. `stimulus` runs a command for that purpose, but what the command
+# should be is target-specific and cannot be derived from the binary.
+
+# Hyper-V exposes a guest COM port as a host named pipe. `resets=0,reconnect` is
+# the standard form: it survives the guest rebooting mid-session.
+DEFAULT_PIPE_TRANSPORT = "com:pipe,port={pipe},resets=0,reconnect"
+
+
+class AcquireError(RuntimeError):
+    pass
+
+
+def split_windows_command(command: str) -> list[str]:
+    """Split a command string into argv without eating Windows path separators.
+
+    ``shlex.split`` defaults to POSIX rules, where ``\\`` is an escape: the first
+    stimulus command written by hand, ``python tools\\poke.py 1337``, came out as
+    ``python toolspoke.py 1337`` and would have failed with a confusing
+    file-not-found rather than a quoting error. ``posix=False`` keeps the
+    separators but leaves the quote characters inside the token, so they are
+    stripped here.
+    """
+    import shlex
+
+    tokens = []
+    for token in shlex.split(command, posix=False):
+        if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
+            token = token[1:-1]
+        tokens.append(token)
+    return tokens
+
+
+def subprocess_list2cmdline(argv: list[str]) -> str:
+    """Quote an argv for display. Windows quoting, because that is the host."""
+    import subprocess
+
+    return subprocess.list2cmdline(argv)
+
+
+def _kd_from_config(repo_root: Path | None = None) -> Path | None:
+    """``tools.kd_exe`` from config/fuzz.yaml, or None."""
+    repo_root = repo_root or Path(__file__).resolve().parents[1]
+    config = repo_root / "config" / "fuzz.yaml"
+    if not config.exists():
+        return None
+    try:
+        import yaml
+
+        data = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None
+    configured = (data.get("tools") or {}).get("kd_exe")
+    return Path(configured) if configured else None
+
+
+def build_acquire_argv(
+    state_dir: Path,
+    *,
+    kd_exe: Path,
+    snapshot_dll: Path,
+    break_at: str,
+    pipe: str,
+    module: str | None = None,
+    kind: str = "full",
+    wow64: bool = False,
+    symbol_paths: list[str] | None = None,
+    log_path: Path | None = None,
+) -> list[str]:
+    """The full ``kd`` command line for an unattended snapshot.
+
+    Separated from running it so the command can be inspected, tested and printed
+    without a VM -- which is the only way any of this is checkable on a host with
+    no guest.
+    """
+    if kind not in {"full", "active-kernel"}:
+        raise ValueError(f"kind must be 'full' or 'active-kernel', got {kind!r}")
+    if module and "!" not in break_at and not break_at.startswith("0x"):
+        # Composed HERE rather than by the caller so the symbol can stay a whole
+        # command-line argument. The pipeline substitutes its late-bound entry by
+        # exact argument match, so f"{module}!{symbol}" would have reached kd with
+        # the placeholder still in it -- an unbindable breakpoint whose symptom is
+        # identical to a stimulus that never arrived.
+        break_at = f"{module}!{break_at}"
+    if "!" not in break_at and not break_at.startswith("0x"):
+        raise ValueError(
+            f"break_at {break_at!r} must be 'module!Function' or a 0x address -- "
+            f"KD resolves it by name and a bare name will not bind. Pass --module, "
+            f"or qualify it yourself."
+        )
+
+    # Escaped for nesting inside the -c string.
+    inner = f'!snapshot -k {kind} {state_dir}; qq'
+    setup = [f".load {snapshot_dll}"]
+    if wow64:
+        # Switch to the 64-bit context BEFORE snapshotting, or the captured state
+        # is the 32-bit view and wtf cannot use it (section 13.6).
+        setup.append("!wow64exts.sw")
+    setup.append(f'bp {break_at} "{inner}"')
+    setup.append("g")
+
+    argv = [
+        str(kd_exe),
+        "-k", DEFAULT_PIPE_TRANSPORT.format(pipe=pipe),
+    ]
+    if symbol_paths:
+        argv += ["-y", ";".join(symbol_paths)]
+    if log_path is not None:
+        argv += ["-logo", str(log_path)]
+    argv += ["-c", "; ".join(setup)]
+    return argv
+
+
+def acquire_snapshot(
+    state_dir: Path,
+    *,
+    break_at: str,
+    pipe: str,
+    module: str | None = None,
+    kd_exe: Path | None = None,
+    snapshot_dll: Path | None = None,
+    kind: str = "full",
+    wow64: bool = False,
+    symbol_paths: list[str] | None = None,
+    stimulus: list[str] | None = None,
+    timeout_s: int = 900,
+    log_path: Path | None = None,
+) -> Path:
+    """Take a snapshot by driving KD. Returns ``state_dir``.
+
+    **NEVER EXERCISED ON THIS HOST.** There is no guest VM here (`Get-VM` is
+    empty), so this has been written against `kd -?` and section 13.6 and has not
+    run end to end. That is recorded rather than glossed: the argv builder is
+    unit-tested, the orchestration is not.
+    """
+    import subprocess
+
+    kd_exe = kd_exe or _kd_from_config()
+    if kd_exe is None:
+        raise AcquireError(
+            "no kd.exe: set tools.kd_exe in config/fuzz.yaml, or pass kd_exe. "
+            "Debugging Tools for Windows is a COMPANION TOOL, not part of wtf."
+        )
+    if not Path(kd_exe).exists():
+        raise AcquireError(f"the configured kd.exe {kd_exe} does not exist")
+
+    snapshot_dll = snapshot_dll or _snapshot_dll_from_config()
+    if snapshot_dll is None or not Path(snapshot_dll).exists():
+        raise AcquireError(
+            f"no usable snapshot extension ({snapshot_dll}); set "
+            f"tools.snapshot_dll in config/fuzz.yaml"
+        )
+
+    state_dir = Path(state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    # Refuse to write into a directory that already holds a snapshot. Overwriting
+    # one silently is how a campaign ends up fuzzing a state nobody meant to take.
+    existing = [p.name for p in state_dir.glob("*") if p.name in {"mem.dmp", "regs.json"}]
+    if existing:
+        raise AcquireError(
+            f"{state_dir} already holds {existing}. Move it aside first -- "
+            f"overwriting a snapshot in place makes it impossible to say which "
+            f"state a later campaign actually fuzzed."
+        )
+
+    argv = build_acquire_argv(
+        state_dir,
+        kd_exe=Path(kd_exe),
+        snapshot_dll=Path(snapshot_dll),
+        break_at=break_at,
+        pipe=pipe,
+        module=module,
+        kind=kind,
+        wow64=wow64,
+        symbol_paths=symbol_paths,
+        log_path=log_path,
+    )
+
+    stimulus_proc = None
+    if stimulus:
+        # Started BEFORE kd waits, because `g` does not return until the parser is
+        # reached and nothing reaches it on its own.
+        stimulus_proc = subprocess.Popen(stimulus)
+
+    try:
+        completed = subprocess.run(
+            argv, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AcquireError(
+            f"kd did not reach {break_at} within {timeout_s}s. The usual cause is "
+            f"that nothing drove the target to its parser -- `g` waits forever if "
+            f"no input arrives. Supply a stimulus, or drive the target by hand."
+        ) from exc
+    finally:
+        if stimulus_proc is not None and stimulus_proc.poll() is None:
+            stimulus_proc.terminate()
+
+    # The artifact is the evidence. kd exiting 0 says the session ended, not that
+    # `!snapshot` wrote anything -- the same rule the rest of this project runs on.
+    produced = {p.name for p in state_dir.glob("*")}
+    missing = {"mem.dmp", "regs.json"} - produced
+    if missing:
+        tail = (completed.stdout or completed.stderr or "").strip()[-1200:]
+        raise AcquireError(
+            f"kd exited {completed.returncode} but {sorted(missing)} were not "
+            f"written into {state_dir}. kd said:\n{tail}"
+        )
+    return state_dir
 
 
 GUEST_PREP_NOTES = """\
@@ -269,9 +517,56 @@ def main(argv: list[str] | None = None) -> int:
         help="accept a snapshot not taken at the fuzz entry",
     )
 
+    acq = sub.add_parser(
+        "acquire",
+        help="TAKE a snapshot by driving KD unattended (needs a guest VM)",
+    )
+    acq.add_argument("--state", required=True, type=Path)
+    acq.add_argument(
+        "--pipe",
+        required=True,
+        help=r"host named pipe for the guest COM port, e.g. \\.\pipe\snapfuzz",
+    )
+    acq.add_argument(
+        "--break-at",
+        required=True,
+        help="module!Function, 0xADDR, or a bare symbol when --module is given",
+    )
+    acq.add_argument(
+        "--module",
+        default=None,
+        help="debugger module name, no extension; qualifies a bare --break-at",
+    )
+    acq.add_argument("--kd", type=Path, default=None, help="default: tools.kd_exe")
+    acq.add_argument("--snapshot-dll", type=Path, default=None)
+    acq.add_argument("--kind", default="full", choices=["full", "active-kernel"])
+    acq.add_argument("--wow64", action="store_true")
+    acq.add_argument("--symbol-path", action="append", default=None, dest="symbol_paths")
+    acq.add_argument("--log", type=Path, default=None, help="kd -logo transcript")
+    acq.add_argument(
+        "--timeout",
+        type=int,
+        default=900,
+        help="seconds to wait for the breakpoint; nothing reaches a parser on its own",
+    )
+    acq.add_argument(
+        "--stimulus",
+        default=None,
+        help="command to run that drives the target to its parser (shell-split)",
+    )
+    acq.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the kd command line and exit -- the only checkable path with no VM",
+    )
+
     kd = sub.add_parser("kd-script", help="emit the KD commands to take one")
     kd.add_argument("--state", required=True, type=Path)
-    kd.add_argument("--snapshot-dll", required=True, type=Path)
+    # Defaults from config/fuzz.yaml's tools.snapshot_dll. Optional rather than
+    # required because the extension's path is machine-specific and belongs in
+    # config, and requiring it on the command line meant the tool reported itself
+    # unusable while the DLL was already installed -- the same shape as D-050.
+    kd.add_argument("--snapshot-dll", type=Path, default=None)
     kd.add_argument("--break-at", required=True)
     kd.add_argument("--kind", default="full", choices=["full", "active-kernel"])
     kd.add_argument("--wow64", action="store_true")
@@ -297,11 +592,70 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  entry_static_addr  = {space.to_static(ref.entry_runtime_addr):#x}")
         return 0
 
+    if args.cmd == "acquire":
+        stimulus = split_windows_command(args.stimulus) if args.stimulus else None
+        if args.dry_run:
+            kd_exe = args.kd or _kd_from_config() or Path("kd.exe")
+            dll = args.snapshot_dll or _snapshot_dll_from_config() or Path("snapshot.dll")
+            try:
+                argv_out = build_acquire_argv(
+                    args.state,
+                    kd_exe=Path(kd_exe),
+                    snapshot_dll=Path(dll),
+                    break_at=args.break_at,
+                    pipe=args.pipe,
+                    module=args.module,
+                    kind=args.kind,
+                    wow64=args.wow64,
+                    symbol_paths=args.symbol_paths,
+                    log_path=args.log,
+                )
+            except ValueError as exc:
+                print(f"cannot build the kd command line: {exc}")
+                return 1
+            print(subprocess_list2cmdline(argv_out))
+            if stimulus:
+                print(f"stimulus: {subprocess_list2cmdline(stimulus)}")
+            return 0
+        try:
+            state = acquire_snapshot(
+                args.state,
+                break_at=args.break_at,
+                pipe=args.pipe,
+                module=args.module,
+                kd_exe=args.kd,
+                snapshot_dll=args.snapshot_dll,
+                kind=args.kind,
+                wow64=args.wow64,
+                symbol_paths=args.symbol_paths,
+                stimulus=stimulus,
+                timeout_s=args.timeout,
+                log_path=args.log,
+            )
+        except (AcquireError, ValueError) as exc:
+            print(f"acquisition failed: {exc}")
+            return 1
+        print(f"snapshot written to {state}")
+        print("next: prep/snapshot_win.py ingest --state ... --module ...")
+        return 0
+
+    snapshot_dll = args.snapshot_dll or _snapshot_dll_from_config()
+    if snapshot_dll is None:
+        print(
+            "no snapshot extension: pass --snapshot-dll, or set "
+            "tools.snapshot_dll in config/fuzz.yaml. It is 0vercl0k/snapshot, a "
+            "KD extension DLL -- a COMPANION TOOL, not part of wtf (section 3.1)."
+        )
+        return 1
+    if not snapshot_dll.exists():
+        print(f"the configured snapshot extension {snapshot_dll} does not exist")
+        return 1
+
     print(GUEST_PREP_NOTES)
     print("KD commands:\n")
     for line in build_kd_commands(
         args.state,
-        snapshot_dll=args.snapshot_dll,
+        snapshot_dll=snapshot_dll,
         break_at=args.break_at,
         kind=args.kind,
         wow64=args.wow64,

@@ -59,3 +59,9 @@ __pycache__/
 # Generated pipeline artifacts (A1-A5) and logs.
 artifacts/
 logs/
+
+# Fetched by tools/bootstrap.py: Ghidra is ~550 MB zipped, 872 MB extracted, and
+# byte-identical for everyone. The bootstrap verifies its sha256 and records the
+# path in config/target.yaml, so a clone stays small and still needs no manual
+# configuration. Commit it deliberately if an offline machine needs it.
+third_party/

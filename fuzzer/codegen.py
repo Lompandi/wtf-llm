@@ -37,7 +37,7 @@ import argparse
 import json
 from pathlib import Path
 
-from arch.contracts import InputField, InputSpec
+from arch.contracts import HarnessSpec, InputField, InputSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -313,6 +313,468 @@ def write_header(spec: InputSpec, out_path: Path, *, spec_path: str = "<spec>") 
     return out_path
 
 
+# --- the whole module ----------------------------------------------------
+#
+# CP11 stopped at the struct and left ~550 lines hand-written. That contradicted
+# contribution 1, which section 11 says is about removing "snapshot fuzzing's main
+# usability barrier" -- and a hand-written harness per target IS that barrier. So
+# the generator now emits the module, driven by an InputSpec plus a HarnessSpec.
+#
+# The model still writes no C++. It fills in two schemas; this renders them.
+
+_REG_METHOD = {
+    "rax": "Rax", "rbx": "Rbx", "rcx": "Rcx", "rdx": "Rdx",
+    "rsi": "Rsi", "rdi": "Rdi", "rsp": "Rsp", "rbp": "Rbp",
+    "r8": "R8", "r9": "R9", "r10": "R10", "r11": "R11",
+    "r12": "R12", "r13": "R13", "r14": "R14", "r15": "R15",
+}
+
+
+def _register(name: str) -> str:
+    """wtf's accessor for a register, e.g. 'rcx' -> 'Rcx'."""
+    key = name.strip().lower().lstrip("@%$")
+    if key not in _REG_METHOD:
+        raise ValueError(
+            f"{name!r} is not an x86-64 GPR this generator can address. wtf exposes "
+            f"one accessor per register, so a stack slot or a memory operand needs "
+            f"hand-written delivery."
+        )
+    return _REG_METHOD[key]
+
+
+def _json_default(field: InputField) -> str:
+    return "{}" if field.kind == "bytes" else "0"
+
+
+def generate_module(
+    spec: InputSpec,
+    harness: HarnessSpec,
+    *,
+    spec_path: str = "<input_spec>",
+    harness_path: str = "<harness_spec>",
+    namespace: str | None = None,
+) -> str:
+    """Render a complete wtf fuzzer module from the two derived specs."""
+    from fuzzer.module_template import MODULE_TEMPLATE
+
+    namespace = namespace or f"Gen{spec.module.title().replace('_', '')}"
+    target_var = f"{namespace}Target"
+    tail = next((f for f in spec.fields if f.kind == "bytes"), None)
+
+    # --- the struct, reusing the header renderer's field logic ------------
+    struct_lines: list[str] = []
+    for field in spec.fields:
+        struct_lines.append(_field_comment(field))
+        struct_lines.append(_cpp_field(field))
+    if spec.wire_size_override:
+        struct_lines.append(_WIRE_SIZE_FIELD.rstrip())
+    struct = (
+        f"struct {spec.struct_name} {{\n" + "\n".join(struct_lines) + "\n};"
+    )
+
+    names = [f.name for f in spec.fields] + (
+        ["WireSize"] if spec.wire_size_override else []
+    )
+    to_json = ",\n".join(
+        f'      {{"{n}", Value.{n}}}' for n in names
+    )
+    from_json = "\n".join(
+        f'  Value.{n} = Json.value("{n}", {_json_default_by_name(spec, n)});'
+        for n in names
+    )
+
+    # --- sequence handling ------------------------------------------------
+    if harness.deliver_sequence:
+        wrapper = (
+            f"//\n"
+            f"// One test-case carries several structures, delivered in order to the\n"
+            f"// SAME live process. State the target builds up persists between them,\n"
+            f"// which is what makes a branch requiring an existing object reachable\n"
+            f"// at all (section 13.7).\n"
+            f"//\n"
+            f"struct {spec.sequence_field_name}_t {{\n"
+            f"  std::vector<{spec.struct_name}> {spec.sequence_field_name};\n"
+            f"}};\n\n"
+            f"inline void from_json(const json::json &Json,\n"
+            f"                      {spec.sequence_field_name}_t &Value) {{\n"
+            f'  Json.at("{spec.sequence_field_name}")'
+            f".get_to(Value.{spec.sequence_field_name});\n"
+            f"}}\n\n"
+            f"inline void to_json(json::json &Json,\n"
+            f"                    const {spec.sequence_field_name}_t &Value) {{\n"
+            f'  Json = json::json{{{{"{spec.sequence_field_name}",'
+            f" Value.{spec.sequence_field_name}}}}};\n"
+            f"}}"
+        )
+        parse_body = (
+            f"    const auto &Parsed = Root.get<{spec.sequence_field_name}_t>();\n"
+            f"    for (auto Item : Parsed.{spec.sequence_field_name}) {{\n"
+            f"      GlobalState.Inputs.emplace_back(std::move(Item));\n"
+            f"    }}"
+        )
+        sequence_wording = "a *sequence* of structures"
+    else:
+        wrapper = ""
+        parse_body = (
+            f"    GlobalState.Inputs.emplace_back(Root.get<{spec.struct_name}>());"
+        )
+        sequence_wording = "a single structure"
+
+    # --- wire size --------------------------------------------------------
+    wire_size = f"{spec.header_bytes}"
+    if tail is not None:
+        wire_size += f" + Value.{tail.name}.size()"
+
+    # --- the size register ------------------------------------------------
+    if harness.size_param:
+        reg = _register(harness.size_param)
+        size_write = (
+            f"        //\n"
+            f"        // {harness.size_param} carries the length, in BYTES.\n"
+            f"        //\n"
+        )
+        if spec.wire_size_override:
+            size_write += (
+                f"        // WireSize, when set, reports FEWER (or more) bytes than\n"
+                f"        // were written -- modelling a short read on a socket. It is\n"
+                f"        // what makes a `size < header` guard reachable at all\n"
+                f"        // (D-040).\n"
+                f"        //\n"
+                f"        size_t Reported = Bytes;\n"
+                f"        if (Input.WireSize != 0 && Input.WireSize < kPageSize) {{\n"
+                f"          Reported = Input.WireSize;\n"
+                f"        }}\n"
+                f"        Backend->{reg}(Reported);\n"
+            )
+        else:
+            size_write += f"        Backend->{reg}(Bytes);\n"
+    else:
+        size_write = (
+            "        // No separate length parameter was identified, so the target\n"
+            "        // must derive the length from the data itself.\n"
+        )
+
+    # --- field-by-field guest writes -------------------------------------
+    #
+    # Length fields are written VERBATIM from the test-case here, never recomputed.
+    # The disagreement between a declared length and the real payload IS the bug on
+    # this class of target, and recomputing it at delivery time would quietly neuter
+    # every overflow test-case. Generate() is where they are made consistent.
+    writes: list[str] = []
+    for field in spec.fields:
+        if field.kind == "bytes":
+            writes.append(
+                f"        if (!Input.{field.name}.empty() &&\n"
+                f"            !Backend->VirtWriteDirty(Gva_t(Address),\n"
+                f"                                     Input.{field.name}.data(),\n"
+                f"                                     Input.{field.name}.size())) {{\n"
+                f'          fmt::print("{namespace}: failed to write '
+                f'{field.name}\\n");\n'
+                f"          std::abort();\n"
+                f"        }}"
+            )
+            continue
+        note = ""
+        if field.kind == "length":
+            note = (
+                f"        //\n"
+                f"        // Written from the test-case, NOT recomputed from the\n"
+                f"        // payload. The disagreement between them is the bug\n"
+                f"        // trigger; recomputing here would neuter every overflow.\n"
+                f"        //\n"
+            )
+        writes.append(
+            note
+            + f"        if (!Backend->VirtWriteStructDirty(Gva_t(Address),\n"
+            f"                                           &Input.{field.name})) {{\n"
+            f'          fmt::print("{namespace}: failed to write {field.name}\\n");\n'
+            f"          std::abort();\n"
+            f"        }}\n"
+            f"        Address += sizeof(Input.{field.name});"
+        )
+
+    # --- symbol constants and simulated returns --------------------------
+    entry_bp = next(b for b in harness.breakpoints if b.purpose == "fuzz_entry")
+    constants = [f'constexpr const char *kFuzzEntry = "{entry_bp.symbol}";']
+    simulated: list[str] = []
+    for index, bp in enumerate(harness.breakpoints):
+        if bp.action != "simulate_return":
+            continue
+        name = f"kSkip{index:02d}"
+        constants.append(
+            f'constexpr const char *{name} = "{bp.symbol}";'
+            f"  // {bp.purpose}: {ascii_comment(bp.rationale)[:90]}"
+        )
+        simulated.append(
+            f"  //\n"
+            f"  // {bp.symbol}: {bp.purpose}.\n"
+            f"  // {ascii_comment(bp.rationale)[:180]}\n"
+            f"  //\n"
+            f"  if (!g_Backend->SetBreakpoint({name}, [](Backend_t *Backend) {{\n"
+            f"        Backend->SimulateReturnFromFunction({bp.return_value});\n"
+            f"      }})) {{\n"
+            f'    fmt::print("{namespace}: failed to SetBreakpoint on {{}}\\n",'
+            f" {name});\n"
+            f"    return false;\n"
+            f"  }}\n"
+        )
+
+    return MODULE_TEMPLATE.format(
+        spec_path=spec_path,
+        harness_path=harness_path,
+        entry_symbol=harness.entry_symbol,
+        input_param=harness.input_param,
+        size_note=(
+            f", length in {harness.size_param}" if harness.size_param else ""
+        ),
+        source_functions=ascii_comment(
+            ", ".join(sorted(set(spec.source_functions + harness.source_functions)))
+        )
+        or "(unrecorded)",
+        input_rationale="\n".join(
+            f"//   {line}" for line in ascii_comment(spec.rationale).splitlines()
+        )
+        or "//   (none)",
+        harness_rationale="\n".join(
+            f"//   {line}" for line in ascii_comment(harness.rationale).splitlines()
+        )
+        or "//   (none)",
+        namespace_name=namespace,
+        symbol_constants="\n".join(constants),
+        max_input_bytes=harness.max_input_bytes,
+        struct_definition=struct,
+        struct_name=spec.struct_name,
+        to_json_body=to_json,
+        from_json_body=from_json,
+        sequence_wrapper=wrapper,
+        sequence_wording=sequence_wording,
+        wire_size_expr=wire_size,
+        parse_body=parse_body,
+        size_param_write=size_write,
+        pointer_wording=(
+            "HOLDS the buffer address"
+            if harness.input_is_pointer
+            else "IS the buffer address"
+        ),
+        input_reg_getter=_register(harness.input_param),
+        input_reg_setter=_register(harness.input_param),
+        write_body="\n\n".join(writes),
+        simulated_returns="\n".join(simulated),
+        restore_wording=(
+            "The snapshot restore handles guest memory and registers; the only "
+            "residual state here is the input queue, which InsertTestcase clears "
+            "before each test-case. Restoring twice would be as wrong as not "
+            "restoring, so this is a no-op (DECISIONS R2)."
+            if not harness.restore_globals
+            else f"Resets {harness.restore_globals} in addition to the snapshot "
+            f"restore -- see the harness rationale for why."
+        ),
+        generate_body=_generate_body(spec, harness),
+        mutate_body=_mutate_body(spec, harness),
+        target_var=target_var,
+        target_name=harness.target_name,
+    )
+
+
+def _json_default_by_name(spec: InputSpec, name: str) -> str:
+    if name == "WireSize":
+        return "uint32_t(0)"
+    field = next(f for f in spec.fields if f.name == name)
+    if field.kind == "bytes":
+        return f"std::vector<uint8_t>{{}}"
+    if field.kind == "magic":
+        return f"{field.ctype}({field.magic_value:#x})"
+    return f"{field.ctype}(0)"
+
+
+def _generate_body(spec: InputSpec, harness: HarnessSpec) -> str:
+    """Build one structure (or a sequence) from scratch, per the spec."""
+    tail = next((f for f in spec.fields if f.kind == "bytes"), None)
+    lines: list[str] = []
+
+    build: list[str] = [f"      {spec.struct_name} Item;"]
+    for field in spec.fields:
+        if field.kind == "bytes":
+            cap = min(field.max_length or 256, harness.max_input_bytes - spec.header_bytes)
+            build.append(f"      const uint32_t Len = GetUint32(0, {max(cap, 1)});")
+            build.append(f"      Item.{field.name}.resize(Len);")
+            build.append(f"      for (uint32_t I = 0; I < Len; I++) {{")
+            build.append(f"        Item.{field.name}[I] = uint8_t(GetUint32(0, 255));")
+            build.append(f"      }}")
+        elif field.kind == "magic":
+            build.append(
+                f"      // The parser compares this against a constant, so a random\n"
+                f"      // value is rejected immediately. Kept correct MOST of the\n"
+                f"      // time so the corpus gets past the check at all.\n"
+                f"      Item.{field.name} = GetUint32(1, 10) == 1\n"
+                f"                              ? {field.ctype}(GetUint32(0, 0xffff))\n"
+                f"                              : {field.ctype}({field.magic_value:#x});"
+            )
+        elif field.kind == "length":
+            counted = next(f for f in spec.fields if f.name == field.counts_field)
+            build.append(
+                f"      // Consistent with the payload: an inconsistent length is\n"
+                f"      // rejected at the parser's first check, and a corpus of\n"
+                f"      // rejected inputs teaches the fuzzer nothing (CP4).\n"
+                f"      Item.{field.name} = {field.ctype}(Item.{counted.name}.size());"
+            )
+        else:
+            build.append(
+                f"      Item.{field.name} = {field.ctype}(GetUint32(0, 16));"
+            )
+    if spec.wire_size_override:
+        build.append(
+            "      // Usually the natural size; occasionally a lie, which is the\n"
+            "      // only way a `size < header` guard is reachable (D-040).\n"
+            "      Item.WireSize = GetUint32(1, 8) == 1 ? GetUint32(0, 8) : 0;"
+        )
+
+    if harness.deliver_sequence:
+        lines.append(f"    {spec.sequence_field_name}_t Root;")
+        lines.append("    const uint32_t Count = GetUint32(1, 10);")
+        lines.append("    for (uint32_t N = 0; N < Count; N++) {")
+        lines.extend(build)
+        lines.append(f"      Root.{spec.sequence_field_name}.emplace_back(Item);")
+        lines.append("    }")
+    else:
+        lines.append(f"    {spec.struct_name} Root;")
+        lines.extend(f"  {line}" for line in build)
+        lines.append("    Root = Item;")
+
+    lines.append("    json::json Serialized;")
+    lines.append("    to_json(Serialized, Root);")
+    lines.append("    return Serialized.dump();")
+    return "\n".join(lines)
+
+
+def _mutate_body(spec: InputSpec, harness: HarnessSpec) -> str:
+    """Mutate an existing test-case structurally.
+
+    Deliberately allows length fields to disagree with their payload -- that
+    disagreement is the bug on this class of target, and Generate() is where
+    consistency is kept.
+    """
+    tail = next((f for f in spec.fields if f.kind == "bytes"), None)
+    scalar = [f for f in spec.fields if f.kind in {"scalar", "magic", "length"}]
+    seq = harness.deliver_sequence
+    root_type = (
+        f"{spec.sequence_field_name}_t" if seq else spec.struct_name
+    )
+    items = f"Root.{spec.sequence_field_name}" if seq else "Items"
+
+    lines = [
+        f"    {root_type} Root;",
+        "    try {",
+        "      const auto &Parsed = json::json::parse(Data, Data + DataLen);",
+        f"      Root = Parsed.get<{root_type}>();",
+        "    } catch (const std::exception &) {",
+        "      // Not our format -- start fresh rather than aborting the master.",
+        "      return Generate();",
+        "    }",
+    ]
+    if not seq:
+        lines.append(f"    std::vector<{spec.struct_name}> Items{{Root}};")
+
+    lines += [
+        f"    if ({items}.empty()) {{",
+        "      return Generate();",
+        "    }",
+        "",
+        f"    const size_t Index = GetUint32(0, uint32_t({items}.size() - 1));",
+        f"    auto &Item = {items}[Index];",
+        "",
+        "    switch (GetUint32(0, 5)) {",
+        "    case 0:",
+    ]
+    if scalar:
+        lines += [
+            f"      // Flip a header field. Length fields included ON PURPOSE: a",
+            f"      // length that disagrees with the payload is the bug.",
+            f"      switch (GetUint32(0, {len(scalar) - 1})) {{",
+        ]
+        for index, field in enumerate(scalar):
+            lines.append(f"      case {index}:")
+            lines.append(
+                f"        Item.{field.name} = {field.ctype}(GetUint32(0, 0xffff));"
+            )
+            lines.append("        break;")
+        lines.append("      }")
+    lines.append("      break;")
+
+    if tail:
+        lines += [
+            "    case 1: {",
+            "      // Grow the payload without touching the declared length.",
+            f"      const uint32_t Extra = GetUint32(1, 64);",
+            f"      for (uint32_t I = 0; I < Extra; I++) {{",
+            f"        Item.{tail.name}.push_back(uint8_t(GetUint32(0, 255)));",
+            "      }",
+            "      break;",
+            "    }",
+            "    case 2:",
+            f"      // Shrink it, likewise leaving the length alone.",
+            f"      if (!Item.{tail.name}.empty()) {{",
+            f"        Item.{tail.name}.resize(Item.{tail.name}.size() / 2);",
+            "      }",
+            "      break;",
+            "    case 3:",
+            f"      if (!Item.{tail.name}.empty()) {{",
+            f"        Item.{tail.name}[GetUint32(0, uint32_t(Item.{tail.name}.size() - 1))] =",
+            "            uint8_t(GetUint32(0, 255));",
+            "      }",
+            "      break;",
+        ]
+    if seq:
+        lines += [
+            "    case 4:",
+            "      // Duplicate a structure. Repetition is how a fixed-size table",
+            "      // gets exhausted, and coverage gives no gradient toward it",
+            "      // (eval/coverage_gradient.py).",
+            f"      if ({items}.size() < 64) {{",
+            f"        {items}.push_back(Item);",
+            "      }",
+            "      break;",
+            "    case 5:",
+            f"      if ({items}.size() > 1) {{",
+            f"        {items}.erase({items}.begin() + Index);",
+            "      }",
+            "      break;",
+        ]
+    if spec.wire_size_override:
+        lines += [
+            "    default:",
+            "      Item.WireSize = GetUint32(0, 16);",
+            "      break;",
+            "    }",
+        ]
+    else:
+        lines += ["    default:", "      break;", "    }"]
+
+    if not seq:
+        lines.append("    Root = Items[0];")
+    lines += [
+        "    json::json Serialized;",
+        "    to_json(Serialized, Root);",
+        "    std::string Out = Serialized.dump();",
+        "    if (Out.size() > MaxSize) {",
+        "      return Generate();",
+        "    }",
+        "    return Out;",
+    ]
+    return "\n".join(lines)
+
+
+def write_module(
+    spec: InputSpec,
+    harness: HarnessSpec,
+    out_path: Path,
+    **kwargs,
+) -> Path:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(generate_module(spec, harness, **kwargs), encoding="utf-8")
+    return out_path
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument(
@@ -322,13 +784,51 @@ def main(argv: list[str] | None = None) -> int:
         help="InputSpec JSON, from prep/input_struct.py",
     )
     ap.add_argument(
+        "--harness",
+        type=Path,
+        default=None,
+        help="HarnessSpec JSON, from prep/harness_derive.py; enables --module-out",
+    )
+    ap.add_argument(
         "--out",
         type=Path,
         default=REPO_ROOT / "fuzzer" / "module" / "generated_input.h",
     )
+    ap.add_argument(
+        "--module-out",
+        type=Path,
+        default=None,
+        help="write a COMPLETE fuzzer module here (needs --harness)",
+    )
+    ap.add_argument("--namespace", default=None)
     args = ap.parse_args(argv)
 
     spec = InputSpec.model_validate_json(args.spec.read_text(encoding="utf-8"))
+
+    if args.module_out:
+        harness_path = args.harness or REPO_ROOT / "artifacts" / "harness_spec.json"
+        if not harness_path.exists():
+            raise SystemExit(
+                f"--module-out needs a HarnessSpec; {harness_path} does not exist. "
+                f"Run: python -m prep.harness_derive"
+            )
+        harness = HarnessSpec.model_validate_json(
+            harness_path.read_text(encoding="utf-8")
+        )
+        path = write_module(
+            spec, harness, args.module_out,
+            spec_path=str(args.spec), harness_path=str(harness_path),
+            namespace=args.namespace,
+        )
+        text = path.read_text(encoding="utf-8")
+        print(f"{harness.entry_symbol}: wtf target {harness.target_name!r}")
+        print(f"  {len(spec.fields)} field(s), {spec.header_bytes}-byte header")
+        print(f"  {len(harness.breakpoints)} derived breakpoint(s)")
+        print(f"  sequence per test-case: {harness.deliver_sequence}")
+        print(f"wrote {path} ({len(text.splitlines())} lines, "
+              f"{'ASCII' if all(ord(c) < 128 for c in text) else 'NON-ASCII!'})")
+        return 0
+
     path = write_header(spec, args.out, spec_path=str(args.spec))
 
     print(f"{spec.module}!{spec.entry_symbol}: {len(spec.fields)} field(s)")

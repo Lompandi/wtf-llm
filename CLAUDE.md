@@ -1242,3 +1242,153 @@ property of the bug — re-check on `bochscpu` before judging.
   our shape.
 Target archives (`target-tlv_server.7z`, `target-hevd.7z`) come from the repo's
 Releases and extract into `targets/`.
+
+---
+
+## 14. ADDITIONS BUILT ON TOP OF THIS SPEC
+
+Everything above is the original design. This section records what was **added**
+while building it — components this document did not name, and decisions it left
+open. It exists because §8's checkpoints are the definition of done (RULE 3), and
+**three of the four components below had no checkpoint** — which is exactly why they
+were the last things built and the buggiest when finally written (D-055, D-057).
+
+If you extend this project, add the gate first.
+
+### 14.1 One-command setup — `tools/bootstrap.py`
+
+§4 says "record everything installed, with versions, in `docs/ENVIRONMENT.md`". That
+is necessary and insufficient: a path recorded in a *document* is not read by any
+consumer. The same failure happened **three times** — symbolizer-rs, the
+`0vercl0k/snapshot` extension, and Ghidra itself were each installed and working
+while every consumer reported them missing, because nothing wrote the path into
+`config/` (D-050, D-060).
+
+So: `python -m tools.bootstrap` checks each tool, **records its path into config**,
+and reports which of the two it did. It also fetches Ghidra when absent (pinned
+version, sha256 verified, into `third_party/`).
+
+**Ghidra is MANDATORY, not a prerequisite among others.** §4 lists it alongside
+WinDbg and symbolizer-rs, which understates it now: Ghidra supplies the pseudo-C
+from which the model derives the input structure (§14.3) *and* the harness (§14.4),
+so **without Ghidra there is no `InsertTestcase` and the fuzzer has nothing to run**.
+Three of the four LLM stages read A2 directly.
+
+Two rules for anything added here:
+
+- **Config is consulted LAST**, after the explicit argument and the environment
+  variable. A committed path must never win over an env var, or a machine where the
+  committed path is wrong cannot be fixed without editing tracked files.
+- **The bootstrap never installs anything needing administrator rights** (a
+  hypervisor, a guest VM, the Windows SDK). It reports the exact command instead. A
+  setup script that half-elevates is worse than one that explains.
+
+### 14.2 Snapshot acquisition is automated — §13.6 by machine
+
+§13.6 describes the snapshot workflow as four manual KD steps, and CP3 wraps them by
+**emitting** the command list. That is now executed as well, non-interactively:
+
+```
+kd -k com:pipe,port=\\.\pipe\<name>,resets=0,reconnect
+   -c ".load <snapshot.dll>; bp <module>!<entry> \"!snapshot -k full <state>; qq\"; g"
+```
+
+**The ordering rule, because the obvious form is wrong.** Do **not** write
+`-c ".load ...; bp ...; g; !snapshot ...; qq"`. That assumes KD resumes executing the
+`-c` string once the breakpoint fires, which KD does not promise. **Attach the
+command list to the breakpoint itself.** The breakpoint then *is* the definition of
+"the state worth snapshotting" — hitting it is the judgement, so no human has to
+decide when to act.
+
+`--wow64` issues `!wow64exts.sw` **before** `bp`/`!snapshot` (§13.6 item 4). After the
+fact you capture the 32-bit view, which wtf cannot use, and it surfaces much later as
+a puzzling wtf error.
+
+**What is still not automatic, and cannot be:** something must drive the target to
+its parser. For a service, `g` never returns until a client connects. `--kd-stimulus`
+runs a command for that (`tools/poke_tcp.py` is a generic implementation), but *what*
+to send and *on which port* is not derivable from the binary. That is target-specific
+**stimulus**, not judgement — do not describe it as a limitation of the automation's
+intelligence.
+
+**Status: written, never executed.** No guest VM exists on the development host, so
+what is tested is the argv, each refusal, and the Windows quoting — not the
+orchestration. Edges 1/6/6b/7/8 remain `pending` and both the code and the README say
+"NEVER EXERCISED". Two bugs were nevertheless caught before any VM existed, by
+printing the command in `--dry-run` (D-058, D-059) — **the dry-run path is the only
+checkable surface here, so build it first.**
+
+### 14.3 LLM-derived input structure — the box §3.1 draws with no gate
+
+§3.1 draws *"LLM-generated input struct / reads pseudo-C (A2)"* and §3.2 gives it
+edges 12 and 14. **No gate in §8 covers either**, so it had no definition of done and
+stayed a hand-written struct through CP4–CP10 while looking finished on the diagram
+(D-055). Recorded as GATE 11.
+
+Two things that must not be undone:
+
+- **The model fills a schema; it never writes C++.** `prep/input_struct.py` produces
+  a pydantic-validated `InputSpec` (fields, types, endianness, **whether a length is
+  in bytes or elements**, magic values); `fuzzer/codegen.py` — ordinary code —
+  renders the C++. Free-form C++ cannot be schema-checked, a compile error surfaces a
+  long way from the model that caused it, and RULE 4's "units and encoding are
+  stated" cannot be enforced in prose. The concrete failure: the model used U+2011 in
+  a comment and MSVC killed the build with C4819 under `/WX` (D-054).
+- **The entry's CALLERS go into the prompt.** Whether a parser is called repeatedly
+  is a property of the *caller*, not of the parser. Given only `ProcessPacket` the
+  model answered `supports_sequence: False`; given `main`'s `recv` loop as well, it
+  answered correctly.
+
+Validate against a hand-written module by **layout** (offsets, widths, length
+semantics), never by field name — pseudo-C has no names, so comparing names tests the
+model's word choice rather than its understanding.
+
+### 14.4 LLM-derived harness — `HarnessSpec`
+
+The same treatment for the harness logic itself: which breakpoints to set, what
+counts as a crash, which calls to stub out. `prep/harness_derive.py` derives a
+`HarnessSpec` from the entry closure's pseudo-C using the 550B role at temperature
+0.0, and `fuzzer/codegen.py --module` renders a complete registered wtf module.
+
+The contract carries one rule worth restating, because it is where a "helpful"
+harness silently destroys the campaign: **`Generate()` makes length fields
+consistent; writes into guest memory are verbatim.** A harness that repairs a
+length field on the way in cannot find a length-handling bug — *the disagreement is
+the bug*.
+
+`HarnessSpec` requires **exactly one** `fuzz_entry` breakpoint. Without it nothing is
+ever delivered and the campaign runs happily executing the untouched snapshot, at
+full speed, reporting coverage.
+
+### 14.5 Pipeline driver — `orchestrator/pipeline.py`
+
+§8 defines no checkpoint for a driver, and the consequence was measurable: an
+adversarial pass found **eleven** distinct ways it reported success without doing the
+work (D-057). Recorded as GATE 12. The rules that came out of it generalise to
+anything that orchestrates stages here:
+
+- **Exit code 0 is not evidence.** `analyzeHeadless` and `wtf` both exit 0 having
+  produced nothing. Every stage names the artifact that proves it ran.
+- **Existence is not evidence either.** Check content: a zero-byte file, a directory
+  where a file belongs, and a `scheduler_result.json` recording `peak_executions=0`
+  all "exist".
+- **Stages whose work is TIME are never skipped as up-to-date.** A requested
+  15-minute campaign must not become zero seconds of fuzzing that points at the
+  previous run's advisory.
+- **A `--only`/`--from` typo is an error, not a no-op.** Prefix matching also means
+  `--from 1` can match stage `10`.
+- **Scope belongs in the artifact FILENAME.** A module-scoped export silently
+  satisfied `--scope function-closure`, and the reverse dropped 555 breakpoints.
+- **The stage ordering is not §3.1's diagram order.** Edges 4 and 5 read as
+  "entry first", but the entry is chosen by a model reading pseudo-C, so **A2 at
+  module scope must exist before the entry is known**. Then the entry, then
+  everything scoped to its closure.
+
+### 14.6 Derived artifact A6 — global data symbols
+
+Added at CP7, not in §3.1's artifact list. Decompilation drops a table's declared
+capacity, so the seed generator could not reason about how many entries it took to
+exhaust a global array — the exact thing the frontier pointed at. A6 records each
+global's address, size, and the gap to the next symbol, produced by the same
+`prep/ghidra_headless.py` pass (edge 10b).
+
