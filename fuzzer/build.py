@@ -70,6 +70,8 @@ def find_vcvars() -> Path:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         candidates += [Path(p) for p in proc.stdout.split("\n") if p.strip()]
 
@@ -144,6 +146,8 @@ def build(*, clean: bool = False, verbose: bool = False) -> Path:
             env=sanitised_env(),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=3600,
         )
     finally:
@@ -189,6 +193,8 @@ def registered_targets(target_dir: Path | None = None) -> list[str]:
         [str(WTF_EXE), "fuzz", "--name", "__does_not_exist__", "--backend=bochscpu"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env=sanitised_env(),
         cwd=target_dir,
         timeout=120,

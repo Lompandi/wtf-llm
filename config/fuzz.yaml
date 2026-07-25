@@ -81,8 +81,10 @@ symbols:
   nt_symbol_path:
     # Guest-kernel PDBs for nt!* breakpoints (crash detection hooks).
     - srv*C:\symbols*https://msdl.microsoft.com/download/symbols
-    # The target's own PDB. Templated per target at launch.
-    - "{target_dir}/target"
+    # The target's own PDB, which sits beside its binary. Substituted at launch
+    # from target.binary's parent -- NOT from target_dir, because the two can
+    # differ (ours is a junction to another target's state).
+    - "{pdb_dir}"
   # First resolve downloads PDBs and is slow (373 s measured); C:\symbols caches.
   cache_dir: C:\symbols
 

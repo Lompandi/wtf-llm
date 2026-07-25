@@ -11,7 +11,14 @@
 # manual choice recorded here.
 
 target:
-  name: tlv_server # wtf --name; must match the Target_t registration
+  # THREE DISTINCT THINGS, kept separate because conflating them silently made
+  # a campaign run wtf's own module instead of ours:
+  #   name       -- the subject under test
+  #   module     -- wtf --name, i.e. OUR Target_t registration
+  #   target_dir -- the directory tree wtf reads (inputs/outputs/coverage/...)
+  name: tlv_server
+  module: snapfuzz
+  target_dir: targets/snapfuzz
   binary: targets/tlv_server/target/tlv_server.exe
   os: windows # Windows first (section 2)
   arch: x86-64 # wtf is x86-64 only
