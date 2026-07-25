@@ -1,0 +1,675 @@
+# snapfuzz architecture graph -- machine-readable form of CLAUDE.md section 3.2.
+#
+# The 50 canonical edges are transcribed verbatim from section 3.2, including
+# its lettered sub-edges (21a, 21b, 23b, 32b, 32c, 36b, 37b, 41b), and must
+# never be renumbered. Ids are strings so a letter suffix is not a special case.
+#
+# Edge ids not in section 3.2 are *derived*: required to make the graph
+# well-formed but not written in the document. Each carries `derived: true`
+# and a rationale, and is recorded in docs/DEVIATIONS.md.
+#
+# `status` is one of: pending | live. An edge is `live` only once its
+# checkpoint gate has passed -- not when the code merely compiles (RULE 3).
+#
+# TOPOLOGY (section 12): wtf is a MASTER plus N WORKERS, not one process.
+# Nodes carrying `fanout: per_worker` exist once per worker; edges into them
+# are delivered to EVERY worker. Getting that backwards is the classic
+# distributed-fuzzing wiring bug (section 3.2). Mutation happens on the
+# MASTER, never on a worker.
+
+version: 2
+
+# Nodes with no producer inside this graph. They are supplied from outside the
+# pipeline: the binary under test, the initial seed corpus, and the parts of
+# the fuzzer module we hand-write. Section 3.2 lists no inbound edge for any of
+# them, and inventing one would misrepresent the design, so reachability is
+# asserted from this set (see docs/DEVIATIONS.md, D-002).
+roots:
+  - target_binary
+  - fuzz_target.fuzzer_config
+  - fuzzer_module.insert_testcase
+  - fuzzer_module.restore_hook
+  - fuzzer_module.manual_tweaks
+
+nodes:
+  # --- stage 1: target preparation -------------------------------------
+  target_binary:
+    kind: input
+    stage: prep
+    desc: PE/ELF x86-64 binary under test. No source.
+  snapshot.break_at_entry:
+    kind: process
+    stage: prep
+    desc: Put the target in the desired state and break at the fuzz entry (KD).
+    impl: prep/snapshot_win.py
+  snapshot.windows_kd:
+    kind: process
+    stage: prep
+    desc: >-
+      !snapshot via the 0vercl0k/snapshot KD extension. A COMPANION TOOL, not
+      wtf. Writes mem.dmp + regs.json.
+    impl: prep/snapshot_win.py
+  snapshot.linux_gdb:
+    kind: process
+    stage: prep
+    desc: Linux snapshot via GDB against a QEMU VM. Experimental; ASLR off.
+    impl: prep/snapshot_linux.py
+  ghidra.analyze:
+    kind: process
+    stage: prep
+    desc: Headless Ghidra import + auto-analysis of the target binary.
+    impl: prep/ghidra_headless.py
+  ghidra.fuzz_entry_selection:
+    kind: process
+    stage: prep
+    ours: llm_layer
+    calls_llm: true
+    desc: LLM picks the parser function, input_param and size_param. Slow clock.
+    impl: prep/entry_select.py
+  ghidra.decompile:
+    kind: process
+    stage: prep
+    desc: Batch-decompile the entry's call closure to pseudo-C.
+    impl: prep/pseudoc_cache.py
+  ghidra.bb_enumerate:
+    kind: process
+    stage: prep
+    desc: Enumerate basic-block start addresses for coverage breakpoints.
+    impl: prep/ghidra_headless.py
+
+  # --- artifacts crossing stage boundaries -----------------------------
+  a1_snapshot:
+    kind: artifact
+    stage: prep
+    desc: state/ -- mem.dmp, regs.json, symbol-store.json.
+    path: artifacts/a1_snapshot.json
+  a2_pseudoc_cache:
+    kind: artifact
+    stage: prep
+    desc: Pseudo-C keyed by (module, static_addr).
+    path: artifacts/a2_pseudoc.sqlite
+  a3_bp_list:
+    kind: artifact
+    stage: prep
+    desc: >-
+      Basic-block RVAs. Delivered to workers by placing .cov files in
+      targets/<name>/coverage/ -- `fuzz` has no --coverage flag (D-017).
+    path: artifacts/a3_bp_list.json
+  a4_corpus:
+    kind: artifact
+    stage: fuzz
+    desc: outputs/ -- the minset, owned by the master.
+    path: artifacts/a4_corpus
+  a5_crashes:
+    kind: artifact
+    stage: fuzz
+    desc: crashes/ -- written MASTER-side from worker-reported results (D-018).
+    path: artifacts/a5_crashes
+
+  # --- stage 2: the fuzzer module (ONE artifact, BOTH roles) -----------
+  fuzzer_module.llm_input_struct:
+    kind: process
+    stage: fuzz
+    ours: llm_layer
+    calls_llm: true
+    desc: >-
+      LLM-derived description of the input structure. Generated at BUILD time,
+      not at run time -- the output is C++ that goes into the module.
+    impl: llm/seed_gen.py
+  fuzzer_module.insert_testcase:
+    kind: input
+    stage: fuzz
+    desc: >-
+      Hand-written InsertTestcase. Runs on the WORKER. Returning false calls
+      std::abort() -- to skip a testcase return true (D-016).
+    impl: fuzzer/module/
+  fuzzer_module.restore_hook:
+    kind: input
+    stage: fuzz
+    desc: Hand-written per-iteration state reset. Runs on the WORKER.
+    impl: fuzzer/module/
+  fuzzer_module.manual_tweaks:
+    kind: input
+    stage: fuzz
+    desc: >-
+      Target-specific breakpoints, stop conditions, non-determinism patches.
+      The crash oracle originates here -- wtf infers nothing (section 13.7).
+    impl: fuzzer/module/
+  fuzzer_module.bus:
+    kind: process
+    stage: fuzz
+    desc: >-
+      The Target_t registration binding Init/InsertTestcase/Restore/
+      CustomMutator_t::Create into one artifact loaded by BOTH roles.
+    impl: fuzzer/module/
+
+  # --- stage 2: the fuzz target's four slots ---------------------------
+  fuzz_target.fuzzer_config:
+    kind: input
+    stage: fuzz
+    desc: Startup seeds (inputs/) and max_len/runs.
+    impl: config/fuzz.yaml
+  fuzz_target.snapshot:
+    kind: process
+    stage: fuzz
+    desc: The snapshot slot (wtf --state, defaulted from --target).
+    impl: fuzzer/run.py
+  fuzz_target.fuzzer_module:
+    kind: process
+    stage: fuzz
+    desc: The module slot (--name), loaded by master AND every worker.
+    impl: fuzzer/run.py
+  fuzz_target.bp_list:
+    kind: process
+    stage: fuzz
+    desc: The coverage slot -- targets/<name>/coverage/, implicit on `fuzz`.
+    impl: fuzzer/run.py
+
+  # --- stage 2: the master (fast clock -- NO LLM, section 12.2) --------
+  master.corpus:
+    kind: process
+    stage: fuzz
+    role: master
+    desc: The corpus, owned by the master. Section 12.1.
+    impl: fuzzer/corpus.py
+  master.mutator:
+    kind: process
+    stage: fuzz
+    role: master
+    ours: llm_layer
+    calls_llm: false
+    desc: >-
+      CustomMutator_t::GetNewTestcase -- GENERATION HAPPENS HERE, not on the
+      worker. It CONSUMES LLM seeds from the spool but must never CALL the LLM:
+      it runs per testcase on the hot path and would stall every worker
+      (section 12.1). Spool reads must be non-blocking; on empty, fall straight
+      through to the built-in mutator.
+    impl: fuzzer/module/
+  master.aggregate_coverage:
+    kind: process
+    stage: fuzz
+    role: master
+    desc: Aggregate coverage across all workers. The only valid plateau input.
+    impl: engine_bridge/coverage.py
+  master.crash_collect:
+    kind: process
+    stage: fuzz
+    role: master
+    desc: >-
+      Master writes crashes/<Crash_t::CrashName> from the worker's reported
+      result. An empty CrashName is silently dropped (D-018).
+    impl: engine_bridge/crash_watch.py
+
+  # --- stage 2: the workers (fast clock -- NO LLM) ---------------------
+  worker.execute:
+    kind: process
+    stage: fuzz
+    role: worker
+    fanout: per_worker
+    desc: Init / InsertTestcase / Restore, then execute. One per worker.
+    impl: fuzzer/workers.py
+  worker.coverage:
+    kind: process
+    stage: fuzz
+    role: worker
+    fanout: per_worker
+    desc: Per-worker local coverage, reported back to the master.
+    impl: fuzzer/workers.py
+
+  # --- stage 2: the slow clock (SEPARATE PROCESS, section 12.2) --------
+  slow_clock.llm_seed_gen:
+    kind: process
+    stage: fuzz
+    role: sidecar
+    ours: llm_layer
+    calls_llm: true
+    desc: >-
+      Separate process. Never inside the master (it serves every worker) and
+      never inside a worker (it sees only its own coverage).
+    impl: llm/sidecar.py
+
+  # --- stage 3: coverage reporting -------------------------------------
+  analysis.cov_trace_gen:
+    kind: process
+    stage: analysis
+    desc: wtf run --trace-type=cov over the minset.
+    impl: analysis/coverage_report.py
+  analysis.symbolize_cov:
+    kind: process
+    stage: analysis
+    desc: symbolizer-rs --style modoff. A COMPANION TOOL, not wtf.
+    impl: analysis/coverage_report.py
+  analysis.lighthouse_report:
+    kind: process
+    stage: analysis
+    desc: Load symbolized coverage traces in lighthouse. Companion tool.
+    impl: analysis/coverage_report.py
+
+  # --- stage 3: the five triage signals --------------------------------
+  analysis.crash_dedup:
+    kind: process
+    stage: analysis
+    desc: >-
+      Stack-hash bucketing over STATIC addresses, collapsing cross-worker
+      duplicates too (section 12.5). NO LLM.
+    impl: analysis/dedup.py
+  analysis.crash_classification:
+    kind: process
+    stage: analysis
+    desc: Fault kind, read/write, near-null vs wild, attacker influence. NO LLM.
+    impl: analysis/classify.py
+  analysis.deterministic_replay:
+    kind: process
+    stage: analysis
+    desc: wtf run --input, N times on bochscpu -- the only det. backend. NO LLM.
+    impl: analysis/replay.py
+  analysis.trace_gen:
+    kind: process
+    stage: analysis
+    desc: wtf run --trace-type=rip / tenet (tenet is bochscpu-only). NO LLM.
+    impl: analysis/trace.py
+  analysis.symbolize_trace:
+    kind: process
+    stage: analysis
+    desc: symbolizer-rs over the execution trace. Companion tool. NO LLM.
+    impl: analysis/trace.py
+  analysis.reverse_engineer:
+    kind: process
+    stage: analysis
+    ours: llm_layer
+    calls_llm: false
+    desc: >-
+      Ghidra pseudo-C + disasm + registers at the crash site. ASSEMBLES context
+      for triage; it does not call the LLM itself -- it is inside CP8, whose
+      gate asserts no LLM call occurs anywhere in that path.
+    impl: analysis/reverse.py
+  analysis.llm_triage:
+    kind: process
+    stage: analysis
+    ours: llm_layer
+    calls_llm: true
+    desc: DSPy multi-signal triage. Consumes all FIVE signals explicitly.
+    impl: analysis/triage.py
+  report:
+    kind: process
+    stage: analysis
+    desc: GHSA-format Markdown, confirmed only. Ordinary code, not an LLM.
+    impl: analysis/report.py
+  discard:
+    kind: process
+    stage: analysis
+    desc: Discard log for false positives. Kept for evaluation, not shipped.
+    impl: analysis/report.py
+
+edges:
+  # --- stage 1 internal -------------------------------------------------
+  - id: "1"
+    from: target_binary
+    to: snapshot.break_at_entry
+    status: pending
+    gates: [3]
+  - id: "2"
+    from: target_binary
+    to: ghidra.analyze
+    status: live
+    gates: [2]
+  - id: "3"
+    from: ghidra.fuzz_entry_selection
+    to: snapshot.break_at_entry
+    status: pending
+    gates: [6]
+    note: The entry address tells the snapshotter where to break.
+  - id: "4"
+    from: ghidra.fuzz_entry_selection
+    to: ghidra.decompile
+    status: pending
+    gates: [6]
+  - id: "5"
+    from: ghidra.fuzz_entry_selection
+    to: ghidra.bb_enumerate
+    status: live
+    gates: [2]
+  - id: "6"
+    from: snapshot.break_at_entry
+    to: snapshot.windows_kd
+    status: pending
+    gates: [3]
+    note: Windows branch of the or-split. Windows first (section 2).
+  - id: "6b"
+    from: snapshot.break_at_entry
+    to: snapshot.linux_gdb
+    status: pending
+    gates: [3]
+    derived: true
+    note: >-
+      Linux branch of the same or-split. Section 3.2 writes edge 6 as
+      "break_at_entry -> windows_kd OR linux_gdb"; a graph cannot hold an
+      or-split in one edge, so it is stored as 6 and 6b. Gate 3 requires only
+      one of them. See DEVIATIONS D-003.
+  - id: "7"
+    from: snapshot.windows_kd
+    to: a1_snapshot
+    status: pending
+    gates: [3]
+  - id: "8"
+    from: snapshot.linux_gdb
+    to: a1_snapshot
+    status: pending
+    gates: [3]
+  - id: "9"
+    from: ghidra.decompile
+    to: a2_pseudoc_cache
+    status: pending
+    gates: [6]
+  - id: "10"
+    from: ghidra.bb_enumerate
+    to: a3_bp_list
+    status: live
+    gates: [2]
+
+  # --- stage 1 -> stage 2 (the three cross-stage edges) -----------------
+  - id: "11"
+    from: a1_snapshot
+    to: fuzz_target.snapshot
+    status: live
+    gates: [3]
+  - id: "12"
+    from: a2_pseudoc_cache
+    to: fuzzer_module.llm_input_struct
+    status: pending
+    gates: [6]
+  - id: "13"
+    from: a3_bp_list
+    to: fuzz_target.bp_list
+    status: pending
+    gates: [4]
+
+  # --- stage 2: module construction -------------------------------------
+  - id: "14"
+    from: fuzzer_module.llm_input_struct
+    to: fuzzer_module.bus
+    status: pending
+    gates: [4]
+  - id: "15"
+    from: fuzzer_module.insert_testcase
+    to: fuzzer_module.bus
+    status: pending
+    gates: [4]
+  - id: "16"
+    from: fuzzer_module.restore_hook
+    to: fuzzer_module.bus
+    status: pending
+    gates: [4]
+  - id: "17"
+    from: fuzzer_module.manual_tweaks
+    to: fuzzer_module.bus
+    status: pending
+    gates: [4]
+  - id: "18"
+    from: fuzzer_module.bus
+    to: fuzz_target.fuzzer_module
+    status: pending
+    gates: [4]
+
+  # --- stage 2: the three interfaces, with their fan-out ----------------
+  - id: "19"
+    from: fuzz_target.fuzzer_config
+    to: master.corpus
+    status: pending
+    gates: [4, "4b"]
+    interface: 1
+    interface_name: initial seeds
+    note: Interface 1 goes to the MASTER ONLY.
+  - id: "20"
+    from: fuzz_target.snapshot
+    to: worker.execute
+    status: pending
+    gates: [4, "4b"]
+    interface: 2
+    interface_name: target executable
+    fanout: per_worker
+    note: Every worker needs the snapshot.
+  - id: "21a"
+    from: fuzz_target.fuzzer_module
+    to: master.mutator
+    status: pending
+    gates: [4, "4b"]
+    interface: 2
+    interface_name: target executable
+    note: >-
+      The MASTER loads the module too and uses its Mutator_t to generate. If
+      this edge is dead the master silently falls back to a built-in mutator
+      and EVERY LLM seed is ignored.
+  - id: "21b"
+    from: fuzz_target.fuzzer_module
+    to: worker.execute
+    status: pending
+    gates: [4, "4b"]
+    interface: 2
+    interface_name: target executable
+    fanout: per_worker
+    note: The worker loads the same module for Init / InsertTestcase / Restore.
+  - id: "22"
+    from: fuzz_target.bp_list
+    to: worker.execute
+    status: pending
+    gates: [4, "4b"]
+    interface: 3
+    interface_name: coverage BPs
+    fanout: per_worker
+    note: >-
+      Breakpoints installed per worker at execution setup. Delivered by placing
+      .cov files in targets/<name>/coverage/ -- `fuzz` has no --coverage flag.
+
+  # --- stage 2: generation on the master, execution on the workers ------
+  - id: "23"
+    from: master.corpus
+    to: master.mutator
+    status: pending
+    gates: [4, "4b"]
+    clock: fast
+    note: MUTATION/GENERATION HAPPENS ON THE MASTER, not on the worker.
+  - id: "23b"
+    from: master.mutator
+    to: worker.execute
+    status: pending
+    gates: [4, "4b"]
+    clock: fast
+    fanout: per_worker
+    note: Generated testcase handed out over the wire -- NOT a local dir read.
+  - id: "24"
+    from: worker.execute
+    to: worker.coverage
+    status: pending
+    gates: [4, "4b"]
+    clock: fast
+    fanout: per_worker
+  - id: "25"
+    from: worker.coverage
+    to: master.aggregate_coverage
+    status: pending
+    gates: [4, "4b"]
+    clock: fast
+    fanout: per_worker
+    note: Worker reports back.
+  - id: "26"
+    from: master.aggregate_coverage
+    to: master.corpus
+    status: pending
+    gates: [4, "4b"]
+    clock: fast
+    note: Requeue on new coverage -- decided at the MASTER. No LLM.
+
+  # --- stage 2: the slow clock ------------------------------------------
+  - id: "27"
+    from: master.aggregate_coverage
+    to: slow_clock.llm_seed_gen
+    status: pending
+    gates: [7]
+    clock: slow
+    note: Plateau trigger, computed on AGGREGATE coverage (section 12.3).
+  - id: "28"
+    from: a2_pseudoc_cache
+    to: slow_clock.llm_seed_gen
+    status: pending
+    gates: [6]
+    clock: slow
+    note: The LLM reads decompiled code to reason about unreached branches.
+  - id: "29"
+    from: slow_clock.llm_seed_gen
+    to: master.corpus
+    status: pending
+    gates: [7]
+    clock: slow
+    note: New seeds, via the master's documented ingest path (section 12.1).
+
+  # --- stage 2 artifacts -------------------------------------------------
+  - id: "30"
+    from: master.corpus
+    to: a4_corpus
+    status: pending
+    gates: [4, "4b"]
+  - id: "31"
+    from: worker.execute
+    to: master.crash_collect
+    status: pending
+    gates: [4, "4b"]
+    fanout: per_worker
+  - id: "31b"
+    from: master.crash_collect
+    to: a5_crashes
+    status: pending
+    gates: [4, "4b"]
+    derived: true
+    note: >-
+      Section 3.2 writes edge 31 as a two-hop
+      "worker[i].execute -> master.crash_collect -> A5". A graph edge has one
+      source and one target, so the second hop is stored separately. Confirmed
+      master-side by server.h:861-866. See DEVIATIONS D-018.
+
+  # --- stage 3: coverage reporting --------------------------------------
+  - id: "32"
+    from: a4_corpus
+    to: analysis.cov_trace_gen
+    status: pending
+    gates: [10]
+    note: wtf run --trace-type=cov on the minset.
+  - id: "32b"
+    from: analysis.cov_trace_gen
+    to: analysis.symbolize_cov
+    status: pending
+    gates: [10]
+    note: symbolizer-rs --style modoff.
+  - id: "32c"
+    from: analysis.symbolize_cov
+    to: analysis.lighthouse_report
+    status: pending
+    gates: [10]
+
+  # --- stage 3: the crash chain -----------------------------------------
+  - id: "33"
+    from: a5_crashes
+    to: analysis.crash_dedup
+    status: pending
+    gates: [8]
+  - id: "34"
+    from: analysis.crash_dedup
+    to: analysis.crash_classification
+    status: pending
+    gates: [8]
+  - id: "35"
+    from: analysis.crash_classification
+    to: analysis.deterministic_replay
+    status: pending
+    gates: [8]
+  - id: "36"
+    from: analysis.deterministic_replay
+    to: analysis.trace_gen
+    status: pending
+    gates: [8]
+    note: wtf run --trace-type=rip / tenet.
+  - id: "36b"
+    from: analysis.trace_gen
+    to: analysis.symbolize_trace
+    status: pending
+    gates: [8]
+    note: symbolizer-rs.
+  - id: "37"
+    from: analysis.symbolize_trace
+    to: analysis.reverse_engineer
+    status: pending
+    gates: [6, 8]
+  - id: "37b"
+    from: a2_pseudoc_cache
+    to: analysis.reverse_engineer
+    status: pending
+    gates: [6, 8]
+
+  # --- stage 3: five independent signals into triage --------------------
+  - id: "38"
+    from: analysis.crash_dedup
+    to: analysis.llm_triage
+    status: pending
+    gates: [9]
+    signal: 1
+    signal_name: dedup
+    signal_desc: bucket id, hit count
+  - id: "39"
+    from: analysis.crash_classification
+    to: analysis.llm_triage
+    status: pending
+    gates: [9]
+    signal: 2
+    signal_name: classification
+    signal_desc: fault addr, regs, type
+  - id: "40"
+    from: analysis.deterministic_replay
+    to: analysis.llm_triage
+    status: pending
+    gates: [9]
+    signal: 3
+    signal_name: replay
+    signal_desc: reproduced, deterministic, backend
+  - id: "41"
+    from: analysis.symbolize_trace
+    to: analysis.llm_triage
+    status: pending
+    gates: [9]
+    signal: 4
+    signal_name: symbolize_trace
+    signal_desc: DYNAMIC -- the path actually executed
+  - id: "41b"
+    from: analysis.reverse_engineer
+    to: analysis.llm_triage
+    status: pending
+    gates: [9]
+    signal: 5
+    signal_name: reverse_engineer
+    signal_desc: STATIC -- pseudo-C + disasm
+  - id: "42"
+    from: analysis.llm_triage
+    to: report
+    status: pending
+    gates: [9]
+    condition: verdict == confirmed
+  - id: "43"
+    from: analysis.llm_triage
+    to: discard
+    status: pending
+    gates: [9]
+    condition: verdict == false_positive
+
+  # --- derived edges (not in section 3.2) -------------------------------
+  - id: "1000"
+    from: ghidra.analyze
+    to: ghidra.fuzz_entry_selection
+    status: pending
+    gates: [6]
+    derived: true
+    note: >-
+      Section 3.2 gives ghidra.analyze no outgoing edge and
+      ghidra.fuzz_entry_selection no incoming one, which would leave entry
+      selection unreachable from target_binary and contradict GATE 0. The
+      section 3.1 diagram shows the target binary feeding the Ghidra box with
+      entry selection at its head, so that edge is restored here. See
+      docs/DEVIATIONS.md, D-001.
