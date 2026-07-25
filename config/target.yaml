@@ -1,0 +1,121 @@
+# Target definition (CLAUDE.md CP3).
+#
+# STATUS: the development target is wtf's own `tlv_server`, per DEC-009 and
+# CP1's mandate. Its source is in-tree (src/tlv_server/tlv_server.cc), so it is
+# NOT a valid subject for the project's no-source claim -- it is the harness
+# we build and validate the pipeline against. The real no-source target is
+# still a pending decision (docs/DECISIONS.md).
+#
+# For CP3 the fuzz entry is chosen MANUALLY, as CP3 allows. LLM-driven
+# selection arrives at CP6 and will emit a FuzzEntry to compare against the
+# manual choice recorded here.
+
+target:
+  name: tlv_server # wtf --name; must match the Target_t registration
+  binary: targets/tlv_server/target/tlv_server.exe
+  os: windows # Windows first (section 2)
+  arch: x86-64 # wtf is x86-64 only
+
+  # Both verified, and cross-checked against each other in
+  # tests/test_addr.py::test_chain_against_shipped_target_files.
+  module_base: 0x7ff719e50000 # state/symbol-store.json
+  ghidra_image_base: 0x140000000 # tlv_server.exe PE optional header
+  # slide = 0x7ff5d9e50000
+
+  state_dir: targets/tlv_server/state
+  coverage_dir: targets/tlv_server/coverage # interface 3 -- see D-017
+
+# The manually chosen fuzz entry (CP3). Mirrors arch.contracts.FuzzEntry.
+entry:
+  module: tlv_server
+  symbol: ProcessPacket
+  static_addr: 0x140001150 # Ghidra static space
+  runtime_addr: 0x7ff719e51150 # equals the snapshot's rip -- verified
+  rationale: >-
+    Chosen by hand for CP3. It is the function wtf's own fuzzer_tlv_server.cc
+    breaks on (src/wtf/fuzzer_tlv_server.cc:82), it is where the snapshot's rip
+    already sits, and it is the TLV parser proper -- the first place attacker
+    bytes are interpreted. Its call closure is 14 functions / 58 basic blocks,
+    small enough to instrument fully.
+
+  # HOW THE INPUT ARRIVES -- RESOLVED at CP4 from src/wtf/fuzzer_tlv_server.cc
+  # (the authoritative answer for this target), lines 113-124:
+  #
+  #   Backend->Rdx(PacketSize);                       <- size, in BYTES
+  #   const auto &PacketOriginalAddress = Backend->Rcx();
+  #   auto PacketAddress = PacketOriginalAddress + (0x1000 - PacketSize);
+  #   Backend->Rcx(PacketAddress);                    <- rcx HOLDS the address
+  #
+  # Per the DECISIONS R7/R8 convention: bare "rcx" means the register holds the
+  # buffer's address (dereference and write there), not that it is the buffer.
+  input_param: rcx
+  size_param: rdx # bytes
+
+# How InsertTestcase writes the testcase into guest memory (CP4).
+injection:
+  # Cap enforced inside InsertTestcase so oversized testcases never corrupt
+  # neighbouring guest memory. NOTE: reject them by returning TRUE -- returning
+  # false calls std::abort() and kills the worker (DECISIONS R1 / D-016).
+  max_input_size: 4096
+
+  # PAGE-TAIL ALIGNMENT -- partial compensation for having no ASAN (D-031).
+  #
+  # fuzzer_tlv_server.cc:116-124 writes each packet at
+  #     rcx + (0x1000 - PacketSize)
+  # i.e. flush against the END of the page, so a read past the buffer lands on
+  # the guard page behind it and FAULTS instead of quietly succeeding.
+  #
+  # DEC-001 accepts that silent memory corruption is out of scope. This recovers
+  # part of it for free: it converts a class of out-of-bounds READS -- exactly
+  # what section 2 lists as undetectable -- into observable access violations.
+  # Worth doing on every target whose buffer we control the placement of.
+  page_tail_align: true
+  page_size: 0x1000
+
+  # The testcase wire format for this target is JSON, not raw bytes:
+  #   {"Packets": [{"Command": u32, "Id": u16, "BodySize": u16, "Body": [u8]}]}
+  # BodySize is deliberately mutable INDEPENDENTLY of len(Body) -- that
+  # inconsistency is what reaches the overflow paths.
+  wire_format: json
+  multi_packet: true # one testcase delivers a SEQUENCE of packets
+  # Structural fixups recomputed after mutation so inputs are not rejected at
+  # the first validity check. Frequently the difference between 5% and 50%
+  # coverage (CP4).
+  fixups: []
+  # e.g.
+  # fixups:
+  #   - kind: length
+  #     offset: 4
+  #     size: 4
+  #     endian: little
+  #     covers: [8, null]   # [start, end); null end means "to end of input"
+
+# Where a test-case run stops, and what counts as a crash. Implemented as
+# breakpoints in the fuzzer module (CP4) -- wtf infers NONE of this (13.7).
+stop_conditions:
+  # Breakpoints where the module calls Backend->Stop(Ok_t()).
+  normal_return: []
+  # Symbols whose entry means the target has failed. tlv_server's snapshot was
+  # taken with Application Verifier enabled, which widens this set (D-014):
+  #   nt!KeBugCheck2, nt!KiRaiseSecurityCheckFailure,
+  #   ntdll!RtlDispatchException, verifier!VerifierStopMessage
+  crash_symbols: []
+  # Sources of non-determinism to patch, e.g. nt!ExGenRandom's rdrand.
+  determinism_patches: []
+  # Every Stop(Crash_t(name)) MUST pass a non-empty name: the master drops an
+  # unnamed crash silently and it never reaches crashes/ (D-018).
+  require_named_crashes: true
+
+ghidra:
+  # "closure" enumerates only the call closure reachable from the fuzz entry
+  # (58 blocks here); "module" enumerates everything (613). Closure follows only
+  # STATIC call edges, so it under-instruments indirect dispatch -- D-027.
+  bb_scope: closure
+  project_dir: artifacts/ghidra
+  project_name: snapfuzz
+  # Set GHIDRA_INSTALL_DIR, or pass --ghidra. See docs/ENVIRONMENT.md.
+  install_dir: null
+
+symbols:
+  # Required, and wtf does not set it (D-023).
+  nt_symbol_path_extra: targets/tlv_server/target

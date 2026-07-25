@@ -1,0 +1,163 @@
+# Fuzzing configuration (CLAUDE.md sections 4, 12.4, CP7, CP8).
+#
+# Backend facts below were read out of the cloned wtf source, not assumed:
+#   * the three backends are selected with `wtf --backend {bochscpu,whv,kvm}`
+#   * ParseCovFiles is called only from whv_backend.cc and kvm_backend.cc.
+#     bochscpu gets full-system coverage for free and ignores .cov files
+#     entirely. See docs/DEVIATIONS.md D-004.
+
+# --- distributed topology (section 12.4) ---------------------------------
+# wtf is a MASTER plus N WORKERS. Treating it as a single process anywhere in
+# the design is a listed anti-pattern (section 10).
+topology:
+  master:
+    host: 127.0.0.1
+    # Default from src/wtf/wtf.cc:79 (`master --address`, tcp://localhost:31337)
+    # and wtf.cc:392 (`fuzz --address`, tcp://localhost:31337/ -- note the
+    # trailing slash on the client side).
+    port: 31337
+    # The master runs NO execution backend: `master` has no --backend flag
+    # (wtf.cc:34-108). It owns the corpus, generates testcases via the module's
+    # Mutator_t, and aggregates coverage. Execution happens only on workers.
+    backend: null
+  workers:
+    # CP4 mandates ONE worker on bochscpu for first bring-up; GATE 4b requires
+    # >= 2; section 12.4 suggests 4 as the post-CP4b starting point. Raise this
+    # only after GATE 4b passes -- but never hardcode the assumption in code.
+    count: 1
+    backend: bochscpu
+    post_cp4b:
+      count: 4
+      backend: whv # kvm is Linux-only; whv is the fast backend on this host
+    pin_cpus: false # one worker per physical core; set with the host core count
+  # Section 12.1 resolves this on paper: seeds enter through our custom
+  # Mutator_t on the master, which reads a spool the sidecar writes. Dropping
+  # files into inputs/ at runtime does NOT work -- inputs/ is the startup seed
+  # directory only.
+  corpus_ingest: custom_mutator_spool
+  # ...but "documented" is not "proven". GATE 4b must inject a known seed by
+  # this mechanism and show a worker executed it. Until then this stays false.
+  corpus_ingest_verified: false
+
+backend:
+  # bochscpu is fully deterministic and supports execution traces, so it owns
+  # development and replay (sections 4, 13.5).
+  development: bochscpu
+  replay: bochscpu
+  # whv is the fast path on this Windows host. Coverage there comes from
+  # software breakpoints, which is what makes the CP2 .cov artifact
+  # load-bearing (DECISIONS DEC-005).
+  fuzzing: whv
+
+# wtf CLI wiring. Verbs and flags confirmed against src/wtf/wtf.cc.
+wtf:
+  binary: src/build/wtf.exe
+  # Directory tree wtf expects under a target (section 13.1): inputs/ outputs/
+  # coverage/ crashes/ state/.
+  target_dir: targets/snapfuzz
+  # --limit means different things per backend and the values are orders of
+  # magnitude apart, so it is keyed by backend rather than held as one number.
+  # wtf.cc:267-268 states it outright: "instruction count for bochscpu, time in
+  # second for whv". Values match wtf's own shipped scripts (D-013).
+  limit:
+    bochscpu: 10000000 # instructions
+    whv: 3 # seconds
+    kvm: 3 # seconds
+  max_len: 4096
+  # Edge coverage is bochscpu-only; wtf throws a ParseError otherwise
+  # (wtf.cc:188-192, 334-338).
+  edges: false
+  # NOTE: `fuzz` has NO --coverage flag. The worker's BP directory is derived
+  # from --target as <target>/coverage (wtf.cc:308-310). Interface 3 is
+  # therefore delivered by writing .cov files there. See D-017.
+  coverage_dir_is_implicit: true
+
+# wtf resolves breakpoints by SYMBOL NAME on Windows via dbgeng, and sets no
+# symbol path itself (D-023). Without this every fuzzer module dies in Init with
+# "Could not set a breakpoint at ...". Must be set for EVERY worker process --
+# a worker that cannot resolve its breakpoints contributes nothing while the
+# master keeps waiting for it.
+symbols:
+  nt_symbol_path:
+    # Guest-kernel PDBs for nt!* breakpoints (crash detection hooks).
+    - srv*C:\symbols*https://msdl.microsoft.com/download/symbols
+    # The target's own PDB. Templated per target at launch.
+    - "{target_dir}/target"
+  # First resolve downloads PDBs and is slow (373 s measured); C:\symbols caches.
+  cache_dir: C:\symbols
+
+# Companion tools -- NOT wtf (section 3.1).
+tools:
+  # 0vercl0k/snapshot: KD extension DLL, `.load` then `!snapshot <state_path>`.
+  snapshot_dll: null # TODO(CP3)
+  # 0vercl0k/symbolizer-rs: required to symbolize traces (section 13.3).
+  # Without it, traces load into neither lighthouse nor Tenet.
+  symbolizer_rs: null # TODO(CP8)
+
+# Slow-clock trigger (CP7, section 12.3). Plateau is computed on the MASTER's
+# AGGREGATE coverage, never on one worker's.
+plateau:
+  # PRIMARY signal: total executions without new coverage. Wall-clock does not
+  # survive a change in worker count -- with 16 workers the same execution
+  # budget burns ~16x faster, so a time-based threshold fires far too late.
+  plateau_execs_threshold: 50000 # TODO(CP7): calibrate against a real run
+  # Safety net only, so a stalled campaign still eventually asks for help.
+  wall_clock_bound_s: 900
+  tick_interval_s: 30
+  # Cap slow-clock work so a stubborn plateau cannot drain the allocation.
+  max_seed_gen_calls_per_run: 20
+  seeds_per_call: 8
+
+# The spool the sidecar writes and the master's Mutator_t drains (section 12.1).
+seed_spool:
+  path: artifacts/seed_spool
+  # HARD CONSTRAINT: GetNewTestcase() runs on the master per testcase. Reading
+  # the spool must never block -- try-lock or stat-and-skip, and on empty fall
+  # straight through to the built-in mutator.
+  read_must_be_nonblocking: true
+  # RESOLVED (DECISIONS R9) and verified with 25 hand-placed seeds: the producer
+  # writes <name>.tmp then renames (atomic, so a partial seed is never visible);
+  # the consumer -- the master's CustomMutator_t -- reads one seed and deletes
+  # it. Every race falls through to the built-in mutator rather than blocking,
+  # because GetNewTestcase() runs on the master's hot path.
+  delete_policy: consumer_deletes
+  producer_write: temp_then_rename
+  # The module reads the path from here; it cannot see this YAML.
+  env_var: SNAPFUZZ_SEED_SPOOL
+
+# Crash bucketing (CP8). Hash STATIC addresses only -- hashing runtime
+# addresses makes the same bug bucket differently across runs (section 10).
+dedup:
+  stack_hash_frames: 5
+  fallback_key: [fault_static_addr, fault_type]
+  triage_trigger_bucket_count: 5
+  # Raw crash volume scales with worker count while the number of distinct bugs
+  # does not, so dedup matters MORE in the distributed design (section 12.5).
+  collapse_cross_worker_duplicates: true
+
+replay:
+  runs: 5
+  # Always bochscpu -- the only fully deterministic backend (section 13.5).
+  backend: bochscpu
+  # A non-reproducing crash is NOT automatically benign (section 10); it gets
+  # flagged for investigation instead of dropped.
+  flag_non_reproducing: true
+
+# Execution traces -- harness validation (CP4) and triage signal 4 (CP8).
+trace:
+  # tenet is bochscpu-only: exiting VMX is too expensive elsewhere (13.3).
+  types: [rip, tenet]
+  path: artifacts/traces
+  symbolized_path: artifacts/traces-symbolized
+
+artifacts:
+  a1_snapshot: artifacts/a1_snapshot.json
+  a2_pseudoc_cache: artifacts/a2_pseudoc.sqlite
+  a3_bp_list: artifacts/a3_bp_list.json
+  a4_corpus: artifacts/a4_corpus
+  a5_crashes: artifacts/a5_crashes
+
+logging:
+  path: logs/snapfuzz.jsonl
+  # Every record carries clock=fast|slow (section 4).
+  level: INFO

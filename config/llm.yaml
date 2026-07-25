@@ -1,0 +1,121 @@
+# LLM backend configuration (CLAUDE.md section 7).
+#
+# VERIFIED 2026-07-25 against the live endpoint. Every value below was
+# confirmed by calling it, not read off a README -- see docs/ENVIRONMENT.md
+# and docs/DEVIATIONS.md D-029/D-030.
+#
+# The token NEVER lives in this file. llm/client.py reads it from the
+# environment variable named by endpoint.api_key_env; `.env` is gitignored.
+
+endpoint:
+  base_url: https://llm-api.zoolab.org/v1
+  chat_completions_path: /chat/completions # base_url already ends in /v1
+  models_path: /models
+  api_key_env: SNAPFUZZ_LLM_API_KEY
+  api_key: null # MUST stay null -- the gate fails if a key is pasted here
+  auth_scheme: bearer # confirmed: Authorization: Bearer sk-...
+  openai_compatible: true # confirmed: /v1/models and /v1/chat/completions
+  timeout_s: 300 # reasoning models take 20s+; see max_tokens note below
+  max_retries: 3
+  retry_backoff_s: 2.0
+  stream: false
+
+# CRITICAL, and the reason several max_tokens values below look large.
+#
+# gemma-4-12b and gemma-4-26b are REASONING models: they return
+# `reasoning_content` alongside `content`, and the reasoning is billed against
+# `max_tokens`. If the budget runs out during reasoning the API returns
+# HTTP 200 with `finish_reason: "length"` and **`content: null`** -- no error.
+#
+# Measured on one pseudo-C task (D-030):
+#   gemma-4-12b  max_tokens=600  -> finish=length, 1688 reasoning chars, content=None
+#   gemma-4-12b  max_tokens=4000 -> finish=stop,   5737 reasoning chars, correct JSON
+#   gemma-4-26b  max_tokens=4000 -> finish=stop,  10682 reasoning chars, correct JSON
+#
+# llm/client.py MUST therefore treat `content is None` and
+# `finish_reason == "length"` as errors worth retrying with a larger budget,
+# never as an empty answer.
+response_handling:
+  content_may_be_null: true
+  treat_length_finish_as_error: true
+  # Strip ``` fences before validating against a pydantic model (CP5).
+  strip_code_fences: true
+
+# Roles, never model names, are what llm/client.py takes as an argument
+# (section 7.2). Swapping a model must not need a code change.
+roles:
+  seed_gen:
+    model: ais3/nemotron-cascade-2-30b
+    temperature: 0.9 # diversity matters more than precision here
+    max_tokens: 4096
+    why: >-
+      Section 7.2 suggests gemma-4-12b as "cheap, fast" for this high-volume
+      role. Measurement contradicts that: gemma-4-12b took 18.6s and spent
+      ~2000 tokens reasoning, while nemotron-cascade-2-30b answered the same
+      task correctly in 1.9s. Since the stated rationale was speed, the faster
+      model serves the intent better. See D-030.
+  entry_select:
+    model: ais3/nemotron-cascade-2-30b
+    temperature: 0.2
+    max_tokens: 8192
+    why: >-
+      Real code comprehension over pseudo-C; runs rarely. Section 7.2 offers
+      llama-3.3-70b OR nemotron-cascade-2-30b. Both answered correctly here
+      (1.9s vs 0.9s), but the vendor's own evaluation matrix marks
+      llama-3.3-70b as failing on all four coding agents, so the alternative
+      the section already sanctions is the safer default. See D-029.
+  crash_prefilter:
+    model: ais3/gemma-4-26b
+    temperature: 0.0
+    max_tokens: 8192 # verbose reasoning model -- 10.7k chars measured
+    why: >-
+      Drop obviously-benign buckets before the big model (section 7.2). Low
+      volume, so its ~22s latency is acceptable; the large budget is mandatory,
+      not generous, because of the reasoning-token behaviour above.
+  triage:
+    model: ais3/nemotron-3-ultra-550b
+    temperature: 0.0
+    max_tokens: 16384
+    why: >-
+      Strongest reasoning, applied where judgment matters. Verified to return
+      clean JSON with no reasoning_content and very low latency.
+  dspy_bootstrap:
+    model: ais3/nemotron-cascade-2-30b
+    temperature: 0.7
+    max_tokens: 8192
+    why: cheap demo generation for DSPy optimisation (CP9)
+
+# All seven ids confirmed against GET /v1/models on 2026-07-25.
+models:
+  ais3/llama-3.1-8b:
+    context: 131072
+    note: "single tool call at a time; agent matrix marks it limited"
+  ais3/gemma-4-12b:
+    context: 262144
+    reasoning_model: true
+  ais3/gemma-4-26b:
+    context: 262144
+    reasoning_model: true
+  ais3/nemotron-cascade-2-30b:
+    context: 262144
+  ais3/llama-3.3-70b:
+    context: 131072
+    note: "agent matrix: failed on all four agents; fine single-shot here"
+  ais3/nemotron-3-ultra-550b:
+    context: 262144
+
+# A safety classifier, NOT part of this pipeline (section 7.2). Listed only so
+# nobody wires it in by accident.
+excluded_models:
+  - ais3/llama-guard-3-8b
+
+# Section 7.3: NCHC access is a grant, not per-token billing. Do not
+# micro-optimise tokens. Do refuse to spend the allocation on duplicate
+# crashes -- that is what dedup and summarisation are for. GATE 1 measured
+# 1113 crash events collapsing to 38 files that are probably ONE bug (D-024),
+# which is exactly how an allocation gets burned.
+budget:
+  usage_log: logs/llm_usage.jsonl
+  max_total_calls: 5000
+  max_total_completion_tokens: 20000000
+  on_exceeded: refuse # refuse and log loudly rather than degrade silently
