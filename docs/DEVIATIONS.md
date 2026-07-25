@@ -1909,3 +1909,135 @@ absent. A parser that quietly returns nothing on an unrecognised line is
 indistinguishable from a quiet campaign, so every regex that reads another tool's
 human-readable output needs its *rate* of parse failures watched, not merely a code
 path that tolerates them.
+
+
+## D-050 — symbolizer-rs was installed at CP4 and never written into the config
+
+**Observed at CP8.** `analysis/trace.py`'s `find_symbolizer()` looked in an explicit
+argument, then `SYMBOLIZER_RS`, then `PATH` — deliberately *not* in
+`config/fuzz.yaml`, on the stated grounds that an absolute path to a tool outside the
+repo is machine-specific and does not belong in a committed file. Meanwhile
+`config/fuzz.yaml` carried `tools.symbolizer_rs: null # TODO(CP8)`.
+
+The binary had been sitting at `D:\tools\symbolizer-rs\symbolizer-rs.exe` since CP4.
+So CP8 opened by reporting a missing prerequisite for a tool that was already on disk,
+and the whole crash-analysis stage looked blocked on an install.
+
+**The premise was false.** The same file carries
+`symbols.nt_symbol_path: [srv*C:\symbols*https://msdl.microsoft.com/download/symbols, {pdb_dir}]`
+and `symbols.cache_dir: C:\symbols`. `config/fuzz.yaml` is not machine-portable and was
+never pretending to be, so refusing to record one absolute path in a file full of
+absolute paths bought nothing.
+
+**Fix.** `find_symbolizer()` consults `config/fuzz.yaml` **last** — after the explicit
+argument, the env var and `PATH` — so a machine where the committed path is wrong can
+still override it. `tools.symbolizer_rs` is now set.
+
+Worth stating generally: a rule that is right in the abstract ("no machine-specific
+paths in committed files") is worth re-checking against what the file actually contains
+before it costs a checkpoint.
+
+## D-051 — `wtf run` never reports the fault address, and the trace does not stop at the fault
+
+**Measured at CP8**, and it invalidates the obvious approach twice over.
+
+Section 8 defines a deterministic crash as one with the **same fault address across N
+replays**. Neither half of that is readable from wtf's output:
+
+* `wtf run` prints a crash only as `crash: 1` in its final stat line. It never prints
+  the address.
+* It also writes **no crash file**: `wtf run --help` lists no `--crashes` option, and
+  the crash directory is unchanged after a crashing run (measured — 53 files before,
+  53 after).
+
+So the address has to come from a trace, and the first guess — the last line of the rip
+trace — is also wrong. Measured on
+`crash-EXCEPTION_ACCESS_VIOLATION_READ-0x7ff8aa381378`:
+
+```
+43,305 trace lines total
+  index 38,752   0x7ff8aa381378      <- the fault
+  index 38,753   0xfffff80208be95c0  <- kernel: the exception dispatcher
+  ...            4,552 further lines
+  last line      0x7ff8e54ea010      <- NOT the fault
+```
+
+Control passes to the kernel and the trace runs on for thousands of instructions.
+
+**Fix.** `fault_index_from_trace()` / `fault_address_from_trace()` take the last
+**user-mode** address before the final user→kernel transition, testing against
+`KERNEL_BASE = 0xFFFF_8000_0000_0000`. It must be the *last* such transition, because
+ordinary syscalls produce earlier ones. This needs no symbols, which matters because the
+fault is usually in a system DLL.
+
+**Verified** against the address wtf itself put in the crash filename, on three crashes
+with different fault addresses: exact match each time.
+
+An index is returned as well as an address, because symbolizer-rs emits one output line
+per input line in order, so the index locates the fault in the *symbolized* trace too.
+The boundary cannot be found in the symbolized file directly: after the fault the kernel
+returns to user-mode `ntdll!RtlDispatchException` and re-enters, so the last user→kernel
+transition *there* sits in the post-fault dispatch path.
+
+**A stronger check falls out of this.** bochscpu is deterministic, so two runs of one
+input produce a **byte-identical** trace — measured on three crashes. Comparing trace
+digests proves the whole execution matched, not merely its endpoint, which is more than
+`ReplayResult.deterministic` asks for.
+
+## D-052 — `exec/s: 8.3k` parsed as 8.3
+
+**Measured at CP10.** `parse_stat_line()` extracted the rate with
+`float(re.sub(r"[^\d.]", "", raw))`, which strips a magnitude suffix along with
+everything else non-numeric. wtf prints `374.0` at low rates but `8.3k` and `1.2m` as
+they grow, so the parse silently divided by 1000.
+
+It stayed invisible for eight checkpoints because our own mutator never exceeded ~830
+exec/s. It surfaced in the only way that would have been noticed: a CP10 **baseline arm
+was recorded as slower than ours** — 8 exec/s against 746 — which is the opposite of the
+truth by three orders of magnitude.
+
+**Fix.** `_parse_magnitude()` handles `k`/`m`/`g` and returns 0.0 on anything
+unparseable, so one malformed rate cannot lose a stat line that also carries the
+execution and coverage counters. Verified: `8.3k → 8300.0`, `1.2m → 1200000.0`,
+`374.0 → 374.0`.
+
+The same run exposed a related bias: `peak_executions` came from the scheduler's live
+ticks, which lag the master's block-buffered output (D-033) by an **arm-dependent**
+amount — a noisy arm fills the buffer with `Saving crash in ...` lines faster than a
+quiet one. libfuzzer's true count was **2,269,008 against 82,831 recorded**, a 27×
+under-report, while the quieter arms were already accurate. It now comes from the final
+log, and `eval/baseline.py --recompute` re-derives archived results without re-running
+any fuzzing.
+
+## D-053 — the baseline arms were credited with LLM seeds they never received
+
+**Measured at CP10, and this one would have invalidated the comparison outright.**
+
+`Scheduler._sidecar_events()` read `artifacts/sidecar_events.jsonl`, a **single file
+shared across runs**. Baseline arms start no sidecar at all, so they must report zero
+rounds. The recorded comparison instead showed:
+
+```
+baseline-libfuzzer   sidecar_rounds 2   seeds_consumed 30
+baseline-honggfuzz   sidecar_rounds 2   seeds_consumed 30
+ablation-no-seedgen  sidecar_rounds 3   seeds_consumed 42
+```
+
+Every one of those is a no-LLM arm reading a *previous* arm's events. A baseline
+crediting itself with 30 LLM seeds makes the whole comparison meaningless — and nothing
+about the numbers looked wrong. They were plausible counts of the right order.
+
+**Fix, in two parts**, because either alone leaves a hole:
+
+* `SidecarConfig.label` names a per-run log (`sidecar_events_<label>.jsonl`), passed
+  through as `--label`, and the scheduler reads the same per-label path. Without this
+  the two *sidecar* arms still read each other's rounds.
+* `_sidecar_events()` returns empty when `sidecar_cmd is None`. An arm with no sidecar
+  then reports zero **by construction** rather than by reading a file, which is the
+  stronger guarantee of the two.
+
+`eval/baseline.py --recompute` also clears the field for any non-sidecar arm, since the
+arm definition is the authority there and not the log.
+
+`tests/gates/test_cp10.py::test_the_ablation_arms_consumed_no_seeds_where_they_should_not`
+asserts the property, and it is what caught this.

@@ -11,7 +11,6 @@ Run: ``python -m eval.build_cases``
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 
 from analysis.classify import Classification
@@ -92,6 +91,16 @@ def _measured_cases() -> list[TriageCase]:
     return cases
 
 
+# A FIXED timestamp for synthetic records, not time.time().
+#
+# These cases are committed, so a wall-clock stamp makes every rebuild produce
+# different bytes for semantically identical content: the files churn in git and a
+# real edit becomes indistinguishable from a re-run. A synthetic crash has no
+# meaningful time of occurrence anyway. 2026-01-01T00:00:00Z, chosen only for being
+# obviously not a measurement.
+SYNTHETIC_TIMESTAMP = 1767225600.0
+
+
 def _record(**kw) -> CrashRecord:
     base = dict(
         input_bytes=b"{}",
@@ -102,7 +111,7 @@ def _record(**kw) -> CrashRecord:
         backtrace=[],
         coverage_delta=0,
         backend="bochscpu",
-        timestamp=time.time(),
+        timestamp=SYNTHETIC_TIMESTAMP,
     )
     base.update(kw)
     return CrashRecord(**base)

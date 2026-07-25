@@ -34,6 +34,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 POST_SCRIPT = "ExportBasicBlocks.java"
 DATA_SCRIPT = "ExportDataSymbols.java"
+PSEUDOC_SCRIPT = "ExportPseudoC.java"
 SCRIPT_DIR = REPO_ROOT / "prep" / "ghidra_scripts"
 
 SCOPE_MODULE = "module"
@@ -233,6 +234,57 @@ def export_data_symbols(
     return payload
 
 
+def export_pseudoc(
+    binary: Path,
+    out_json: Path,
+    *,
+    scope: str = SCOPE_CLOSURE,
+    entry: str | None = None,
+    ghidra_root: Path | None = None,
+    project_dir: Path | None = None,
+    project_name: str = "snapfuzz",
+    decompile_timeout_s: int = 60,
+    timeout_s: int = 3600,
+) -> dict:
+    """Batch-decompile to pseudo-C, the raw dump :mod:`prep.pseudoc_cache` loads.
+
+    This existed only as a hand-run ``analyzeHeadless`` invocation until CP10's
+    documentation pass, which is a gap worth naming: the pipeline README described
+    building A2 as a step, and the step had no entry point. The other two exports
+    already shared ``_run_post_script``, so wiring the third in was a few lines.
+
+    ``decompile_timeout_s`` is per function. A single pathological function must
+    not stall the whole export, and ``ExportPseudoC.java`` records a per-function
+    failure rather than aborting the run.
+    """
+    if scope not in SCOPES:
+        raise ValueError(f"scope must be one of {SCOPES}, got {scope!r}")
+    if scope == SCOPE_CLOSURE and not entry:
+        raise ValueError("function-closure scope needs an entry")
+    if not binary.exists():
+        raise FileNotFoundError(binary)
+
+    _run_post_script(
+        PSEUDOC_SCRIPT,
+        binary,
+        out_json,
+        script_args=[scope] + ([entry] if entry else []) + [str(decompile_timeout_s)],
+        ghidra_root=ghidra_root,
+        project_dir=project_dir,
+        project_name=project_name,
+        timeout_s=timeout_s,
+    )
+
+    payload = json.loads(out_json.read_text(encoding="utf-8"))
+    if not payload.get("functions"):
+        raise GhidraError(
+            f"exported 0 decompiled functions (scope={scope}, entry={entry!r}). An "
+            f"empty A2 makes seed generation and triage reason blind while looking "
+            f"like they simply had nothing to say."
+        )
+    return payload
+
+
 def export_basic_blocks(
     binary: Path,
     out_json: Path,
@@ -289,11 +341,31 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--project-name", default="snapfuzz")
     ap.add_argument(
         "--what",
-        choices=("blocks", "data-symbols"),
+        choices=("blocks", "data-symbols", "pseudoc"),
         default="blocks",
-        help="blocks -> A3 basic blocks; data-symbols -> global bounds (CP7)",
+        help=(
+            "blocks -> A3 basic blocks; data-symbols -> global bounds (CP7); "
+            "pseudoc -> the raw dump prep.pseudoc_cache build loads into A2"
+        ),
     )
     args = ap.parse_args(argv)
+
+    if args.what == "pseudoc":
+        payload = export_pseudoc(
+            args.binary,
+            args.out,
+            scope=args.scope,
+            entry=args.entry,
+            ghidra_root=find_ghidra(args.ghidra),
+            project_name=args.project_name,
+        )
+        failed = [f for f in payload["functions"] if not f.get("code")]
+        print(
+            f"{payload.get('module')}: {len(payload['functions'])} function(s) "
+            f"decompiled, {len(failed)} failed, scope={payload.get('scope')}"
+        )
+        print(f"next: python -m prep.pseudoc_cache build --export {args.out}")
+        return 0
 
     if args.what == "data-symbols":
         payload = export_data_symbols(
