@@ -24,6 +24,7 @@ non-optional on this host and neither is wtf's fault:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import time
@@ -84,6 +85,11 @@ class CampaignConfig:
     artifacts_dir: Path
     address: str | None = None
     edges: bool = False
+    # Names an evidence directory under artifacts/runs/. Without it every run
+    # overwrites the last one's artifacts, and one gate's evidence silently
+    # destroys another's -- GATE 4b's 4-worker run clobbered GATE 4's
+    # single-worker one and made GATE 4 fail retroactively.
+    label: str | None = None
 
     @classmethod
     def from_yaml(
@@ -329,9 +335,22 @@ class Campaign:
                 tracker.observe(stats)
         return tracker
 
+    @property
+    def evidence_dir(self) -> Path:
+        """Where this run's artifacts live.
+
+        A labelled run gets its own directory so gates do not overwrite each
+        other's evidence. Unlabelled runs share the top level, which is fine for
+        exploration but not for anything a gate reads.
+        """
+        if self.config.label:
+            return self.config.artifacts_dir / "runs" / self.config.label
+        return self.config.artifacts_dir
+
     def write_artifacts(self) -> dict[str, Path]:
         out: dict[str, Path] = {}
-        cfg = self.config
+        target = self.evidence_dir
+        target.mkdir(parents=True, exist_ok=True)
 
         # Replace the sampled history with the full one before writing.
         rebuilt = self.rebuild_history()
@@ -339,15 +358,23 @@ class Campaign:
             self.tracker = rebuilt
         if self.tracker.history:
             out["coverage"] = self.tracker.write_jsonl(
-                cfg.artifacts_dir / "coverage_summaries.jsonl"
+                target / "coverage_summaries.jsonl"
             )
         if self.watcher is not None:
             records = self.watcher.collect_all()
             if records:
                 out["crashes"] = self.watcher.write_jsonl(
-                    records, cfg.artifacts_dir / "a5_crashes.jsonl"
+                    records, target / "a5_crashes.jsonl"
                 )
         out["metadata"] = self.write_metadata()
+
+        # The master writes its log live and cannot be redirected after the
+        # fact, so copy it in alongside the rest of the evidence.
+        if self.master is not None and self.master.log_path.exists():
+            archived = target / "master.log"
+            if archived != self.master.log_path:
+                archived.write_bytes(self.master.log_path.read_bytes())
+            out["master_log"] = archived
         return out
 
     def write_metadata(self) -> Path:
@@ -407,7 +434,8 @@ class Campaign:
                 sum(w.restarts for w in self.pool.workers) if self.pool else 0
             ),
         }
-        path = cfg.artifacts_dir / "run_metadata.json"
+        payload["label"] = cfg.label
+        path = self.evidence_dir / "run_metadata.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return path
@@ -420,6 +448,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--backend", help="override topology.workers.backend")
     ap.add_argument("--tick-seconds", type=float, default=15.0)
     ap.add_argument("--a1", type=Path, default=REPO_ROOT / "artifacts/a1_snapshot.json")
+    ap.add_argument(
+        "--label",
+        help="write evidence to artifacts/runs/<label>/ so a later run cannot "
+        "overwrite it; required for anything a gate reads",
+    )
     args = ap.parse_args(argv)
 
     config = CampaignConfig.from_yaml(
@@ -428,6 +461,8 @@ def main(argv: list[str] | None = None) -> int:
         worker_count=args.workers,
         backend=args.backend,
     )
+    if args.label:
+        config = dataclasses.replace(config, label=args.label)
     campaign = Campaign.from_snapshot_ref(config, args.a1)
 
     problems = campaign.preflight()

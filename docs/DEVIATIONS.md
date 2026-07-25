@@ -1230,3 +1230,75 @@ None. `CrashRecord` gained `fault_module` so the distinction survives to CP8.
 Also observed: `STATUS_HEAP_CORRUPTION` appeared as a fault type, which is not in
 our name map. It passes through verbatim by design — an unfamiliar fault class is
 information, not noise.
+
+---
+
+## D-036 — The Windows Hypervisor Platform is not enabled, so edge 22 stays pending
+
+**Confirmed by running it.** `wtf run --backend=whv` fails immediately:
+
+```
+Failed WHvCreatePartition (Windows Hypervisor Platform enabled?)
+Backend failed initialization.
+```
+
+`whv` is the only backend available on this host that **consumes** the CP2
+coverage file — bochscpu ignores `.cov` files entirely (D-004) and `kvm` is
+Linux-only. So **edge 22** (`fuzz_target.bp_list` → `worker[i].execute`) cannot
+be exercised here, and it stays `pending` through GATE 4 and GATE 4b.
+
+This is exactly what DEC-005 anticipated. The file is generated, validated
+against wtf's own reference (D-027) and placed in `targets/<name>/coverage/`, but
+placement is not consumption, and marking the edge live on the strength of the
+file existing is the failure RULE 3 exists to prevent.
+
+WHP is an optional Windows feature, not a VM, and is used by WSL2 and Docker —
+so it is plausibly available even on Home (D-032 notes Hyper-V itself is not).
+Enabling it needs administrator rights and a reboot:
+
+```powershell
+# Run as administrator, then reboot.
+Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All
+```
+
+Once the hypervisor is running, `python -m fuzzer.run --backend whv --workers 4`
+should close edge 22. Deliberately **not** done here: it is a system-level change
+with a reboot, and it is the user's to make.
+
+---
+
+## D-037 — Two campaigns collide on the default master address
+
+**Observed** while running the CP4b tests against a background campaign: the
+second master exits immediately and the test failed with "the master is not
+running", which looked like a bug in the kill/restart logic.
+
+`master --address` and `fuzz --address` both default to `tcp://localhost:31337`
+(`wtf.cc:79`, `wtf.cc:392`), so a second campaign cannot bind and dies. Nothing
+in the output says "port in use" — the master simply is not there.
+
+`CampaignConfig` already carries `address`, so concurrent campaigns are possible
+with distinct ports. Worth remembering for CP10's baseline comparison, which
+will want to run vanilla-mutator and LLM-guided campaigns **simultaneously** on
+the same host to control for machine load — they must be given different
+addresses or the second one silently will not exist.
+
+---
+
+## D-038 — Gate evidence needs per-gate directories
+
+**Observed.** GATE 4b's 4-worker run overwrote `artifacts/run_metadata.json`,
+and GATE 4 — which requires a *single-worker* run of >= 10 minutes — began
+failing retroactively on evidence that had been perfectly good an hour earlier.
+
+Nothing was wrong with either run. The bookkeeping was wrong: one shared
+artifact path meant each gate's evidence destroyed the previous gate's.
+
+**Fixed:** `fuzzer/run.py --label <name>` writes to `artifacts/runs/<name>/`,
+and each gate reads its own directory (`runs/gate4`, `runs/gate4b`). The master's
+log is copied in alongside, since it is written live and cannot be redirected
+after the fact.
+
+Worth generalising: a gate that reads a mutable shared path is not reproducible,
+and CP7 and CP10 both need before/after comparisons across runs. Every future
+gate run gets a label.

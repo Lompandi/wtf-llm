@@ -30,10 +30,17 @@ from engine_bridge.crash_watch import CrashWatcher, parse_crash_name
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ARTIFACTS = REPO_ROOT / "artifacts"
 
-COVERAGE_JSONL = ARTIFACTS / "coverage_summaries.jsonl"
-CRASHES_JSONL = ARTIFACTS / "a5_crashes.jsonl"
-RUN_METADATA = ARTIFACTS / "run_metadata.json"
-MASTER_LOG = ARTIFACTS / "logs" / "master.log"
+# GATE 4's own evidence directory. A shared one does not work: GATE 4b's
+# 4-worker run overwrote GATE 4's single-worker metadata and made this gate fail
+# retroactively, which is a property of the bookkeeping rather than of the run.
+# Produce it with:
+#   python -m fuzzer.run --minutes 11 --workers 1 --label gate4
+EVIDENCE = ARTIFACTS / "runs" / "gate4"
+
+COVERAGE_JSONL = EVIDENCE / "coverage_summaries.jsonl"
+CRASHES_JSONL = EVIDENCE / "a5_crashes.jsonl"
+RUN_METADATA = EVIDENCE / "run_metadata.json"
+MASTER_LOG = EVIDENCE / "master.log"
 SYMBOLIZED = ARTIFACTS / "traces-symbolized" / "snapfuzz.rip.txt"
 
 # From artifacts/a1_snapshot.json, verified in tests/test_addr.py.

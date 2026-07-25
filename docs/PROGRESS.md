@@ -15,7 +15,7 @@ table and `arch/graph.yaml` agree, so they cannot drift apart.
 | 2 | Ghidra headless BB enumeration -> A3 | **PASS** | 2026-07-25 | 17 tests. Closure 58 blocks / module 613; 97.4% recall vs wtf's own `.cov` |
 | 3 | Snapshot acquisition -> A1 | **PASS** | 2026-07-25 | **Scoped.** 19 tests; all four gate conditions met, but only edge 11 goes live — the *acquisition* path is unexercised, see the log below |
 | 4 | Fuzzer module + first real run (1 worker) | **PASS** | 2026-07-25 | 33 tests. 663 s run, 32 new-coverage events, harness validation passes. Edge 22 held pending — bochscpu ignores `.cov` (D-004) |
-| 4b | Distributed bring-up (>= 2 workers) | not started | — | Resolves edge 22 and the whv question (D-032) |
+| 4b | Distributed bring-up (>= 2 workers) | **PASS** | 2026-07-25 | **Scoped.** 13 tests. 4 workers, ~1450 exec/s (4× one worker), injected seed proven executed, kill/restart works. Edge 22 still pending — WHP is not enabled (D-036) |
 | 5 | LLM client | **PASS** | 2026-07-25 | 19 tests including live endpoint calls. All 5 roles answer; JSON round-trips into a contract; usage log and budget caps verified |
 | 6 | GhidraMCP + A2 + LLM entry selection | not started | — | |
 | 7 | Plateau detection + LLM seed gen | not started | — | |
@@ -121,6 +121,65 @@ One modelling note worth flagging: the §3.1 diagram marks the custom
 The mutator *consumes* LLM seeds on the master's hot path and must never call
 the LLM itself. `graph.yaml` therefore separates `ours: llm_layer` from
 `calls_llm`, and the gate enforces it.
+
+### 2026-07-25 (9) — GATE 4b PASS, scoped; edge 22 blocked on WHP
+
+**GATE 4b PASS**, 13 tests. Evidence in `artifacts/runs/gate4b/`: 4 workers,
+244 s, `(4 nodes)` in the master's own stat line, **~1450 exec/s against 360 for
+one worker**.
+
+That 4× throughput is the observable form of "the aggregate reflects all
+workers". Per-worker coverage is never exposed — workers report to the master and
+the master keeps one set (`server.h:822-830`) — but a master tracking a single
+worker could not report four workers' throughput.
+
+**The corpus ingest path is proven end to end, literally.** A seed was written to
+the spool, and a file whose bytes match it exactly turned up at
+`outputs/crash-a9edefc59763ab71cdd88a1eeb7029a3`. The `crash-` prefix means the
+result was not `Ok_t` (`corpus.h:66-71`), so: we wrote it → the master's
+`CustomMutator_t` drained it → **a worker executed it** → it crashed → the master
+saved it verbatim. Edges 21a, 23b and 31 in one artifact.
+
+Two attempts at that proof failed first, and both were informative:
+
+1. The seed used `Command: 7` with `BodySize: 0xffff`, on the theory that a
+   bigger overflow makes a better crash. The target rejected it after **22
+   instructions** — 7 is not a valid command. Reading the author's own
+   `interesting/big_overflow.json` gave the real shape: the valid
+   `Command: 0` → `Command: 1` sequence with `BodySize` desynchronised from the
+   body. That seed runs 44.6k instructions, reaches 9,387 coverage (more than
+   `normal.json`) and crashes deterministically.
+2. Injecting 15 seconds after start still proved nothing: at ~1450 exec/s the
+   workers had already run ~20,000 testcases and saturated coverage, so the seed
+   executed and left **no trace** — no new coverage and no unseen fault address,
+   and the master saves neither (D-024). The spool must be pre-populated so the
+   seeds are served among the first testcases.
+
+**Killing a worker** does not stop the campaign: the master keeps running, the
+pool detects the death, and the worker is restarted with `restarts == 1`.
+
+**Edge 22 remains pending.** `whv` is the only local backend that consumes the
+coverage file, and it fails with `Failed WHvCreatePartition (Windows Hypervisor
+Platform enabled?)`. WHP is an optional feature, not a VM — WSL2 and Docker use
+it — but enabling it needs admin and a reboot, so it is left as a one-line
+command in D-036 rather than done unilaterally.
+
+**`worker_id` is not obtainable**, and the gate wording assumed otherwise.
+Crashes are written by the master from a worker-reported result into a single
+directory with no client tag, and `fuzz` has no `--crashes` flag. The contract
+types the field `str | None` for exactly this reason. A test now *asserts* it is
+None, so if a future wtf starts tagging crashes the deviation gets revisited
+rather than quietly persisting.
+
+**Two bookkeeping bugs found and fixed**, both of which made good runs look bad:
+
+- **D-038** — GATE 4b's run overwrote GATE 4's metadata, and GATE 4 started
+  failing on evidence that had been fine an hour before. `--label` now writes to
+  `artifacts/runs/<name>/` and each gate reads its own directory. A gate that
+  reads a mutable shared path is not reproducible.
+- **D-037** — two campaigns silently collide on the default master address
+  (`tcp://localhost:31337`); the second master just is not there. Relevant to
+  CP10, which will want simultaneous baseline and LLM-guided campaigns.
 
 ### 2026-07-25 (8) — GATE 4 PASS; 18 edges live
 
