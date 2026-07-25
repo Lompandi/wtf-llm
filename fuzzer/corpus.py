@@ -123,18 +123,42 @@ class SeedSpool:
     def depth(self) -> int:
         return len(self.pending())
 
-    def log_provenance(self, record: SeedRecord, spooled: Path, log: Path) -> None:
+    def log_provenance(
+        self,
+        record: SeedRecord,
+        spooled: Path,
+        log: Path,
+        archive_dir: Path | None = None,
+    ) -> None:
         """Record why a seed was generated, keyed by the file it became.
 
         GATE 7 needs before/after coverage attributable to LLM seeds, and the
         seed file itself carries no metadata -- the guest gets bytes only.
+
+        **The archive is not optional in practice.** The spool file is deleted by
+        the consumer the moment it is taken (DECISIONS DEC-013), so once a
+        campaign ends the seeds no longer exist anywhere and their coverage can
+        never be re-measured. Recording only ``len(seed_bytes)`` -- which is all
+        this did originally -- makes the attribution the docstring promises
+        impossible after the fact. ``archive_dir`` keeps a copy that nobody
+        deletes; it is evidence, not queue state, and the two must not share a
+        directory or the mutator would consume the evidence.
         """
+        archived_as: str | None = None
+        if archive_dir is not None:
+            archive_dir = Path(archive_dir)
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            copy = archive_dir / spooled.name
+            copy.write_bytes(record.seed_bytes)
+            archived_as = copy.name
+
         log.parent.mkdir(parents=True, exist_ok=True)
         with log.open("a", encoding="utf-8") as fd:
             fd.write(
                 json.dumps(
                     {
                         "spooled_as": spooled.name,
+                        "archived_as": archived_as,
                         "origin": record.origin,
                         "rationale": record.rationale,
                         "bytes": len(record.seed_bytes),

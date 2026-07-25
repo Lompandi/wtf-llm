@@ -1413,3 +1413,499 @@ If the plugin turns out to be broken on Ghidra 12, the fallback is a small
 headless decompile service of our own — the same `analyzeHeadless` machinery CP2
 already drives, exposed over a socket. Recorded now so the decision is not made
 under pressure at CP8.
+
+---
+
+## D-040 — The frontier offered branches no input could steer
+
+**Observed** at the first GATE 7 seed-generation round, which produced **zero new
+coverage** while the LLM did everything asked of it: it aimed correctly at all five
+frontier branches it was offered and reached none. Nothing was wrong with the
+reasoning. The frontier itself was unactionable.
+
+Of the five branches, one sat inside `operator_new`'s allocation-failure path, one
+inside printf's internals, and one was a "packet is not big enough" guard that the
+*harness* had no way to express — `InsertTestcase` always wrote the true byte count
+into the size register, so the target could never be told that fewer bytes had
+arrived.
+
+Those are two different faults. A branch can be unreachable because **no input
+steers it**, or because **our injection path cannot say the thing that steers it**.
+Neither is visible in a frontier computed from the block graph plus coverage alone,
+and they are fixed in different layers.
+
+**Fixed in three layers, because no one of them covers the other two.**
+
+1. **The harness gained the missing degree of freedom.** `Packet_t` now carries an
+   optional per-packet `WireSize` (`fuzzer/module/fuzzer_snapfuzz.cc:85-100`) so a
+   testcase can lie to the target about how many bytes arrived; `InsertTestcase`
+   reports it in `rdx` when set (`fuzzer_snapfuzz.cc:230-241`), the generator
+   occasionally emits a short one (`:477-481`), and `MutationTruncateWire` mutates
+   it (`:605-614`). `ProcessPacket` opens with `if (param_2 < 8)`, so before this the
+   branch was unreachable **by construction** — no seed, LLM-generated or otherwise,
+   could have worked. It is also the realistic behaviour rather than a testing hack:
+   a peer on a socket can send fewer bytes than its header claims, and a harness
+   that cannot express that is under-testing the target.
+2. **The frontier stopped offering allocator and stdio internals.** `_INPUT_OPAQUE`
+   (`engine_bridge/plateau.py:179-189`) and `is_input_reachable()` (`:192-200`),
+   applied by `compute_frontier(input_reachable_only=True)` (`:203-225`). The filter
+   is about **reachability by input**, not about the code being uninteresting —
+   worth keeping straight, because the second reading would justify filtering things
+   that must stay. It is deliberately conservative for the same reason: an unknown
+   function counts as reachable, since dropping a real parser is worse than
+   including an allocator.
+3. **The prompt now describes what the harness can do**, via
+   `SeedGenRequest.format_notes` (`llm/seed_gen.py:178-181`). The example seed shows
+   only the fields some corpus file happens to use; a capability it does not exhibit
+   is one the model cannot know exists. A field the model cannot know about, guarding
+   a branch it can never reach, is not a reasoning failure at any temperature.
+
+**Generalise it:** the frontier is a claim that a branch is *worth aiming at*, and
+computing it from coverage alone overstates that claim. Before a slow-clock round is
+spent on a branch there are two questions — can any input steer it, and can our
+injection path express that input. Only the first was being asked, and even that one
+only implicitly.
+
+---
+
+## D-041 — Eight seeds, five bytes each
+
+**Observed** at the second GATE 7 round, which also produced zero new coverage, for
+a reason entirely unrelated to D-040 — which is what earns it its own entry.
+`artifacts/seed_provenance.jsonl` gives it away immediately: all **eight** published
+seeds of that round were **5 bytes** long.
+
+The seed schema offered two content fields, `content` (text) and `content_hex` (hex
+bytes). At temperature 0.9 (`config/llm.yaml:49`) the model chose `content_hex` for
+a target that reads JSON text, and a short hex string unhexlifies into a handful of
+raw bytes that `InsertTestcase` discards.
+
+**Why this is worse than an error.** Those seeds were well-formed against the
+schema, passed validation, consumed spool slots, were handed to a worker and
+executed, and produced nothing. So the round looked exactly like the LLM having no
+useful ideas — which is the failure mode that matters here, because it is
+indistinguishable from a genuine dead end, and a genuine dead end is a legitimate
+outcome the slow clock has to be allowed to report.
+
+**Fixed:** `_matches_wire_format()` (`llm/seed_gen.py:153-166`) asks whether the
+target could parse the bytes **at all** before a worker is spent on them, and
+`generate_seeds` drops the ones that fail (`:363-372`). For a JSON target the test
+is that the bytes decode as UTF-8 and parse to an object or an array — a structural
+check on the *encoding*, deliberately not semantic validation. The prompt also
+gained an explicit statement of which field to answer in for a textual target
+(`:290-297`).
+
+The prose half of that fix turned out not to be the half that worked. See D-046.
+
+---
+
+## D-042 — The sidecar launched wtf with no symbol path, and an empty frontier reads as "nothing left to explore"
+
+**Observed** during CP7 bring-up. The worst-shaped failure in the project so far:
+nothing errored, and the campaign politely reported that there was nothing left
+to explore.
+
+`llm/sidecar.py`'s `build_config()` never populated
+`SidecarConfig.symbol_paths`. The field existed (`llm/sidecar.py:68`) and
+`measure_coverage()` honours it (`llm/sidecar.py:182-183`), but nothing ever
+filled it, so the `wtf run --trace-type=cov` child inherited no
+`_NT_SYMBOL_PATH`.
+
+That is D-023 again. wtf resolves breakpoints by symbol name through dbgeng and
+sets no symbol path itself (`src/wtf/backend.cc:333-341`), and our module breaks
+on `tlv_server!ProcessPacket` (`fuzzer/module/fuzzer_snapfuzz.cc:45`, `:210`), so
+`Init` printed
+
+```
+Could not set a breakpoint at tlv_server!ProcessPacket.
+```
+
+and wrote **zero** trace files. From there every step is individually
+well-behaved:
+
+| step | result |
+|---|---|
+| `wtf run --trace-type=cov` | no `*.trace` files |
+| `measure_coverage()` | empty set |
+| `compute_frontier()` over an empty covered set | empty frontier |
+| `generate_and_publish()` | logs `skipped`, reason **"frontier is empty"**, returns 0 |
+
+**Which is exactly what makes it dangerous.** "frontier is empty" is the
+*correct* thing to say about an empty coverage set — it is what the sidecar would
+report on a target fuzzed to exhaustion. Zero seeds, zero LLM calls, zero errors,
+and a plausible-sounding reason for all three.
+
+`fuzzer/run.py` already had a preflight check for precisely this
+(`fuzzer/run.py:236-240`, added at D-023). The sidecar was a second, independent
+launcher of wtf that had never been given the same check — the cost of computing
+symbol paths *inside* `CampaignConfig.from_yaml` instead of once, at module
+level.
+
+**Fixed**, three ways, because any one alone would have left the shape intact:
+
+1. `resolve_symbol_paths()` factored out to module level in
+   `fuzzer/run.py:49-75` and exported (`fuzzer/run.py:46`); `build_config()` now
+   calls the same function (`llm/sidecar.py:397-399`).
+2. `build_config()` raises on Windows when it comes back empty
+   (`llm/sidecar.py:400-405`) rather than constructing a sidecar that cannot
+   measure anything.
+3. `measure_coverage()` raises `RuntimeError` when the run produced no `*.trace`
+   files (`llm/sidecar.py:211-219`), quoting wtf's own output tail. An empty
+   coverage set is never again returned as though it were a measurement.
+
+**Generalise it:** every process that launches wtf needs the same environment, so
+the code that builds that environment must be shared, not copied. Check for other
+launchers before adding a third.
+
+---
+
+## D-043 — A reasoning model spends 60,000 characters before writing a seed
+
+**Measured** from `logs/llm_usage.jsonl`. The same failure class as D-030, one
+scale up, and it surfaced only once the seed-generation prompt grew by ~60 tokens.
+
+`config/llm.yaml` had `seed_gen: max_tokens: 4096`. `seed_gen` routes to
+`ais3/nemotron-cascade-2-30b`, which D-030 established is a reasoning model whose
+reasoning is billed against `max_tokens`. On the **real** seed-generation prompt —
+frontier blocks, pseudo-C, format notes — the reasoning is an order of magnitude
+longer than on the trivial pseudo-C task D-030 measured:
+
+| max_tokens | attempt | finish_reason | reasoning chars | completion tokens |
+|---|---|---|---|---|
+| 4,096 | 1 | length | 13,543-15,075 | 4,096 |
+| 8,192 | 2 | length | 28,355-29,928 | 8,192 |
+| 16,384 | 3 | length | 42,335-59,892 | 16,384 |
+| 32,768 | 2 | stop | 38,352 | 11,823 |
+
+Completion tokens equal `max_tokens` exactly on every `length` row: the budget was
+consumed entirely by reasoning, and `content` came back null.
+
+The client's doubling on truncation (`llm/client.py:325`) is what kept this
+survivable — starting at 4096, attempt 3 reaches 16384 and often succeeds. But
+`max_retries` is 3 (`config/llm.yaml:19`), so a round where 16384 was *also* not
+enough had no attempt left, and one whole round died as
+
+```
+role 'seed_gen' failed after 3 attempts (final max_tokens=16384): ...
+```
+
+**Fixed:** `seed_gen: max_tokens: 16384` (`config/llm.yaml:56`, with the
+measurement recorded in the comment above it). The client doubles from there, so
+attempt 1 normally succeeds and the two wasted attempts are gone. And
+`llm/client.py:340-343` now carries the final `max_tokens` and the underlying
+`EmptyCompletion` into the terminal `LlmError` — the error string quoted above is
+itself part of the fix, since the previous one named neither and diagnosing it
+required a trip to the usage log.
+
+**The lesson is not "use bigger budgets".** It is that reasoning cost scales with
+the prompt's *substance*, not its length, so a `max_tokens` calibrated on a toy
+prompt is not calibrated at all. Every future prompt change gets re-checked
+against `finish_reason` in the usage log.
+
+---
+
+## D-044 — Seed generation had no feedback from its own results
+
+**Observed** across consecutive rounds in `artifacts/sidecar_events.jsonl`, whose
+`targets` fields read:
+
+```
+round A:  0x12de 0x12de 0x12ed 0x12ed 0x12ed 0x131c 0x131c 0x12ed
+round B:  0x12de 0x12de 0x12ed 0x131c 0x12ed 0x12de 0x12de 0x131c
+```
+
+Six of eight seeds, twice over, aimed at the same two branches — and those two
+are the ones no input has ever reached.
+
+Nothing was wrong with the model's reasoning. The prompt simply contained no
+record that a branch had already been aimed at and missed, so every round
+re-derived the same idea from the same inputs. Temperature 0.9
+(`config/llm.yaml:49`) buys diversity of wording, not diversity of strategy.
+
+**This is the one quantity in the loop that could be measured and was not.** The
+frontier is a static property of the block graph plus current coverage, so it
+looks identical every round; the *outcome of the previous round* is the only new
+information the slow clock has, and it was being discarded.
+
+**Fixed:** the sidecar keeps `attempted: dict[static_addr, rounds aimed at it
+without it becoming covered]` (`llm/sidecar.py:91-93`):
+
+- **counted** after each round from what the model actually named
+  (`llm/sidecar.py:307-314`), via `parse_target`, which is paired with
+  `format_target` so the two cannot drift (`llm/seed_gen.py:105-116`);
+- **retired the moment measured coverage proves a branch was reached**
+  (`_retire_reached_attempts`, `llm/sidecar.py:233-247`). This half matters as
+  much as the counting: a branch a seed genuinely hit must stop being reported as
+  a failure, or the next round is told to avoid the one thing that worked. The log
+  shows it firing —
+  `attempts_retired reached=['0x1400012c9', '0x1400012e3', '0x14000130c']`;
+- **passed to the prompt** as `ALREADY TRIED AND STILL NOT REACHED: <addr>
+  (tried Nx)` (`llm/seed_gen.py:236-257`), which also gives the model explicit
+  permission to call a branch dead code and spend the seed elsewhere rather than
+  producing a seed it does not believe in;
+- **rebuilt from `artifacts/sidecar_events.jsonl` on startup**
+  (`_load_attempts`, `llm/sidecar.py:108-156`), because section 12.2 requires the
+  sidecar to be restartable without stopping the campaign, and a counter living
+  only in memory would make a restarted sidecar re-try the same dead branches from
+  scratch. Note the normalisation at `llm/sidecar.py:121-133`: rounds logged before
+  D-045 recorded RVAs, so an address that is not a known static address is retried
+  as an RVA before being discarded. Old evidence is still evidence.
+
+**Why the model's persistence was wrong here, established by experiment.** Of the
+three surviving frontier branches, `0x1400012de` and `0x1400012ed` are each
+guarded by a null test on a pointer that the immediately preceding `unique_ptr`
+move set to null — dead code the decompiler still renders as a branch, and no
+input across 44 corpus files plus 24 LLM seeds has reached either. The third,
+`0x14000131c`, **is** reachable: a hand-written input carrying 8 `Allocate`
+packets in one testcase reaches it and 4 does not
+(`artifacts/runs/gate7/control_probe.json`), which puts `ChunkList`'s capacity
+between 5 and 8 and makes that branch a free-slot search running off the end of a
+fixed-size global table — an out-of-bounds write shape. It is reachable only by
+**repeating** one command enough times in a single input, which is something the
+pseudo-C tells you and random mutation finds only by luck. So the attempt counter
+is not merely noise suppression: it pushes the model off two dead branches and
+onto the one that is both live and interesting.
+
+---
+
+## D-045 — `FrontierBlock` mixed two address spaces in one field, and the prompt printed both
+
+**Observed**, and a textbook RULE 4 failure: a field whose units were never
+stated.
+
+`FrontierBlock` carried `static_addr` — a Ghidra static address — next to an
+unlabelled `unreached_successors` holding **RVAs**. Both were formatted into the
+same sentence of the seed-generation prompt:
+
+```
+reached 0x1400012c9, but never took the branch to 0x12de
+```
+
+Two address spaces, one sentence, neither labelled. The model did the reasonable
+thing and echoed the short form back in `targets_branch`, which is visible in
+`artifacts/sidecar_events.jsonl` as `targets 0x12de` — where a sibling round that
+had copied the *reached* address instead logged `targets 0x1400012c9`.
+
+**The consequence was silent and total.** Measured coverage is keyed by static
+address (`llm/sidecar.py:240-241`), so an attempt recorded as `0x12de` could never
+match a covered block, could never be retired, and the D-044 attempt counter it
+feeds could never be correct. Nothing errored; the numbers were simply
+meaningless.
+
+**Fixed:** the field is split, with each half named for its space —
+`unreached_successor_rvas` and `unreached_successor_statics`
+(`engine_bridge/plateau.py:115-119`) — populated together at construction
+(`engine_bridge/plateau.py:245-253`), with a `__post_init__` asserting the two
+correspond element-for-element (`engine_bridge/plateau.py:121-128`). The prompt
+now prints static addresses throughout (`llm/seed_gen.py:186-196`), and
+`targets_branch`'s field description instructs the model to copy the address
+"verbatim and in full from the list given in the prompt, e.g. 0x1400012de"
+(`llm/seed_gen.py:70-75`).
+
+**Where this bites next.** Section 9 names three bases, and the RULE 4 table asks
+which base each function takes and returns. That discipline was applied to
+`arch/addr.py` and then not applied to the dataclass sitting directly on top of
+it. Any field holding an address needs its space in the **name**, not in a
+docstring: `addr` is not a type.
+
+---
+
+## D-046 — The schema is the only instruction the model cannot ignore
+
+**Measured**, and it is the sequel to D-041: the prose instruction was not enough. A
+later round, with that instruction present in the prompt, returned eight seeds of
+which **all eight** were rejected as not valid JSON. From
+`artifacts/sidecar_events.jsonl.pre-gate7`:
+
+```
+the model returned 8 seeds and none survived validation (8 rejected as not
+valid json). Analysis was: 'Target each uncovered branch by constructing
+inputs that either miss the expected chunk (Edit/Delete error) or exhaust the
+chunk table before delete, forcing the cleanup path.'
+```
+
+The `analysis` field is why this is a deviation and not a bug report. That is a
+**correct** reading of the target: it names the two error paths and, unprompted, the
+table-exhaustion route that D-047 then spends an entire Ghidra export chasing. The
+reasoning was sound and only the output channel was wrong — the model answered in
+`content_hex` again.
+
+**Fixed by removing the field rather than asking for it not to be used.**
+`_batch_model(wire_format)` returns `_TextBatch` or `_BinaryBatch`
+(`llm/seed_gen.py:105-126`), so for a JSON target `content_hex` **does not exist** in
+the schema the completion is constrained by. What remains in the prompt about the
+channel is now a reminder of the *format*, not of which field to use (`:290-297`).
+
+Also fixed, and it accounts for most of the diagnosis time: the `SeedGenError` raised
+when no seed survives now carries the count, the wire format, the first rejected
+seed's leading bytes and the model's own `analysis` (`llm/seed_gen.py:383-389`). The
+log line quoted above has no bytes in it, so establishing *what* those eight seeds
+actually were meant cross-referencing the spool by hand.
+
+**The general rule, worth stating plainly because it applies to every structured call
+in this project:** for a constrained-output call, prose asking the model to leave a
+field empty is **advisory**; removing the field is **binding**. D-034 established that
+structured output needs the schema and not a description of it. This is the same
+lesson from the other side — the schema is not only how a field is requested, it is
+the only way to forbid one.
+
+---
+
+## D-047 — Decompilation drops the capacity of a global table
+
+**Measured.** This is the concrete form of CLAUDE.md section 2's "pseudo-C is lossy":
+one specific fact, destroyed at one specific point, with a cost that can be put in
+numbers.
+
+`ProcessPacket`'s free-slot search decompiles to a loop bounded by an unrelated
+adjacent symbol:
+
+```c
+puVar11 = ChunkList;
+pp_Var9 = &__dyn_tls_dtor_callback;
+do { ... } while (puVar11 != pp_Var9);
+```
+
+which says nothing whatever about how many slots the table holds. A human
+reverse-engineer reads the capacity off Ghidra's listing in seconds — two addresses,
+an element size, one division. An LLM handed only the pseudo-C cannot, because the
+division's inputs are not in the pseudo-C.
+
+**Ghidra has the fact and was never asked for it.** From
+`artifacts/a6_data_symbols.json`:
+
+| symbol | address | applied size |
+|---|---|---|
+| `ChunkList` | `0x140006a18` | 32 bytes, typed `unique_ptr<Chunk_t,...>[4]` |
+| `__dyn_tls_dtor_callback` | `0x140006a38` | (the next data symbol) |
+
+32 bytes is four pointer-sized slots, and the next symbol sits `0x20` later, which
+confirms the four independently of the type.
+
+**Four slots is not the answer to the branch, and the gap is instructive.** A control
+probe (`artifacts/runs/gate7/capacity_probe.json`) ran one testcase per allocation
+count: 1 through 5 allocations do **not** reach block `0x14000131c`, and 6 through 11
+do. The four-slot figure explains that exactly:
+
+- allocations 1-4 fill the table;
+- allocation 5 finds no free slot, runs off the end, and **writes** a chunk pointer
+  to `0x140006a38` — an out-of-bounds write past the table;
+- allocation 6 is the first to **read** that now-non-null value back, and that read
+  is the null test guarding `0x14000131c`.
+
+So the branch needs **six** — not five, and not the four that "four slots" naively
+suggests. Recorded because the same three steps are also the shape of the bug: the
+write happens on 5 and nothing observes it until 6.
+
+**Implemented as a fourth Ghidra export.**
+
+- `prep/ghidra_scripts/ExportDataSymbols.java` emits every global data symbol with
+  its address, applied size and span to the next symbol, at `module` or
+  `function-closure` scope (`ExportDataSymbols.java:25-29`). Java rather than Python
+  for D-025's reason.
+- `prep/data_symbols.py` filters and formats them for a prompt. Of tlv_server's
+  **493** symbols, **35** are referenced from the fuzz entry's closure, and **3**
+  survive dropping `.rdata` (`prep/data_symbols.py:37-40`) — string literals,
+  vftables and `__imp_` import thunks, none of which bound a mutable table.
+- `llm/sidecar.py:256-271` adds the table to the prompt **non-fatally**: a missing
+  export costs reasoning quality and never correctness, since its absence is exactly
+  the pre-CP7 situation rather than a broken campaign. `SeedGenRequest.globals_table`
+  carries it (`llm/seed_gen.py:189-192`).
+- `prep/ghidra_headless.py` was refactored so both exports share one
+  `_run_post_script()` (`:117-133`, called at `:214` and `:257`), keeping D-020's
+  PATH sanitising and D-025's Java-not-Python constraint in one place instead of two.
+
+**Outcome, stated honestly: necessary and not sufficient.** With the capacity in the
+prompt the model stopped guessing at the number and reasoned about it — "Four
+allocations fill a fixed-size chunk table; subsequent delete operations repeatedly
+hit the branch that checks for table overflow" — proposing sequences of exactly
+**four** allocations. That fills the table rather than overflowing it, and it still
+did not reach the branch. The remaining step is the one the mechanism above spells
+out: the overflow slot has to be **populated by an earlier overflowing write** before
+a later read can observe it, so a sequence has to cross the boundary twice, not
+arrive at it.
+
+---
+
+## D-048 — One sample at a diversity temperature is a coin flip
+
+**Measured** on consecutive rounds against an identical frontier and an identical
+prompt shape, so the only variable was the draw.
+
+`seed_gen` runs at temperature 0.9 (`config/llm.yaml:49`) because diversity of
+*inputs* is the point of the role. The cost, which was not priced in: the
+**reasoning** varies as much as the output. One sample worked out that the branch
+needed a global table exhausted and proposed a five-packet sequence. The very next
+sample reasoned only about single commands and proposed nothing longer than one
+packet, with rationales like `Delete command that finds an existing chunk clears it`
+(`artifacts/seed_provenance.jsonl`).
+
+Same model, same temperature, same prompt. A round of one call therefore bets the
+entire plateau response on which of those two comes back — and a round is expensive
+in a way that has nothing to do with tokens: it is one plateau, and a campaign has
+only so many.
+
+**Fixed:** a round is now several independent samples unioned with byte-level dedup —
+`samples_per_round`, default 3 (`llm/sidecar.py:78-80`, `--samples` at `:530-534`),
+with the loop and its dedup at `:314-347`.
+
+This is free in the sense that matters. It is the **slow clock**: the samples are
+drawn in a separate process and the fast loop never waits for any of them (RULE 1),
+so three calls cost three times the latency of one and zero fuzzing throughput.
+Measured on one round: three samples produced **24 seeds with zero cross-sample
+duplicates** in **321 s** of LLM time.
+
+Note the interaction with D-044. Dedup is on seed **bytes**, not on the branch aimed
+at, so several samples converging on the same target still yield distinct inputs for
+it — which is the wanted behaviour when the target was right and the inputs were
+wrong, and the attempt counter is what handles the case where the target itself is
+wrong.
+
+---
+
+## D-049 — A units suffix hid the plateau signal completely
+
+**Observed** in `artifacts/runs/gate7/master.log`. `_STAT_RE`
+(`engine_bridge/coverage.py:41-58`) matched the master's `lastcov` field as **seconds
+only**, while the sibling `uptime` group in the very same regex already accepted `s`,
+`min` or `h`.
+
+wtf switches `lastcov` to minutes once a minute has passed without new coverage. That
+is **exactly the plateau window**. So every stat line printed *during a plateau*
+failed to parse, and the failure cascaded through the whole slow clock:
+
+| stage | effect |
+|---|---|
+| `parse_stat_line` | no match on any plateau line |
+| the master's execution counter | frozen at its last sub-minute value |
+| `orchestrator/scheduler.py` | writes that frozen number to the campaign state file |
+| the sidecar's `executions_since_new_coverage` | stays 0 forever |
+| the execution-based plateau trigger | can never fire |
+
+Which removes the **primary** plateau signal section 12.3 requires — total executions
+without new coverage. Only the 900-second wall-clock safety net could still fire, by
+which point the campaign was over.
+
+**The numbers, from that log.** 42 stat lines, of which **9** parsed before the fix
+and **41** after; **32** of them carry `lastcov` in minutes, for example
+
+```
+#74406 cov: 12762 (+0) corp: 44 (34.4kb) exec/s: 930.0 (2 nodes) lastcov: 1.1min crash: 19292 timeout: 0 cr3: 0 uptime: 1.4min
+```
+
+The same log records a real **378-second plateau at 350,747 executions** with
+`nodes: 2` — aggregate and multi-worker, exactly the shape GATE 7 asks for — that the
+detector never saw.
+
+**Fixed:** `lastcov` takes the same `(s|min|h)` suffix and is scaled through the same
+`_UPTIME_SCALE` table as `uptime` (`engine_bridge/coverage.py:53`, `:60-62`, applied
+at `:108` and `:113`), since wtf formats both with the same helper and both therefore
+switch units as they grow.
+
+**For the writeup: this is the third instance of one class in this project** (see
+D-033 and D-042). The fuzzer kept running, the master kept printing healthy numbers,
+nothing raised — and the one signal the entire slow clock depends on was silently
+absent. A parser that quietly returns nothing on an unrecognised line is
+indistinguishable from a quiet campaign, so every regex that reads another tool's
+human-readable output needs its *rate* of parse failures watched, not merely a code
+path that tolerates them.

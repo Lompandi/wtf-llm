@@ -337,9 +337,10 @@ class LlmClient:
                 attempts=attempt,
             )
 
-        raise LlmError(f"role {role!r} failed after {max_retries} attempts") from (
-            last_error
-        )
+        raise LlmError(
+            f"role {role!r} failed after {max_retries} attempts "
+            f"(final max_tokens={budget_tokens}): {last_error}"
+        ) from last_error
 
     def complete_json(
         self,

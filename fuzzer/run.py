@@ -43,7 +43,36 @@ from fuzzer.workers import WorkerPool
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-__all__ = ["CampaignConfig", "Campaign", "build_env"]
+__all__ = ["CampaignConfig", "Campaign", "build_env", "resolve_symbol_paths"]
+
+
+def resolve_symbol_paths(
+    fuzz: dict,
+    target: dict,
+    *,
+    target_dir: Path,
+    repo_root: Path = REPO_ROOT,
+) -> list[str]:
+    """`config/fuzz.yaml` symbols.nt_symbol_path with placeholders substituted.
+
+    Shared with the sidecar rather than duplicated. wtf resolves breakpoints by
+    symbol name through dbgeng and sets no symbol path itself, so **every**
+    process that launches wtf needs this -- including the sidecar's coverage
+    measurement, which otherwise produces no traces and hands seed generation an
+    empty frontier (D-042).
+
+    The PDB lives beside the binary, which need not be under ``target_dir``: ours
+    is a junction to another target's state.
+    """
+    pdb_dir = (
+        (repo_root / target["binary"]).parent if target.get("binary") else target_dir
+    )
+    return [
+        str(p)
+        .replace("{pdb_dir}", str(pdb_dir))
+        .replace("{target_dir}", str(target_dir))
+        for p in (fuzz.get("symbols", {}).get("nt_symbol_path", []) or [])
+    ]
 
 
 def build_env(
@@ -127,15 +156,9 @@ class CampaignConfig:
                 f"there is no safe default"
             )
 
-        # The PDB lives beside the binary, which may not be under target_dir --
-        # ours is a junction to another target's state.
-        pdb_dir = (repo_root / tgt["binary"]).parent if tgt.get("binary") else target_dir
-        symbol_paths = [
-            str(p).replace("{pdb_dir}", str(pdb_dir)).replace(
-                "{target_dir}", str(target_dir)
-            )
-            for p in (fuzz.get("symbols", {}).get("nt_symbol_path", []) or [])
-        ]
+        symbol_paths = resolve_symbol_paths(
+            fuzz, tgt, target_dir=target_dir, repo_root=repo_root
+        )
 
         return cls(
             wtf_exe=repo_root / wtf_cfg["binary"],

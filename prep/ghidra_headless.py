@@ -33,6 +33,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 POST_SCRIPT = "ExportBasicBlocks.java"
+DATA_SCRIPT = "ExportDataSymbols.java"
 SCRIPT_DIR = REPO_ROOT / "prep" / "ghidra_scripts"
 
 SCOPE_MODULE = "module"
@@ -113,34 +114,29 @@ def _sanitised_env() -> dict[str, str]:
     return env
 
 
-def export_basic_blocks(
+def _run_post_script(
+    post_script: str,
     binary: Path,
     out_json: Path,
     *,
-    scope: str = SCOPE_CLOSURE,
-    entry: str | None = None,
+    script_args: list[str],
     ghidra_root: Path | None = None,
     project_dir: Path | None = None,
     project_name: str = "snapfuzz",
     timeout_s: int = 3600,
-) -> GhidraExport:
-    """Import ``binary`` into Ghidra, analyse it, and export basic blocks."""
-    if scope not in SCOPES:
-        raise ValueError(f"scope must be one of {SCOPES}, got {scope!r}")
-    if scope == SCOPE_CLOSURE and not entry:
-        raise ValueError(
-            "function-closure scope needs --entry; use --scope=module to "
-            "enumerate the whole binary"
-        )
-    if not binary.exists():
-        raise FileNotFoundError(binary)
+) -> None:
+    """Import ``binary``, analyse it, and run one post-script over it.
 
+    Shared by every export so the two host workarounds (D-020's PATH sanitising
+    and D-025's Java scripts) exist once. ``script_args`` follow the output path,
+    which is always the post-script's first argument.
+    """
     ghidra_root = ghidra_root or find_ghidra()
     headless = _analyze_headless(ghidra_root)
     out_json.parent.mkdir(parents=True, exist_ok=True)
 
     # A throwaway project unless the caller wants one kept: re-importing into an
-    # existing project errors out, and CP2 is meant to be re-runnable.
+    # existing project errors out, and these exports are meant to be re-runnable.
     with tempfile.TemporaryDirectory(prefix="snapfuzz-ghidra-") as tmp:
         proj_dir = project_dir or Path(tmp)
         proj_dir.mkdir(parents=True, exist_ok=True)
@@ -154,13 +150,11 @@ def export_basic_blocks(
             "-scriptPath",
             str(SCRIPT_DIR),
             "-postScript",
-            POST_SCRIPT,
+            post_script,
             str(out_json),
-            scope,
+            *script_args,
+            "-deleteProject",
         ]
-        if entry:
-            cmd.append(entry)
-        cmd.append("-deleteProject")
 
         proc = subprocess.run(
             cmd,
@@ -189,6 +183,89 @@ def export_basic_blocks(
             f"log above for a SCRIPT ERROR."
         )
 
+
+def export_data_symbols(
+    binary: Path,
+    out_json: Path,
+    *,
+    scope: str = SCOPE_MODULE,
+    entry: str | None = None,
+    ghidra_root: Path | None = None,
+    project_dir: Path | None = None,
+    project_name: str = "snapfuzz",
+    timeout_s: int = 3600,
+) -> dict:
+    """Export global data symbols with sizes and inter-symbol spans (CP7).
+
+    The fact this recovers is the one decompilation loses: a loop bounded by
+    ``&some_adjacent_symbol`` says nothing about how many elements the table
+    holds, but the addresses do. Measured on tlv_server: ``ChunkList`` is 32
+    bytes at 0x140006a18, i.e. **four** pointer slots, and the next symbol sits
+    0x20 later. Seed generation had reasoned correctly that the branch needed
+    that table exhausted, but with no capacity to work from it guessed low
+    (D-047).
+    """
+    if scope not in SCOPES:
+        raise ValueError(f"scope must be one of {SCOPES}, got {scope!r}")
+    if scope == SCOPE_CLOSURE and not entry:
+        raise ValueError("function-closure scope needs an entry")
+    if not binary.exists():
+        raise FileNotFoundError(binary)
+
+    _run_post_script(
+        DATA_SCRIPT,
+        binary,
+        out_json,
+        script_args=[scope] + ([entry] if entry else []),
+        ghidra_root=ghidra_root,
+        project_dir=project_dir,
+        project_name=project_name,
+        timeout_s=timeout_s,
+    )
+
+    payload = json.loads(out_json.read_text(encoding="utf-8"))
+    if not payload.get("symbols"):
+        raise GhidraError(
+            f"exported 0 data symbols (scope={scope}, entry={entry!r}). An empty "
+            f"table silently removes the only static fact about global bounds "
+            f"from the prompt, so this is an error rather than a warning."
+        )
+    return payload
+
+
+def export_basic_blocks(
+    binary: Path,
+    out_json: Path,
+    *,
+    scope: str = SCOPE_CLOSURE,
+    entry: str | None = None,
+    ghidra_root: Path | None = None,
+    project_dir: Path | None = None,
+    project_name: str = "snapfuzz",
+    timeout_s: int = 3600,
+) -> GhidraExport:
+    """Import ``binary`` into Ghidra, analyse it, and export basic blocks."""
+    if scope not in SCOPES:
+        raise ValueError(f"scope must be one of {SCOPES}, got {scope!r}")
+    if scope == SCOPE_CLOSURE and not entry:
+        raise ValueError(
+            "function-closure scope needs --entry; use --scope=module to "
+            "enumerate the whole binary"
+        )
+    if not binary.exists():
+        raise FileNotFoundError(binary)
+
+    _run_post_script(
+        POST_SCRIPT,
+        binary,
+        out_json,
+        script_args=[scope] + ([entry] if entry else []),
+        ghidra_root=ghidra_root,
+        project_dir=project_dir,
+        project_name=project_name,
+        timeout_s=timeout_s,
+    )
+
     export = GhidraExport.from_json(out_json)
     if not export.blocks:
         raise GhidraError(
@@ -210,7 +287,29 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--ghidra", help="Ghidra install dir (else GHIDRA_INSTALL_DIR)")
     ap.add_argument("--project-name", default="snapfuzz")
+    ap.add_argument(
+        "--what",
+        choices=("blocks", "data-symbols"),
+        default="blocks",
+        help="blocks -> A3 basic blocks; data-symbols -> global bounds (CP7)",
+    )
     args = ap.parse_args(argv)
+
+    if args.what == "data-symbols":
+        payload = export_data_symbols(
+            args.binary,
+            args.out,
+            scope=args.scope,
+            entry=args.entry,
+            ghidra_root=find_ghidra(args.ghidra),
+            project_name=args.project_name,
+        )
+        sized = [s for s in payload["symbols"] if s["span_to_next"]]
+        print(
+            f"{payload['module']}: {len(payload['symbols'])} data symbols "
+            f"({len(sized)} with a measurable span), scope={payload['scope']}"
+        )
+        return 0
 
     export = export_basic_blocks(
         args.binary,

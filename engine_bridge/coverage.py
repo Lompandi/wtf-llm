@@ -43,13 +43,22 @@ _STAT_RE = re.compile(
     r"cov:\s*(?P<cov>\d+)\s*\(\+(?P<new_cov>\d+)\)\s+"
     r"corp:\s*(?P<corpus>\d+)\s*\((?P<corpus_size>[^)]*)\)\s+"
     r"exec/s:\s*(?P<execs_per_sec>[\d.]+\S*)\s*\((?P<nodes>\d+)\s+nodes\)\s+"
-    r"lastcov:\s*(?P<lastcov>[\d.]+)s\s+"
+    # `lastcov` takes the SAME unit suffix as `uptime`, and wtf switches it to
+    # minutes once a minute has passed without new coverage. Matching only `s`
+    # here dropped every stat line during a plateau -- which is precisely the
+    # window plateau detection depends on. The master's execution counter then
+    # froze at its last sub-minute value, `execs_since` stayed 0 forever, and the
+    # execution-based trigger could never fire; only the wall-clock safety net
+    # could, at which point the campaign was over (D-049).
+    r"lastcov:\s*(?P<lastcov>[\d.]+)(?P<lastcov_unit>s|min|h)\s+"
     r"crash:\s*(?P<crashes>\d+)\s+"
     r"timeout:\s*(?P<timeouts>\d+)\s+"
     r"cr3:\s*(?P<cr3>\d+)\s+"
     r"uptime:\s*(?P<uptime>[\d.]+)(?P<uptime_unit>s|min|h)"
 )
 
+# Shared by `uptime` and `lastcov`: wtf formats both with the same helper, so
+# both switch units as they grow.
 _UPTIME_SCALE = {"s": 1.0, "min": 60.0, "h": 3600.0}
 
 
@@ -95,7 +104,9 @@ def parse_stat_line(line: str) -> MasterStats | None:
         corpus_size=int(m.group("corpus")),
         execs_per_sec=execs_per_sec,
         nodes=int(m.group("nodes")),
-        seconds_since_last_coverage=float(m.group("lastcov")),
+        seconds_since_last_coverage=(
+            float(m.group("lastcov")) * _UPTIME_SCALE[m.group("lastcov_unit")]
+        ),
         crash_events=int(m.group("crashes")),
         timeouts=int(m.group("timeouts")),
         cr3_changes=int(m.group("cr3")),

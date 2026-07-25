@@ -18,7 +18,7 @@ table and `arch/graph.yaml` agree, so they cannot drift apart.
 | 4b | Distributed bring-up (>= 2 workers) | **PASS** | 2026-07-25 | **Scoped.** 13 tests. 4 workers, ~1450 exec/s (4× one worker), injected seed proven executed, kill/restart works. Edge 22 still pending — WHP is not enabled (D-036) |
 | 5 | LLM client | **PASS** | 2026-07-25 | 19 tests including live endpoint calls. All 5 roles answer; JSON round-trips into a contract; usage log and budget caps verified |
 | 6 | GhidraMCP + A2 + LLM entry selection | **PASS** | 2026-07-25 | 20 tests incl. live MCP + live LLM. A2 = 14 functions (closure) / 193 (module). **The LLM picked `ProcessPacket` from 84 candidates, matching ground truth exactly** |
-| 7 | Plateau detection + LLM seed gen | not started | — | |
+| 7 | Plateau detection + LLM seed gen | **PARTIAL** | 2026-07-25 | 48 tests. Four of five gate criteria met; the coverage-increase criterion is **not**, and is quantified rather than assumed — see the log below and docs/RESULTS.md. Edges 27/28/28b/29/10b held **pending** under RULE 3 |
 | 8 | Dedup, classification, replay, traces | not started | — | Needs `symbolizer-rs` |
 | 9 | DSPy triage (5 signals) + report | not started | — | |
 | 10 | Evaluation harness | not started | — | |
@@ -41,6 +41,7 @@ sub-edges), plus 3 derived edges recorded in [DEVIATIONS.md](DEVIATIONS.md).
 | 8 | snapshot.linux_gdb | a1_snapshot | 3 | pending |
 | 9 | ghidra.decompile | a2_pseudoc_cache | 6 | live |
 | 10 | ghidra.bb_enumerate | a3_bp_list | 2 | live |
+| 10b | ghidra.analyze | a6_data_symbols *(derived, CP7)* | 7 | pending |
 | 11 | a1_snapshot | fuzz_target.snapshot | 3 | live |
 | 12 | a2_pseudoc_cache | fuzzer_module.llm_input_struct | 6 | pending |
 | 13 | a3_bp_list | fuzz_target.bp_list | 4 | live |
@@ -60,7 +61,8 @@ sub-edges), plus 3 derived edges recorded in [DEVIATIONS.md](DEVIATIONS.md).
 | 25 | worker.coverage | master.aggregate_coverage | 4, 4b | live |
 | 26 | master.aggregate_coverage | master.corpus *(requeue, fast clock)* | 4, 4b | live |
 | 27 | master.aggregate_coverage | slow_clock.llm_seed_gen *(plateau)* | 7 | pending |
-| 28 | a2_pseudoc_cache | slow_clock.llm_seed_gen | 6 | pending |
+| 28 | a2_pseudoc_cache | slow_clock.llm_seed_gen | 6, 7 | pending |
+| 28b | a6_data_symbols | slow_clock.llm_seed_gen *(derived, CP7)* | 7 | pending |
 | 29 | slow_clock.llm_seed_gen | master.corpus *(new seeds)* | 7 | pending |
 | 30 | master.corpus | a4_corpus | 4, 4b | live |
 | 31 | worker.execute | master.crash_collect | 4, 4b | live |
@@ -85,6 +87,77 @@ sub-edges), plus 3 derived edges recorded in [DEVIATIONS.md](DEVIATIONS.md).
 | 1000 | ghidra.analyze | ghidra.fuzz_entry_selection *(derived)* | 6 | live |
 
 ## Log
+
+### 2026-07-25 (11) — GATE 7 PARTIAL: the slow clock works, the coverage claim does not land on this target
+
+**Four of five criteria met.** The slow-clock path is proven end to end:
+
+| Criterion | Result |
+|---|---|
+| Induced plateau triggers seed generation | **yes**, on the **execution** signal §12.3 requires — "65444 executions without new coverage" — not the wall-clock safety net |
+| Exactly one round per plateau | **yes**, 1 plateau → 1 round (the detector re-arms only on new coverage) |
+| Seeds land in the corpus and execute | **yes**, 12 published, 12 consumed, `spool_depth` 0 on the publish line — the mutator drained them as fast as they were written |
+| Fast loop never stalled on the LLM | **yes**, 72.8 s of LLM time inside a 1321 s run, throughput mean 774 exec/s (min 545), 864,729 executions |
+| Plateau on aggregate coverage, N > 1 workers | **yes**, 2 workers; 104 of 105 parsed stat lines report `nodes: 2` |
+| **Coverage increases after injection** | **NO** — 48 blocks before, 48 after; the 18 archived seeds cover 47 blocks and add 0 |
+
+Setup: one deliberately poor seed, empty `outputs/`, `bochscpu`, 2 workers, 22 min.
+The earlier attempt measured against a 44-entry corpus inherited from CP4/CP4b,
+which was the wrong control — the mutator had already saturated it.
+
+**Why the delta is zero, measured.** `ProcessPacket` has 38 blocks; random
+mutation covered 33 in ~100 s and then nothing for ~600,000 more executions. The
+five remaining blocks are the whole space available to the slow clock:
+
+* `0x1400012de` and `0x1400012ed` are **dead code** — `operator delete[]` arms of
+  an inlined `unique_ptr` move, guarded by null tests the emitted code cannot
+  satisfy. Verified adversarially through two independent lenses, including **454
+  measured executions** of which 409 were inputs written specifically to reach
+  them; every batch carried a positive control and 198 inputs did light up
+  `0x14000131c`, so the negative is not vacuous.
+* `0x14000131c` + 2 successors need **exactly six** Allocates in one test-case,
+  no intervening Delete. `ChunkList` holds four slots; allocation 5 writes a
+  `Chunk_t*` **out of bounds** over `__dyn_tls_dtor_callback` (NULL here, so the
+  null test still passes); allocation 6 reads it back and frees it.
+
+**The finding worth keeping.** Coverage against allocation count is flat across
+3→5 (+0, +0, +0) and jumps +7 only at 6, so a coverage-guided mutator has **no
+gradient** across that gap — and the retained corpus indeed topped out at exactly
+4, the table capacity, one short of the out-of-bounds write. The write itself
+covers nothing new, so it is invisible to coverage guidance: §2's silent-memory-
+corruption limitation demonstrated on a real target. Reproduce with
+`eval/coverage_gradient.py`.
+
+**What the LLM did.** Identified the mechanism unprompted (*"exhaust the chunk
+table before delete"*), and given `ChunkList`'s capacity from Ghidra proposed
+sequences of exactly **four** allocations — filling the table rather than
+overflowing it. Supplying the capacity was necessary, not sufficient.
+
+**Two of my own fixes did not deliver, and are recorded as such.** The
+already-tried feedback (D-044) reported all three branches as tried-and-failed on
+a re-sampled round; that round proposed *shorter* sequences (max 2 allocations)
+than rounds without it. And multi-sample rounds (D-048) reduced variance without
+raising the ceiling. Neither is evidence the mechanisms are wrong; neither is
+evidence they work.
+
+Fixed this session, all silent failures: **D-042** (sidecar ran wtf with no
+symbol path → zero traces → empty frontier reading as "nothing to explore"),
+**D-043** (seed_gen `max_tokens` too small for a reasoning model, whole rounds
+dying), **D-044**, **D-045** (`FrontierBlock` mixed RVAs and static addresses in
+one field, so no attempted branch could ever be matched against coverage),
+**D-046** (prose cannot stop a model using a schema field; remove the field),
+**D-047** (decompilation drops a global table's capacity — new
+`ExportDataSymbols.java` + `prep/data_symbols.py`), **D-048**, **D-049**
+(`lastcov` parsed as seconds only, but wtf switches to minutes after 60 s —
+exactly the plateau window, so the execution trigger could never fire; 9 of 42
+stat lines parsed before, 41 after). Also fixed: the seed provenance log recorded
+only seed *lengths*, so a consumed round could never be re-measured — seeds are
+now archived outside the spool.
+
+Edges 27, 28, 28b, 29 and 10b are **wired and exercised** but held `pending`
+under RULE 3, because GATE 7 as written has not passed. The coverage claim
+belongs on a target with headroom — CP10's `eval/planted_bugs/` — which needs a
+snapshot of a new binary, a dependency outside this checkpoint.
 
 ### 2026-07-25 (3) — Re-aligned to the revised architecture
 

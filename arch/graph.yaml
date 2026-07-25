@@ -105,6 +105,17 @@ nodes:
     stage: fuzz
     desc: crashes/ -- written MASTER-side from worker-reported results (D-018).
     path: artifacts/a5_crashes
+  a6_data_symbols:
+    kind: artifact
+    stage: prep
+    derived: true
+    desc: >-
+      Global data symbols with addresses, applied sizes and inter-symbol spans.
+      NOT in section 3.2 -- added at CP7. Decompilation states a table's bound as
+      whatever symbol follows it and drops the capacity, so seed generation was
+      being asked to exhaust a table whose size was unknowable from pseudo-C
+      alone (D-047).
+    path: artifacts/a6_data_symbols.json
 
   # --- stage 2: the fuzzer module (ONE artifact, BOTH roles) -----------
   fuzzer_module.llm_input_struct:
@@ -366,6 +377,16 @@ edges:
     to: a3_bp_list
     status: live
     gates: [2]
+  - id: "10b"
+    from: ghidra.analyze
+    to: a6_data_symbols
+    status: pending
+    gates: [7]
+    derived: true
+    note: >-
+      ExportDataSymbols.java, run through the same analyzeHeadless path as edge
+      10 (prep/ghidra_headless.py shares _run_post_script). Measured on
+      tlv_server: 493 data symbols, 35 referenced from the fuzz entry's closure.
 
   # --- stage 1 -> stage 2 (the three cross-stage edges) -----------------
   - id: "11"
@@ -507,21 +528,50 @@ edges:
     status: pending
     gates: [7]
     clock: slow
-    note: Plateau trigger, computed on AGGREGATE coverage (section 12.3).
+    note: >-
+      Plateau trigger, computed on AGGREGATE coverage (section 12.3). WIRED AND
+      EXERCISED but held pending: proven on the EXECUTION signal the section
+      requires rather than the wall-clock safety net ("65444 executions without
+      new coverage", 2 workers reporting), yet GATE 7 as written has not passed
+      because its coverage-increase criterion was not met. RULE 3 governs -- the
+      interface working is not the gate. That the signal is the execution one is
+      load-bearing: D-049 had it silently dead, so only the 900 s net could fire.
   - id: "28"
     from: a2_pseudoc_cache
     to: slow_clock.llm_seed_gen
     status: pending
-    gates: [6]
+    gates: [6, 7]
     clock: slow
-    note: The LLM reads decompiled code to reason about unreached branches.
+    note: >-
+      The LLM reads decompiled code to reason about unreached branches. Pseudo-C
+      of the functions CONTAINING frontier blocks only -- never the raw corpus or
+      a coverage bitmap (section 7.3, section 10).
+  - id: "28b"
+    from: a6_data_symbols
+    to: slow_clock.llm_seed_gen
+    status: pending
+    gates: [7]
+    clock: slow
+    derived: true
+    note: >-
+      Global data symbols with sizes and inter-symbol spans. NOT in section 3.2:
+      added at CP7 because decompilation states a table's bound as an adjacent
+      symbol and drops its capacity, so the model was asked to exhaust a table
+      whose size it could not know (D-047). Same contribution-2 shape as edge 10
+      -- Ghidra supplying a static fact the LLM layer needs.
   - id: "29"
     from: slow_clock.llm_seed_gen
     to: master.corpus
     status: pending
     gates: [7]
     clock: slow
-    note: New seeds, via the master's documented ingest path (section 12.1).
+    note: >-
+      New seeds, via the master's documented ingest path (section 12.1): the
+      sidecar writes the spool, our CustomMutator_t drains it non-blocking on the
+      master. WIRED AND EXERCISED but held pending under RULE 3, as for edge 27.
+      Consumption is proven, not merely the write -- spool_depth was 0 on the
+      publish log line because the mutator took the seeds as fast as they landed,
+      and the scheduler recorded 12 published, 12 consumed.
 
   # --- stage 2 artifacts -------------------------------------------------
   - id: "30"

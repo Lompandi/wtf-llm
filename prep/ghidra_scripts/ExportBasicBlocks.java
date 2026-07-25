@@ -29,6 +29,8 @@ import ghidra.program.model.address.Address;
 import ghidra.program.model.block.BasicBlockModel;
 import ghidra.program.model.block.CodeBlock;
 import ghidra.program.model.block.CodeBlockIterator;
+import ghidra.program.model.block.CodeBlockReference;
+import ghidra.program.model.block.CodeBlockReferenceIterator;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.symbol.Symbol;
 
@@ -103,10 +105,35 @@ public class ExportBasicBlocks extends GhidraScript {
                 continue;
             }
 
+            // Successor RVAs, so the slow clock can compute the coverage
+            // FRONTIER: covered blocks that still have an unreached successor
+            // (CP7). Without this the frontier is not computable at all, and
+            // "which branch has the fuzzer not taken" is the actionable signal.
+            //
+            // Only in-module successors are recorded. A destination outside the
+            // image cannot be expressed as an RVA, and a call into another
+            // module is not a branch we can drive from here.
+            List<String> succ = new ArrayList<>();
+            CodeBlockReferenceIterator dests = block.getDestinations(monitor);
+            while (dests.hasNext()) {
+                monitor.checkCancelled();
+                CodeBlockReference ref = dests.next();
+                Address dest = ref.getDestinationAddress();
+                if (dest == null) {
+                    continue;
+                }
+                long destAddr = dest.getOffset();
+                if (destAddr < imageBase) {
+                    continue;
+                }
+                succ.add(Long.toString(destAddr - imageBase));
+            }
+
             blocks.add(String.format(
-                "{\"rva\":%d,\"static_addr\":%d,\"function\":%s}",
+                "{\"rva\":%d,\"static_addr\":%d,\"function\":%s,\"successors\":[%s]}",
                 staticAddr - imageBase, staticAddr,
-                containing == null ? "null" : quote(containing.getName())));
+                containing == null ? "null" : quote(containing.getName()),
+                String.join(",", succ)));
             emitted++;
         }
 

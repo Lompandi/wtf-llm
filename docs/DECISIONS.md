@@ -24,7 +24,7 @@ All references are to this clone at `a490929`.
 | R6 | `coverage.cov` | **PARTIAL** — in-memory settled, on-disk writer not found |
 | R7 | `FuzzEntry.input_param` | **PER-TARGET** — convention settled, value is per target |
 | R8 | `FuzzEntry.size_param` | **PER-TARGET** — same |
-| R9 | seed spool ownership | **UNRESOLVED** — CP7 |
+| R9 | seed spool ownership | **RESOLVED** at CP7 — pinned to source lines in DEC-013 |
 
 ---
 
@@ -611,6 +611,287 @@ its *output shape*, and we have a better version of that: a real reference
 Revisit at CP6 if GhidraMCP turns out to want PyGhidra in-process anyway — but
 CP6's decompilation runs through the MCP server, which is a separate process, so
 it probably will not force the issue.
+
+---
+
+## DEC-013 — Seed spool: the **consumer** deletes, and every race falls through
+
+**Decided 2026-07-25. Closes RULE 4 row R9** (which was recorded as decided but
+had no line-level citation for our own implementation, because the implementation
+did not exist yet).
+
+RULE 4 asks two questions about the spool: *who deletes a consumed seed — the
+mutator or the sidecar — and what happens if both touch it at once.* No source
+answer exists; the spool is **our** mechanism (section 12.1), not wtf's.
+
+**Answer: the consumer deletes. The producer only ever creates.**
+
+| Role | Process | Operations it performs | Never |
+|---|---|---|---|
+| producer | slow-clock sidecar | create `<stem>.tmp`, `fsync`, rename to `<stem>.json` | delete a seed |
+| consumer | master's `CustomMutator_t` | list, read one, `remove` it | create, or wait |
+
+Citations:
+
+- producer, `fuzzer/corpus.py:97-101` — the temp file is created **in the
+  destination directory** so `Path.replace` cannot cross a filesystem boundary
+  and degrade into a non-atomic copy;
+- consumer, `fuzzer/module/fuzzer_snapfuzz.cc:451` — `sfs::remove(Path, Ec)`,
+  immediately after the bytes are in hand, **failure ignored**;
+- the contract stated in both directions: `llm/spool.py:20-22` and
+  `fuzzer_snapfuzz.cc:414-419`;
+- declared in config so a third implementation cannot drift,
+  `config/fuzz.yaml:120-128` (`delete_policy: consumer_deletes`,
+  `producer_write: temp_then_rename`).
+
+**What happens if both touch one at once.** By construction the two roles have
+**no overlapping write operation**, so the only concurrency left is a consumer
+observing a file mid-creation, or two consumers observing the same file. Every
+case degrades to *"skip it, use the built-in mutator this iteration"*:
+
+| Situation | Handled at | Behaviour |
+|---|---|---|
+| spool dir absent (sidecar not started yet) | `fuzzer_snapfuzz.cc:425-430` | `directory_iterator` with `error_code`, no throw |
+| write still in progress | `fuzzer_snapfuzz.cc:439-441` | `.tmp` skipped by extension; rename makes a seed visible only when complete |
+| file vanished between listing and opening | `fuzzer_snapfuzz.cc:443-446` | `ifstream` fails, try the next entry |
+| zero-byte file from any cause | `fuzzer_snapfuzz.cc:452-454` **and** `fuzzer/corpus.py:90-91` | consumer skips it; producer refuses to write one — both ends guard the same invariant |
+| no spool configured at all | `fuzzer_snapfuzz.cc:372-378`, `:421-423` | prints `no SNAPFUZZ_SEED_SPOOL set; running without LLM seed ingest` — a misconfigured campaign is **visible, not silent** |
+
+The governing constraint is section 12.1's: `GetNewTestcase()` runs on the
+master's hot path with every worker waiting (`fuzzer_snapfuzz.cc:381-392`), so
+**nothing here locks, retries or waits**. Losing a seed to a race costs one
+iteration of built-in mutation; blocking costs the whole campaign.
+
+**One deliberate exception, and its rule.** `SeedPublisher.clear()`
+(`llm/spool.py:111-120`) does delete spooled seeds from the producer side. It
+exists so a measured before/after run starts from a clean slate, and it is a
+**between-campaigns** operation only — never called while a master is running.
+Stated here because it is the one call that could violate the table above.
+
+Two consequences worth keeping:
+
+- back-pressure counts only what the consumer can see —
+  `SeedSpool.pending()` excludes `.tmp` (`fuzzer/corpus.py:113-121`), so a
+  stranded temp file cannot inflate the depth and trip `SpoolFull`
+  (`llm/spool.py:77-83`) permanently;
+- only `seed_bytes` crosses into the spool. `origin` and `rationale` go to a
+  side log keyed by the filename (`fuzzer/corpus.py:126-144`), because the guest
+  must receive bytes and nothing else — and GATE 7 still needs coverage
+  attributable to LLM seeds.
+
+---
+
+## DEC-014 — Plateau is counted in **executions**; wall clock is only a safety net
+
+**Decided 2026-07-25.** CLAUDE.md section 12.3.
+
+The question is which quantity defines a plateau. Wall clock does not survive a
+change in worker count: with 16 workers the same execution budget burns roughly
+16× faster, so a threshold calibrated on one worker fires long after the campaign
+has actually stalled. Section 12.3 therefore requires *total executions without
+new coverage* as the primary signal.
+
+**Implemented exactly that way.** `config/fuzz.yaml:101-111`:
+
+```yaml
+plateau_execs_threshold: 50000   # PRIMARY
+wall_clock_bound_s: 900          # safety net only
+```
+
+`engine_bridge/plateau.py:316-320` evaluates both, and the two are **not**
+symmetric:
+
+- `by_execs` is the trigger the design is built on;
+- `by_clock` exists so a campaign whose throughput has collapsed — a wedged
+  worker, a backend far slower than expected — still eventually asks for help
+  instead of waiting forever for an execution count that will not arrive.
+
+The asymmetry is made visible in the output rather than left as a comment: when
+the wall-clock bound is what fired, `PlateauState.reason`
+(`engine_bridge/plateau.py:325-328`) says so *and prints the execution count*, so
+a plateau declared on time rather than on executions can never be mistaken for
+the primary signal in the event log.
+
+Two further properties, both required by GATE 7:
+
+- **new coverage re-arms the detector** (`plateau.py:302-308`), and
+  `should_fire()` (`:343-348`) consumes the trigger, so a persisting plateau
+  produces **one** seed-gen call, not one per tick;
+- the sidecar's loop reads both numbers from the campaign rather than measuring
+  them (`llm/sidecar.py:363-375`, threshold wired at `:97-100` from
+  `:420-422`), which keeps the detector honest about being fed *aggregate*
+  numbers — see DEC-015.
+
+Wall-clock plateau detection is not merely deprioritised, it is **never the
+number reported as the result**. The gate records the execution count.
+
+---
+
+## DEC-015 — Frontier coverage is measured from **cov traces**, not read from the live master
+
+**Decided 2026-07-25.** Depends on DEVIATIONS D-021, D-033 and D-042.
+
+Section 12.1 suggests the sidecar watch the master's aggregated `coverage.cov`
+for growth, and section 12.3 requires plateau on aggregate coverage. Neither read
+path exists on this revision:
+
+- **D-021** — grepping for a writer of `coverage.cov` finds only *readers*
+  (`Opts.CoveragePath` → `ParseCovFiles`, `utils.cc:342`, via
+  `whv_backend.cc:488` and `kvm_backend.cc:2638`). The aggregate certainly exists
+  in memory as a set (`server.h:822-830`), but nothing serialises it here.
+- **D-033** — the master's stdout is unusable: block-buffered through a pipe, and
+  `TerminateProcess` never flushes. Measured: a 663-second run left 8 stat lines
+  covering the first 72 seconds; a 123-second run left a **0-byte** log while the
+  fuzzer was saving 30 new-coverage testcases.
+
+So **two different quantities** are needed and they come from two different
+places. Recording the split explicitly, because conflating them is how a plateau
+detector ends up watching the wrong thing:
+
+| Quantity | Used for | Source |
+|---|---|---|
+| *is coverage still growing* — a monotonic **count of new-coverage events** | plateau detection (DEC-014) | files appearing in `outputs/`; the master writes one exactly when a testcase produced new coverage (`server.h:830-836` → `Corpus_t::SaveTestcase`), and a file on disk is not buffered (D-033) |
+| *which basic blocks are covered* — a **set of RVAs** | the frontier | `wtf run --trace-type=cov` over the corpus, parsed by `parse_cov_trace` (`engine_bridge/plateau.py:52-94`), driven by `Sidecar.measure_coverage` (`llm/sidecar.py:160-221`) |
+
+The first cannot substitute for the second: a file count, and equally a stat
+line, gives a *cardinality*. The frontier needs **identities** — which covered
+block has an unreached successor — so it can only come from something that names
+addresses.
+
+**Both are still aggregate**, which is what section 12.3 actually demands. The
+traces are taken over `outputs/` (`llm/sidecar.py:170-171`, falling back to
+`inputs/` on an empty corpus), and `outputs/` is owned by the master and written
+on behalf of every worker. The requirement is met by a different route than the
+one suggested, not abandoned.
+
+**Costs accepted, and why they are affordable here.** Measurement re-executes the
+whole corpus and takes seconds to minutes (`llm/sidecar.py:163-166`). That is
+precisely why it lives on the slow clock and never near the fast loop — RULE 1
+applies to expensive measurement, not only to LLM calls. Two guards:
+
+- the trace is filtered to the target module (`plateau.py:60-64`); measured, a
+  trace is 19,681 ntdll lines against 130 in the target, and another module's
+  slide is not ours, so keeping them would make the arithmetic wrong as well as
+  the frontier meaningless;
+- **no traces is a hard error** (`llm/sidecar.py:211-219`). Returning an empty
+  set was the worst available behaviour: empty coverage → empty frontier → seed
+  generation skipped with `reason="frontier is empty"`, i.e. a total failure that
+  reads as *"nothing left to explore"*. The measured cause was a missing
+  `_NT_SYMBOL_PATH` (D-042), which makes wtf die in `Init` with
+  `Could not set a breakpoint at tlv_server!ProcessPacket` while still exiting
+  quietly. `resolve_symbol_paths` (`fuzzer/run.py:49-75`) is now shared by the
+  campaign runner and the sidecar rather than duplicated, and `build_config`
+  refuses to construct a Windows sidecar without it (`llm/sidecar.py:397-405`).
+
+---
+
+## DEC-016 — What the seed-generation prompt is allowed to contain
+
+**Decided 2026-07-25.** CLAUDE.md section 7.3 and section 10 forbid sending the
+raw corpus or a full coverage bitmap. This records what **is** sent, and why each
+item cannot be dropped.
+
+| Sent | Size | Why it is necessary |
+|---|---|---|
+| `CoverageSummary` integers — blocks covered, corpus size, frontier count | 6 numbers (`engine_bridge/plateau.py:351-374`) | tells the model the campaign is stuck without describing *how* it is stuck; cheap enough to be unarguable |
+| the **frontier** — covered blocks with unreached successors, as static addresses | ≤12 blocks (`llm/sidecar.py:255`) | the actionable part of coverage rather than all of it. This is the whole design: the model is asked about branches the fuzzer *arrived at and never took*, not about coverage in general |
+| pseudo-C of **only** the functions containing frontier blocks | ≤4 functions, ≤6000 chars each (`llm/seed_gen.py:51-52`, assembled at `:164-209`) | the reasoning material. Without code the model can only guess at guard conditions; with the whole binary it would blow the budget and bury the frontier |
+| **one** existing seed, as a format example | 1 file (`llm/sidecar.py:407-408`) | without it the model must guess the wire format, and a syntactically wrong seed is discarded by `InsertTestcase` before reaching any branch — it executes, produces nothing, and looks like the LLM having no ideas (`llm/seed_gen.py:14-18`) |
+| harness capability notes | one paragraph (`llm/sidecar.py:426-446`) | capabilities the example does not exhibit. A field the model does not know exists is one it cannot use, so a branch guarded by it stays unreachable however well the model reasons (D-040). See DEC-017 for the honesty constraint on this item |
+| the **already-tried** list | ≤ a handful of addresses (`llm/seed_gen.py:235-257`) | the only *measured* element in the prompt. Without it every round re-derives the same idea: three consecutive rounds spent 6 of 8 seeds on the same two branches (D-044) |
+
+**Not sent, ever:** the corpus (44 files at CP7), any coverage bitmap, any
+per-worker state, any stat-line dump.
+
+Two supporting decisions that belong with this one:
+
+- **Functions are ranked by concentration of unreached branches**
+  (`llm/seed_gen.py:174-177`) before the `_MAX_FUNCTIONS` cut, so the truncation
+  drops the least informative code rather than an arbitrary tail.
+- **Addresses are printed in one address space only.** The prompt states the
+  reached block and its unreached successors both as Ghidra static addresses
+  (`llm/seed_gen.py:188-196`), and asks for the address back *verbatim and in
+  full* (`:70-75`, `:282-286`). Mixing spaces made the prompt say "reached
+  `0x1400012c9`, but never took the branch to `0x12de`"; the model echoed the RVA
+  form, and no attempted branch could ever be matched against measured coverage,
+  which is keyed by static address (D-045).
+
+Section 7.3's actual instruction is followed rather than inverted: it says *do
+not* micro-optimise tokens, and *do* be rigorous about volume. So the pseudo-C
+budget is generous per function and the number of functions is small — and
+`config/llm.yaml:47-56` gives `seed_gen` `max_tokens: 16384` because this model
+spends 28,000–60,000 characters of reasoning on this prompt before emitting a
+seed, and reasoning is billed against `max_tokens` (D-043, same class as D-030).
+
+---
+
+## DEC-017 — Harness notes and the already-tried list are **measured facts**, not answer hints
+
+**Decided 2026-07-25. This one is about the honesty of the result, not about
+whether the code works.**
+
+Two items in the prompt (DEC-016) are not static prose from CLAUDE.md, and both
+could be abused into encoding the answer. The line we hold:
+
+**Permitted — facts about *our harness* and about *the fuzzer's own results*:**
+
+- **Harness capability notes** state what our `InsertTestcase` can express:
+  that a packet may carry a `WireSize` field decoupled from the bytes actually
+  written, and that the `Packets` array may hold many packets delivered to the
+  same live process with target state persisting between them
+  (`llm/sidecar.py:426-446`). These are properties of the *harness we wrote*.
+  The model cannot read our C++, and a capability it does not know about is one
+  it cannot use — this is the same category as telling it the wire format via one
+  example seed, not a hint about the target.
+- The **already-tried list** is `{static_addr → rounds aimed at it without it
+  becoming covered}`, produced entirely from the fuzzer's own measurements: the
+  sidecar counts what each round aimed at (`llm/sidecar.py:309-314`) and
+  **retires an entry the moment measured coverage proves the branch was reached**
+  (`:233-247`). It reports outcomes; it does not suggest what to do instead. That
+  retirement is what keeps it honest — a branch a seed genuinely reached must
+  stop being reported as a failure, or the next round is told to avoid the one
+  thing that worked. The counter is rebuilt from
+  `artifacts/sidecar_events.jsonl` on startup (`:108-156`) because section 12.2
+  requires the sidecar to be restartable without stopping the campaign.
+
+**Forbidden — anything that names the branch's guard condition, the value that
+satisfies it, or the shape of the input that reaches it.** If the note tells the
+model the answer, the result measures our reverse engineering, not the model's.
+
+**An earlier version of the note crossed that line, and the failure is worth
+recording because it went the opposite way to the one you would expect.** The
+multi-packet paragraph originally described only the *pair-shaped* case — create
+an object in one packet, then operate on it by id in a later one. That is more
+specific than a capability statement: it is a usage pattern. And it was the
+**wrong** pattern. The branch that is actually reachable, `0x14000131c`, is the
+free-slot search loop running off the end of a fixed-size global table, which is
+reached only by **repeating the same command enough times in one input**.
+Measured (`artifacts/runs/gate7/control_probe.json`): 8 Allocate packets in one
+testcase reach it and cover 30 blocks; 4 packets cover 23 and do not reach it —
+so `ChunkList`'s capacity is between 5 and 8. A note that steered towards pairs
+steered *away* from repetition.
+
+The fix was to make the note more general, not more specific: it now names both
+consequences of persistence — an object existing from an earlier packet, **and** a
+fixed-size table filling or a counter passing a bound — and says plainly that
+sequence **length** is a variable in its own right. That is still a statement
+about what the harness can deliver. Which branch benefits is left to the model.
+
+**Two facts to state plainly in the writeup**, both of which this decision exists
+to keep reportable:
+
+1. The repetition insight is *in the pseudo-C*. It is a thing reading decompiled
+   code tells you and that random mutation finds only by luck — which is the
+   argument for LLM seed generation, and it is only an argument if we did not
+   supply the answer.
+2. The other two frontier branches, `0x1400012de` and `0x1400012ed`, appear
+   **unreachable by any input**: both are guarded by a null test on a pointer
+   that the immediately preceding `unique_ptr` move set to null. Nothing across
+   44 corpus files plus 24 LLM seeds has reached either
+   (`artifacts/runs/gate7/seed_delta.json`). The prompt is therefore allowed to
+   say that dead branches exist and to ask the model to *judge* one unreachable
+   and spend the seed elsewhere (`llm/seed_gen.py:251-256`) — a statement about
+   decompiler output in general, not about these two addresses.
 
 ---
 

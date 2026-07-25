@@ -81,8 +81,50 @@ struct Packet_t {
   uint16_t Id;
   uint16_t BodySize;
   std::vector<uint8_t> Body;
-  NLOHMANN_DEFINE_TYPE_INTRUSIVE(Packet_t, Command, Id, BodySize, Body);
+
+  //
+  // How many bytes the target is told arrived, independent of how many we
+  // wrote. 0 means "the natural size" (header + body).
+  //
+  // This exists because without it a whole branch is unreachable BY
+  // CONSTRUCTION. ProcessPacket opens with `if (param_2 < 8) { ...error... }`,
+  // and a harness that always reports 8 + Body.size() can never satisfy it --
+  // no seed, LLM-generated or otherwise, can reach that path. CP7 found this
+  // the hard way: the frontier offered the branch, the LLM correctly aimed at
+  // it, and nothing could possibly have worked (docs/DEVIATIONS.md D-040).
+  //
+  // It is also realistic rather than a testing hack: a peer on a socket can
+  // send fewer bytes than a header claims, so a harness unable to express that
+  // is under-testing the target.
+  //
+  uint32_t WireSize = 0;
 };
+
+//
+// Hand-written serialisers rather than NLOHMANN_DEFINE_TYPE_INTRUSIVE, because
+// WireSize must be OPTIONAL and that macro requires every field to be present.
+// The bundled nlohmann is 3.10.4 and the _WITH_DEFAULT variant only arrived in
+// 3.11, so this is written out.
+//
+// Optional is not a nicety: no existing corpus file has the field, and `at()`
+// on a missing key throws -- which InsertTestcase would catch and skip, silently
+// rejecting the entire pre-existing corpus and every LLM seed that omits it.
+//
+inline void to_json(json::json &Json, const Packet_t &Packet) {
+  Json = json::json{{"Command", Packet.Command},
+                    {"Id", Packet.Id},
+                    {"BodySize", Packet.BodySize},
+                    {"Body", Packet.Body},
+                    {"WireSize", Packet.WireSize}};
+}
+
+inline void from_json(const json::json &Json, Packet_t &Packet) {
+  Json.at("Command").get_to(Packet.Command);
+  Json.at("Id").get_to(Packet.Id);
+  Json.at("BodySize").get_to(Packet.BodySize);
+  Json.at("Body").get_to(Packet.Body);
+  Packet.WireSize = Json.value("WireSize", uint32_t(0));
+}
 
 struct Packets_t {
   std::vector<Packet_t> Packets;
@@ -188,11 +230,23 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
         //
         // size_param = rdx, in BYTES (config/target.yaml).
         //
-        Backend->Rdx(PacketSize);
+        // WireSize, when set, reports FEWER (or more) bytes than we wrote --
+        // modelling a short read on a socket. It is what makes the
+        // `param_2 < 8` path reachable at all (D-040).
+        //
+        size_t ReportedSize = PacketSize;
+        if (Testcase.WireSize != 0 && Testcase.WireSize < kPageSize) {
+          ReportedSize = Testcase.WireSize;
+        }
+        Backend->Rdx(ReportedSize);
 
         //
         // input_param = rcx, which HOLDS the buffer address. Slide the write to
         // the tail of the page so the guard page sits immediately behind it.
+        //
+        // Aligned on the bytes actually WRITTEN, not on ReportedSize: the guard
+        // page must sit behind the real data, or an over-reported size would
+        // read our own bytes instead of faulting.
         //
         const uint64_t PageBase = Backend->Rcx();
         uint64_t PacketAddress = PageBase + (kPageSize - PacketSize);
@@ -420,6 +474,12 @@ private:
         Packet.BodySize ^= 1 << GetUint32(0, 15);
       }
 
+      // And occasionally report a short wire size, which is the only way to
+      // reach a "packet too small" guard (D-040).
+      if (GetUint32(1, 8) == 1) {
+        Packet.WireSize = GetUint32(0, 8);
+      }
+
       Root.Packets.emplace_back(Packet);
     }
 
@@ -436,7 +496,8 @@ private:
       CopyField,
       DeletePacket,
       CorruptBodySize,
-      End = CorruptBodySize
+      TruncateWire,
+      End = TruncateWire
     };
 
     Packets_t Root;
@@ -466,6 +527,9 @@ private:
       break;
     case CorruptBodySize:
       MutationCorruptBodySize(Packets);
+      break;
+    case TruncateWire:
+      MutationTruncateWire(Packets);
       break;
     }
 
@@ -536,6 +600,17 @@ private:
       Packet.BodySize = 0xffff;
       break;
     }
+  }
+
+  //
+  // Report a short wire size. Ours, and the only way to exercise a header-size
+  // guard: without it `if (param_2 < 8)` is unreachable however the body is
+  // mutated, because the harness would always claim 8 + Body.size() (D-040).
+  //
+  void MutationTruncateWire(std::vector<Packet_t> &Packets) {
+    auto &Packet = Packets[GetUint32(0, uint32_t(Packets.size()) - 1)];
+    // 0 restores the natural size, so include it to undo a truncation too.
+    Packet.WireSize = GetUint32(0, 12);
   }
 };
 
