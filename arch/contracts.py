@@ -146,6 +146,14 @@ class CrashBucket(BaseModel):
     bucket_id: str  # stack hash
     representative: CrashRecord
     hit_count: int
+    # WHICH dedup key produced this bucket, and its value. Not decoration: the
+    # keys form a ladder that degrades when a backtrace or symbols are missing
+    # (analysis/dedup.py KEY_KINDS), and a bucket keyed on `fault_type` alone
+    # merges far more aggressively than one keyed on a stack hash. Without the
+    # rung recorded, a coarse bucket is indistinguishable from a precise one and
+    # "same bucket" gets read as "same bug" when it does not mean that.
+    key_kind: str = "stack_hash"
+    key_detail: str = ""
 
 
 class ReplayResult(BaseModel):

@@ -190,6 +190,10 @@ class SeedGenRequest:
     # `prep.data_symbols.format_globals`. Empty string when unavailable, which
     # only costs reasoning quality -- never correctness (D-047).
     globals_table: str = ""
+    # CP10 ablation (b). When True the prompt states that the code was withheld
+    # rather than quietly omitting it, so a transcript cannot be mistaken for a
+    # normal round.
+    without_pseudoc: bool = False
 
 
 def _frontier_context(
@@ -238,6 +242,22 @@ def _frontier_context(
         code_blocks.append(f"=== {function} ===\n{code}")
 
     return "\n".join(lines) + "\n\n" + "\n\n".join(code_blocks), used
+
+
+def _strip_pseudoc(context: str) -> str:
+    """Keep the frontier description, drop the code blocks.
+
+    The ``=== function ===`` blocks appended by :func:`_frontier_context` are the
+    pseudo-C; everything before the first one is the branch listing.
+    """
+    marker = context.find("\n=== ")
+    listing = context if marker < 0 else context[:marker]
+    return (
+        listing.rstrip()
+        + "\n\n(The decompiled code of these functions is deliberately withheld "
+        "in this run. Reason from the branch addresses and the input format "
+        "alone.)\n"
+    )
 
 
 _SYSTEM = (
@@ -339,6 +359,14 @@ def generate_seeds(
             "no frontier function has pseudo-C in A2. Build A2 over a scope that "
             "includes the frontier, or seed generation is reasoning blind."
         )
+
+    # CP10 ablation (b): no pseudo-C in the prompt. The frontier addresses stay,
+    # so the model still knows WHICH branches are unreached -- it just cannot read
+    # the code guarding them. That isolates "reasoning over decompiled code" from
+    # "an LLM producing structurally valid inputs", which is the distinction the
+    # project's second contribution rests on.
+    if request.without_pseudoc:
+        context = _strip_pseudoc(context)
 
     batch = client.complete_json(
         "seed_gen",

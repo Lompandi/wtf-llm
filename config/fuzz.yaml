@@ -93,8 +93,10 @@ tools:
   # 0vercl0k/snapshot: KD extension DLL, `.load` then `!snapshot <state_path>`.
   snapshot_dll: null # TODO(CP3)
   # 0vercl0k/symbolizer-rs: required to symbolize traces (section 13.3).
-  # Without it, traces load into neither lighthouse nor Tenet.
-  symbolizer_rs: null # TODO(CP8)
+  # Without it, traces load into neither lighthouse nor Tenet. The binary was
+  # already extracted at CP4 but never recorded here, so CP8 would have looked
+  # like a missing prerequisite when the tool was sitting on disk (D-050).
+  symbolizer_rs: D:\tools\symbolizer-rs\symbolizer-rs.exe
 
 # Slow-clock trigger (CP7, section 12.3). Plateau is computed on the MASTER's
 # AGGREGATE coverage, never on one worker's.

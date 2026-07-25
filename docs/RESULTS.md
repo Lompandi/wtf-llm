@@ -29,6 +29,103 @@ backend is not interpretable — bochscpu and whv do not measure the same thing
 
 ---
 
+## CP10 — baseline vs LLM-guided on `tlv_server`
+
+Five arms, identical conditions: same snapshot, same **single deliberately poor
+seed**, empty corpus, `bochscpu`, 2 workers, 5-minute budget each. Arms differ in
+exactly one thing. Distinct-crash counts come from `analysis.dedup`, so "unique
+crash" means the same thing in every arm — counting crash *files* would compare
+wtf's filename collapsing, which is not a bug count (D-024).
+
+| Arm | Executions | exec/s | Corpus | Distinct bugs | 1st crash | Coverage | Execs per bug |
+|---|---|---|---|---|---|---|---|
+| baseline-libfuzzer | 2,269,008 | 7,914 | 28 | 2 | 4.0 s | 9,686 | 1,134,504 |
+| baseline-honggfuzz | 5,927,672 | 22,954 | 2 | 1 | 66.0 s | 9,549 | 5,927,672 |
+| **llm-guided** | 64,736 | 746 | **41** | **4** | 14.0 s | **12,781** | **16,184** |
+| ablation-no-seedgen | 80,161 | 738 | 35 | 4 | 14.0 s | 12,761 | 20,040 |
+| ablation-no-pseudoc | 101,788 | 862 | 36 | 3 | 14.0 s | 12,751 | 33,929 |
+
+Curves and the bug-count bars: `artifacts/runs/gate10/coverage_curves.png`.
+
+### What this supports
+
+**The structure-aware harness and mutator win decisively, and not by being
+faster — by being slower.** Our arm runs at 746 exec/s against libfuzzer's 7,914
+and honggfuzz's 22,954, i.e. **10× and 31× less throughput**, and executes **35×
+fewer test-cases than libfuzzer** and **92× fewer than honggfuzz**. It still finds
+**4 distinct bugs to their 2 and 1**, and reaches **+3,095 more covered blocks**
+than the best baseline. Per unit of work that is **70× fewer executions per bug
+than libFuzzer** and **366× fewer than honggfuzz**.
+
+**honggfuzz's result is the clearest illustration of why.** It executed 5.9 million
+test-cases and ended with a corpus of **two** and one bug. A byte-level mutator
+cannot produce valid JSON, so `InsertTestcase` rejects nearly everything before it
+reaches the parser: almost six million executions bought almost nothing. This is
+the structural blindness that the LLM-derived input model exists to remove, and it
+shows up as a 366× efficiency gap rather than as a subtle difference.
+
+### What this does NOT support
+
+**The LLM seed generation's contribution is not demonstrated.** Compare
+`llm-guided` with `ablation-no-seedgen` — the same mutator, sidecar disabled:
+
+* corpus 41 vs 35,
+* distinct bugs **4 vs 4**,
+* coverage 12,781 vs 12,761 — a 20-block difference on a 12,700 base.
+
+So on this target the **mutator** is doing the work, and the slow clock is not
+adding measurable value. That is consistent with GATE 7, which failed its
+coverage-increase criterion for a reason quantified there: `tlv_server` is
+saturated by random mutation within ~100 seconds and the only branch left needs a
+six-step insight. Ablation (b), no pseudo-C, came out slightly worse (3 bugs, 36
+corpus) — the direction the hypothesis predicts, but on a single run that is not
+evidence.
+
+**Attributing this to the contributions:** Contribution 2 (Ghidra as unified
+infrastructure feeding a structure-aware harness) is strongly supported.
+Contribution 1's LLM-directed entry selection was demonstrated at GATE 6, where the
+model picked `ProcessPacket` from 84 candidates matching ground truth. The LLM
+*seed generation* specifically remains unsupported on this target.
+
+### Limitations of this measurement, stated plainly
+
+* **One run per arm.** Fuzzing is stochastic and there are no repetitions, so
+  small differences — 35 vs 41 corpus entries, 3 vs 4 buckets — are within
+  plausible noise. The large ones (4 vs 1 bug, +3,095 coverage, 70× and 366×
+  efficiency) are much less likely to be.
+* **Every arm plateaus inside the first 15–65 seconds**, so most of the 5-minute
+  budget is spent after saturation. A longer budget would not change these
+  numbers; a *harder target* would be needed to separate the arms further.
+* **The harness is held fixed.** `Init`, `InsertTestcase` and `Restore` are ours in
+  every arm — without them nothing runs at all. So this isolates test-case
+  *generation* and does not claim to measure a from-scratch wtf harness.
+* **Aggregate coverage is full-system on bochscpu** and dominated by system code.
+  The absolute numbers are not comparable to the module-only block counts used in
+  the CP7 section; only the between-arm comparison is meaningful.
+* **One target.** GATE 10 asks for ≥1, and this is 1.
+
+### Measurement bugs this comparison surfaced
+
+Both were found *by* running the comparison, and both would have biased it:
+
+* **D-052** — `exec/s: 8.3k` parsed as **8.3**. The magnitude suffix was stripped
+  along with the other non-digits, a 1000× under-read that stayed invisible while
+  our own mutator ran below 1,000 exec/s. It first appeared as a baseline arm
+  being recorded as *slower* than ours.
+* **D-053** — the sidecar event log is shared across runs, so the **baseline arms,
+  which start no sidecar at all, were credited with 30 LLM seeds over 2 rounds**.
+  A baseline crediting itself with LLM seeds invalidates the whole comparison, and
+  nothing about the number looked wrong. The log is now per-run, and an arm with no
+  sidecar reports zero by construction rather than by reading a file.
+* Also corrected: `peak_executions` was taken from the scheduler's live ticks,
+  which lag the master's buffered output by an **arm-dependent** amount — a noisy
+  arm fills the buffer with "Saving crash" lines and lags more than a quiet one.
+  libfuzzer's true count was 2,269,008 against 82,831 recorded, a 27× under-report,
+  while the quieter arms were already accurate. It now comes from the final log,
+  and `--recompute` re-derives past results from archived logs without re-running.
+
+---
+
 ## CP7 — the slow clock on `tlv_server`
 
 **Setup.** Target `tlv_server.exe`, fuzz entry `ProcessPacket`, backend

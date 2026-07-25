@@ -87,8 +87,15 @@ class CrashWatcher:
     ``state/symbol-store.json``. It exists because **most faults do not land in
     the target module.** Measured on tlv_server: 48 of 55 crashes faulted in
     0x7ff8aa3812de-0x7ff8aa38167c, which is not the target and is not any module
-    the symbol store lists -- it sits ~192 KB below verifier.dll and is most
-    likely part of the Application Verifier stack the snapshot was taken with.
+    the 12-entry symbol store lists.
+
+    CP8 settled what that range actually is, and it was not the guess recorded
+    here first: symbolizing the addresses through symbolizer-rs against the
+    memory dump resolves all 52 of them to **VCRUNTIME140.dll!memmove** and
+    ``memcpy_repmovs`` -- the CRT's memcpy implementation, reached from the
+    parser's unvalidated length copy. The earlier note speculated Application
+    Verifier because the range sits ~192 KB below verifier.dll; proximity is not
+    attribution, and symbols were available the whole time.
 
     Applying the target's slide to such an address produces a garbage "static"
     address (0x7ff8aa3812de became 0x2d05312de), and hashing that would corrupt

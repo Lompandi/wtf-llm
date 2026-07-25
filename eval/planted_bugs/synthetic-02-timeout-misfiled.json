@@ -1,0 +1,58 @@
+{
+  "case_id": "synthetic-02-timeout-misfiled",
+  "origin": "synthetic",
+  "label": "false_positive",
+  "label_rationale": "A timeout, not a crash. DECISIONS R5 settles that a timeout is a fourth outcome alongside crash, end-of-testcase and CR3 change -- it means the input exhausted the instruction budget and tells us nothing about memory safety. There is no fault address at all, so every derived judgement is unknown, and treating it as a finding would be reporting the absence of evidence as evidence.",
+  "expected_cwe": null,
+  "expected_exploitability": "unknown",
+  "bucket": {
+    "bucket_id": "synthetic-synthetic-02-timeout-misfiled",
+    "representative": {
+      "input_bytes": "e30=",
+      "fault_type": "timeout",
+      "fault_runtime_addr": 0,
+      "fault_static_addr": 0,
+      "fault_module": null,
+      "registers": {},
+      "backtrace": [],
+      "coverage_delta": 0,
+      "worker_id": null,
+      "backend": "bochscpu",
+      "timestamp": 1784985983.67813
+    },
+    "hit_count": 1,
+    "key_kind": "fault_function",
+    "key_detail": "timeout"
+  },
+  "classification": {
+    "bucket_id": "synthetic-synthetic-02-timeout-misfiled",
+    "fault_type": "timeout",
+    "access": "unknown",
+    "fault_runtime_addr": 0,
+    "fault_static_addr": 0,
+    "fault_module": null,
+    "fault_symbol": null,
+    "near_null": null,
+    "wild": null,
+    "registers_available": false,
+    "faulting_instruction": null,
+    "disasm_source": "unavailable",
+    "attacker_influenced": null,
+    "influence_offsets": [],
+    "influence_widths": [],
+    "notes": [
+      "no fault address is recorded",
+      "fault type does not name read or write"
+    ]
+  },
+  "replay": {
+    "bucket_id": "synthetic-synthetic-02-timeout-misfiled",
+    "reproduced": false,
+    "deterministic": false,
+    "replays": 3,
+    "backend": "bochscpu",
+    "notes": "ran 3 time(s) on bochscpu and never faulted -- it timed out. A non-reproducing crash is NOT automatically benign, but a timeout is a distinct outcome (R5)."
+  },
+  "trace": null,
+  "context": null
+}

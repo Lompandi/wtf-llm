@@ -1,0 +1,79 @@
+{
+  "case_id": "synthetic-01-never-entered-target",
+  "origin": "synthetic",
+  "label": "false_positive",
+  "label_rationale": "The trace shows execution never reached the fuzz entry, so whatever faulted, it was not the target's parser -- this crash is about the harness or the snapshot's surrounding state. TraceRef.reached_fuzz_entry exists precisely to make this checkable, and CP4 treats a harness that never enters the parser as the classic silent failure. Unambiguous: a finding about code that did not run cannot be a finding about the target.",
+  "expected_cwe": null,
+  "expected_exploitability": "unknown",
+  "bucket": {
+    "bucket_id": "synthetic-synthetic-01-never-entered-target",
+    "representative": {
+      "input_bytes": "__4gbm90IGpzb24=",
+      "fault_type": "access-violation-read",
+      "fault_runtime_addr": 140703414952482,
+      "fault_static_addr": 0,
+      "fault_module": null,
+      "registers": {},
+      "backtrace": [],
+      "coverage_delta": 0,
+      "worker_id": null,
+      "backend": "bochscpu",
+      "timestamp": 1784985983.67813
+    },
+    "hit_count": 1,
+    "key_kind": "fault_function",
+    "key_detail": "access-violation-read|ntdll.dll!RtlpAllocateHeapInternal"
+  },
+  "classification": {
+    "bucket_id": "synthetic-synthetic-01-never-entered-target",
+    "fault_type": "access-violation-read",
+    "access": "read",
+    "fault_runtime_addr": 140703414952482,
+    "fault_static_addr": 0,
+    "fault_module": null,
+    "fault_symbol": null,
+    "near_null": false,
+    "wild": true,
+    "registers_available": false,
+    "faulting_instruction": null,
+    "disasm_source": "unavailable",
+    "attacker_influenced": false,
+    "influence_offsets": [],
+    "influence_widths": [],
+    "notes": [
+      "the fault is not attributable to the target module",
+      "no disassembly available"
+    ]
+  },
+  "replay": {
+    "bucket_id": "synthetic-synthetic-01-never-entered-target",
+    "reproduced": true,
+    "deterministic": true,
+    "replays": 3,
+    "backend": "bochscpu",
+    "notes": "faulted at 0x7ff811112222 on 3/3 run(s)"
+  },
+  "trace": {
+    "bucket_id": "synthetic-synthetic-01-never-entered-target",
+    "trace_type": "rip",
+    "raw_path": "artifacts/analysis/synthetic/never-entered.trace",
+    "symbolized_path": "artifacts/runs/synthetic/never-entered.rip.txt",
+    "reached_fuzz_entry": false
+  },
+  "context": {
+    "bucket_id": "synthetic-synthetic-01-never-entered-target",
+    "context_frame": null,
+    "context_static_addr": 0,
+    "is_faulting_frame": false,
+    "faulting_frame": "ntdll.dll!RtlpAllocateHeapInternal+0x40",
+    "function": null,
+    "pseudo_c": null,
+    "pseudo_c_source": "unavailable",
+    "approach_path": [],
+    "in_module_call_path": [],
+    "globals_touched": "",
+    "notes": [
+      "the trace's approach path contains no frame in 'tlv_server'. Either the harness never entered the target (check TraceRef.reached_fuzz_entry) or the module prefix is wrong."
+    ]
+  }
+}

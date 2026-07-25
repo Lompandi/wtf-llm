@@ -33,9 +33,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 __all__ = [
     "TraceError",
+    "SymbolRef",
+    "KERNEL_BASE",
     "find_symbolizer",
     "generate_trace",
     "symbolize",
+    "symbolize_addresses",
+    "fault_address_from_trace",
+    "fault_index_from_trace",
+    "frames_before_fault",
     "validate_harness",
 ]
 
@@ -43,17 +49,41 @@ __all__ = [
 # (section 13.3).
 BOCHSCPU_ONLY_TRACE_TYPES = frozenset({"tenet"})
 
+# x64 canonical-address split. Everything at or above this is kernel space on
+# Windows x64; below it is user space. Used to find where a fault handed control
+# to the kernel -- see :func:`fault_address_from_trace`.
+KERNEL_BASE = 0xFFFF_8000_0000_0000
+
 
 class TraceError(RuntimeError):
     pass
 
 
-def find_symbolizer(explicit: str | Path | None = None) -> Path:
-    """Locate symbolizer-rs: explicit arg, then ``SYMBOLIZER_RS``, then PATH.
+def _symbolizer_from_config(repo_root: Path = REPO_ROOT) -> str | None:
+    """``tools.symbolizer_rs`` from config/fuzz.yaml, or None."""
+    config = repo_root / "config" / "fuzz.yaml"
+    if not config.exists():
+        return None
+    try:
+        import yaml
 
-    Not read from config/fuzz.yaml by default -- an absolute path to a tool
-    outside the repo is machine-specific and does not belong in a committed
-    file. See docs/ENVIRONMENT.md.
+        data = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None
+    return (data.get("tools") or {}).get("symbolizer_rs")
+
+
+def find_symbolizer(explicit: str | Path | None = None) -> Path:
+    """Locate symbolizer-rs: explicit arg, ``SYMBOLIZER_RS``, PATH, then config.
+
+    CP4 deliberately did *not* consult config/fuzz.yaml, on the grounds that an
+    absolute path to a tool outside the repo is machine-specific and does not
+    belong in a committed file. CP8 reversed that, because the premise was already
+    false: the same file carries ``symbols.nt_symbol_path`` with ``C:\\symbols``
+    and an MS symbol-server URL, so it is not machine-portable and pretending
+    otherwise only meant the tool sat on disk while the pipeline reported it
+    missing (D-050). Config is consulted **last**, so an env var still wins on a
+    machine where the committed path is wrong.
     """
     for candidate in (explicit, os.environ.get("SYMBOLIZER_RS")):
         if candidate:
@@ -68,10 +98,23 @@ def find_symbolizer(explicit: str | Path | None = None) -> Path:
     if found:
         return Path(found)
 
+    configured = _symbolizer_from_config()
+    if configured:
+        path = Path(configured)
+        if path.is_dir():
+            path = path / "symbolizer-rs.exe"
+        if path.exists():
+            return path
+        raise TraceError(
+            f"config/fuzz.yaml names symbolizer-rs at {configured}, which does "
+            f"not exist. Fix the config or set SYMBOLIZER_RS."
+        )
+
     raise TraceError(
-        "symbolizer-rs not found. Set SYMBOLIZER_RS or put it on PATH. "
-        "Without it, CP4's harness validation cannot be performed and CP8 has "
-        "no signal 4. See docs/ENVIRONMENT.md."
+        "symbolizer-rs not found. Set SYMBOLIZER_RS, put it on PATH, or set "
+        "tools.symbolizer_rs in config/fuzz.yaml. Without it, CP4's harness "
+        "validation cannot be performed and CP8 has no signal 4. See "
+        "docs/ENVIRONMENT.md."
     )
 
 
@@ -239,7 +282,229 @@ def symbolize(
     return output_path
 
 
+def fault_index_from_trace(trace_path: Path) -> int | None:
+    """Line index (0-based) of the faulting instruction in a raw rip trace.
+
+    Returned as an index, not just an address, because the symbolized trace has
+    **one line per raw line in the same order** -- so this index locates the fault
+    in the symbolized file too. That matters: the boundary cannot be found in the
+    symbolized file directly, because after the fault the kernel returns to
+    user-mode ``ntdll!RtlDispatchException`` and re-enters the kernel, so the
+    *last* user->kernel transition is inside the post-fault dispatch path, not the
+    fault. Locating it in the raw trace and carrying the index across avoids the
+    guesswork entirely.
+    """
+    addresses: list[int] = []
+    with Path(trace_path).open("r", encoding="utf-8", errors="replace") as fd:
+        for line in fd:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                addresses.append(int(line, 16))
+            except ValueError:
+                continue
+
+    for index in range(len(addresses) - 1, 0, -1):
+        if addresses[index] >= KERNEL_BASE and addresses[index - 1] < KERNEL_BASE:
+            return index - 1
+    return None
+
+
+def fault_address_from_trace(trace_path: Path) -> int | None:
+    """The faulting instruction's runtime address, recovered from a rip trace.
+
+    **Why this is not simply the last line.** `wtf run` prints ``crash: 1`` in its
+    stat line and *never prints the address* -- it also writes no crash file (the
+    ``run`` verb has no ``--crashes`` option; measured, and the crash directory is
+    unchanged after a crashing run). Meanwhile the rip trace does not stop at the
+    fault: control passes to the kernel's exception dispatcher and the trace runs
+    on for thousands more instructions. Measured on one crash: 43,305 lines, the
+    fault at index 38,752, and 4,552 lines after it.
+
+    So the rule is structural rather than symbolic: the fault is the last
+    **user-mode** address before the final user->kernel transition. Earlier
+    transitions exist -- ordinary syscalls -- so it must be the last one. This
+    needs no symbols, which matters because the fault is usually in a system DLL.
+
+    Verified against the address wtf itself put in the crash filename, on three
+    crashes with different fault addresses: exact match each time (D-051).
+
+    Returns None when the trace never enters the kernel, i.e. the input did not
+    fault. That is a real answer, not a failure.
+    """
+    addresses: list[int] = []
+    with Path(trace_path).open("r", encoding="utf-8", errors="replace") as fd:
+        for line in fd:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                addresses.append(int(line, 16))
+            except ValueError:
+                continue  # symbolized lines are not addresses; skip them
+
+    for index in range(len(addresses) - 1, 0, -1):
+        if addresses[index] >= KERNEL_BASE and addresses[index - 1] < KERNEL_BASE:
+            return addresses[index - 1]
+    return None
+
+
+@dataclass(frozen=True)
+class SymbolRef:
+    """One symbolized address, split into its parts.
+
+    ``function`` is None when symbols resolved the module but not a name. That
+    distinction is load-bearing for dedup: bucketing by function is only sound
+    when there *is* a function, and silently substituting the module would merge
+    unrelated bugs.
+    """
+
+    raw: str
+    module: str
+    function: str | None
+    offset: int | None
+
+    @property
+    def function_key(self) -> str | None:
+        """``module!function``, or None if no name resolved."""
+        return f"{self.module}!{self.function}" if self.function else None
+
+
+def symbolize_addresses(
+    addresses: list[int],
+    *,
+    crash_dump: Path,
+    workdir: Path,
+    symbolizer: Path | None = None,
+    symbol_paths: list[str] | None = None,
+    symcache: Path | None = None,
+    timeout_s: int = 1800,
+) -> dict[int, SymbolRef]:
+    """Resolve arbitrary runtime addresses to ``module!function+offset``.
+
+    symbolizer-rs only consumes *traces*, so a one-address-per-line file is
+    written and symbolized -- a trace of length N is exactly what its input
+    format is. This is the cheap path that makes dedup possible without
+    generating an execution trace per crash: measured, 52 addresses resolved in
+    0.0 s, against roughly a second of emulation per rip trace.
+
+    Ordering is relied upon: symbolizer-rs emits one output line per input line,
+    in order, so the mapping back to addresses is positional. Duplicate addresses
+    are collapsed before the call, and the returned dict is keyed by address.
+    """
+    unique = sorted(set(addresses))
+    if not unique:
+        return {}
+
+    workdir = Path(workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+    listing = workdir / "addresses.trace"
+    listing.write_text("\n".join(f"{a:#x}" for a in unique) + "\n", encoding="utf-8")
+
+    resolved_path = symbolize(
+        listing,
+        workdir / "addresses.sym",
+        crash_dump=crash_dump,
+        symbolizer=symbolizer,
+        symbol_paths=symbol_paths,
+        symcache=symcache,
+        style="full",
+        timeout_s=timeout_s,
+    )
+
+    lines = resolved_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    if len(lines) != len(unique):
+        raise TraceError(
+            f"symbolizer-rs returned {len(lines)} lines for {len(unique)} "
+            f"addresses. The mapping back to addresses is positional, so a count "
+            f"mismatch would silently attribute faults to the wrong functions."
+        )
+
+    return {
+        address: parse_symbol_line(line)
+        for address, line in zip(unique, lines)
+    }
+
+
 _SYMBOL_LINE_RE = re.compile(r"^(?P<module>[^!+\s]+)(?:!(?P<symbol>[^+\s]+))?")
+
+# `mod.dll!func+0x1e [source @ 12]` -- the offset and source are both optional.
+_FULL_SYMBOL_RE = re.compile(
+    r"^(?P<module>[^!+\s]+)"
+    r"(?:!(?P<function>[^+\s\[]+))?"
+    r"(?:\+(?P<offset>0x[0-9a-fA-F]+|\d+))?"
+)
+
+
+def parse_symbol_line(line: str) -> SymbolRef:
+    """Split one symbolizer-rs ``--style full`` line into its parts."""
+    text = line.strip()
+    match = _FULL_SYMBOL_RE.match(text)
+    if not match:
+        return SymbolRef(raw=text, module=text or "<unknown>", function=None, offset=None)
+
+    raw_offset = match.group("offset")
+    offset = int(raw_offset, 0) if raw_offset else None
+    return SymbolRef(
+        raw=text,
+        module=match.group("module"),
+        function=match.group("function"),
+        offset=offset,
+    )
+
+
+def frames_before_fault(
+    symbolized: Path,
+    *,
+    count: int = 20,
+    module: str | None = None,
+    fault_index: int | None = None,
+) -> list[str]:
+    """The last ``count`` symbolized frames at or before the fault.
+
+    Everything from the exception dispatch onward is dropped: those thousands of
+    kernel frames are the *consequence* of the fault, not its cause, and triage
+    walking backwards wants the approach path.
+
+    ``fault_index`` comes from :func:`fault_index_from_trace` over the RAW trace
+    and is the reliable way to find the boundary -- symbolizer-rs emits one line
+    per input line in order, so the index transfers. Without it the boundary is
+    guessed from where kernel frames begin, which is wrong for a symbolized trace:
+    after the fault the kernel returns to user-mode ``ntdll!RtlDispatchException``
+    and re-enters, so the last user->kernel transition sits in the post-fault path.
+
+    ``module`` filters to one module, and for this target that is not a nicety. A
+    tlv_server trace is dominated by system code -- measured 19,681 ntdll lines
+    against 130 in the target itself -- so the unfiltered tail is entirely memcpy
+    internals and says nothing about which parser branch set up the bad length.
+    Filtering is applied BEFORE taking the last ``count``, so a caller asking for
+    12 target frames gets 12 target frames rather than 12 lines that happen to
+    contain none.
+    """
+    lines = [
+        line.strip()
+        for line in Path(symbolized)
+        .read_text(encoding="utf-8", errors="replace")
+        .splitlines()
+        if line.strip()
+    ]
+
+    if fault_index is not None and 0 <= fault_index < len(lines):
+        approach = lines[: fault_index + 1]
+    else:
+        # Fallback: first entry into kernel code. Less precise than the raw-trace
+        # index but never includes the post-fault dispatch path.
+        boundary = len(lines)
+        for index, line in enumerate(lines):
+            if line.startswith(("nt!", "hal!")):
+                boundary = index
+                break
+        approach = lines[:boundary]
+
+    if module:
+        approach = [line for line in approach if line.startswith(module)]
+    return approach[-count:]
 
 
 def first_hit(symbolized: Path, symbol: str) -> int | None:

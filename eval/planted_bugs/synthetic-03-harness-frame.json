@@ -1,0 +1,72 @@
+{
+  "case_id": "synthetic-03-harness-frame",
+  "origin": "synthetic",
+  "label": "false_positive",
+  "label_rationale": "The fault is inside our own injected harness code, not the target: the faulting frame is the fuzzer module's packet-delivery breakpoint handler, reached with an empty packet queue. It is a bug in the harness if anything, and reporting it as a target finding would be reporting our own defect as the target's.",
+  "expected_cwe": null,
+  "expected_exploitability": "unknown",
+  "bucket": {
+    "bucket_id": "synthetic-synthetic-03-harness-frame",
+    "representative": {
+      "input_bytes": "eyJQYWNrZXRzIjpbXX0=",
+      "fault_type": "access-violation-read",
+      "fault_runtime_addr": 140699139069560,
+      "fault_static_addr": 0,
+      "fault_module": null,
+      "registers": {},
+      "backtrace": [],
+      "coverage_delta": 0,
+      "worker_id": null,
+      "backend": "bochscpu",
+      "timestamp": 1784985983.67813
+    },
+    "hit_count": 1,
+    "key_kind": "fault_function",
+    "key_detail": "access-violation-read|snapfuzz_harness!DeliverPacket"
+  },
+  "classification": {
+    "bucket_id": "synthetic-synthetic-03-harness-frame",
+    "fault_type": "access-violation-read",
+    "access": "read",
+    "fault_runtime_addr": 140699139069560,
+    "fault_static_addr": 0,
+    "fault_module": null,
+    "fault_symbol": null,
+    "near_null": false,
+    "wild": true,
+    "registers_available": false,
+    "faulting_instruction": null,
+    "disasm_source": "unavailable",
+    "attacker_influenced": false,
+    "influence_offsets": [],
+    "influence_widths": [],
+    "notes": [
+      "faulting module is the harness, not the target"
+    ]
+  },
+  "replay": {
+    "bucket_id": "synthetic-synthetic-03-harness-frame",
+    "reproduced": true,
+    "deterministic": true,
+    "replays": 3,
+    "backend": "bochscpu",
+    "notes": "faulted at 0x7ff712345678 on 3/3 run(s)"
+  },
+  "trace": null,
+  "context": {
+    "bucket_id": "synthetic-synthetic-03-harness-frame",
+    "context_frame": null,
+    "context_static_addr": 0,
+    "is_faulting_frame": false,
+    "faulting_frame": null,
+    "function": null,
+    "pseudo_c": null,
+    "pseudo_c_source": "unavailable",
+    "approach_path": [],
+    "in_module_call_path": [],
+    "globals_touched": "",
+    "notes": [
+      "no target-module frame on the fault path"
+    ]
+  }
+}

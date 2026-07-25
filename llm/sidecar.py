@@ -70,6 +70,15 @@ class SidecarConfig:
     # ExportDataSymbols.java output. Optional: absent means the prompt simply
     # carries no global bounds, which degrades reasoning rather than breaking it.
     a6_data_symbols: Path | None = None
+    # CP10 ablation (b): withhold pseudo-C AND the global bounds table, since both
+    # are static facts read out of the binary. Set from SNAPFUZZ_NO_PSEUDOC so a
+    # baseline arm can turn it on without a config edit.
+    without_pseudoc: bool = False
+    # Names this run's event log. Per-run because the log is otherwise shared, and
+    # a comparison of several arms then credits each arm with every earlier arm's
+    # rounds (D-053). Empty keeps the single shared file, which is what a one-off
+    # run wants.
+    label: str = ""
 
     plateau_execs_threshold: int = 50_000
     wall_clock_bound_s: float = 900.0
@@ -120,7 +129,7 @@ class Sidecar:
         sidecar re-try the same dead branches from scratch, so it is recovered
         from `sidecar_events.jsonl` -- which is written anyway, for provenance.
         """
-        path = self.config.artifacts_dir / "sidecar_events.jsonl"
+        path = self.events_path
         counts: dict[int, int] = {}
         if not path.exists():
             return counts
@@ -229,10 +238,20 @@ class Sidecar:
 
     # --- the loop --------------------------------------------------------
 
+    @property
+    def events_path(self) -> Path:
+        """This run's event log. Per-label so arms cannot read each other's."""
+        name = (
+            f"sidecar_events_{self.config.label}.jsonl"
+            if self.config.label
+            else "sidecar_events.jsonl"
+        )
+        return self.config.artifacts_dir / name
+
     def _log(self, kind: str, **fields) -> None:
         record = {"ts": time.time(), "clock": "slow", "event": kind, **fields}
         self.events.append(record)
-        path = self.config.artifacts_dir / "sidecar_events.jsonl"
+        path = self.events_path
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fd:
             fd.write(json.dumps(record) + "\n")
@@ -315,7 +334,8 @@ class Sidecar:
             want=cfg.seeds_per_call,
             format_notes=cfg.format_notes,
             attempted=attempted,
-            globals_table=self._globals_table(),
+            globals_table="" if cfg.without_pseudoc else self._globals_table(),
+            without_pseudoc=cfg.without_pseudoc,
         )
 
         # A round is SEVERAL independent samples, unioned -- not one call.
@@ -486,6 +506,7 @@ def build_config(
         artifacts_dir=repo_root / "artifacts",
         space=space,
         symbol_paths=symbol_paths,
+        without_pseudoc=os.environ.get("SNAPFUZZ_NO_PSEUDOC") == "1",
         plateau_execs_threshold=int(fuzz["plateau"]["plateau_execs_threshold"]),
         wall_clock_bound_s=float(fuzz["plateau"]["wall_clock_bound_s"]),
         tick_interval_s=float(fuzz["plateau"]["tick_interval_s"]),
@@ -540,6 +561,10 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         help="independent LLM samples per plateau, unioned (D-048)",
     )
+    ap.add_argument(
+        "--label",
+        help="names this run's event log, so parallel arms cannot read each other's",
+    )
     args = ap.parse_args(argv)
 
     # symbol_paths comes from config/fuzz.yaml via build_config. It used to be
@@ -552,6 +577,7 @@ def main(argv: list[str] | None = None) -> int:
         seeds_per_call=args.seeds,
         samples_per_round=args.samples,
         plateau_execs_threshold=args.plateau_execs,
+        label=args.label,
     )
 
     sidecar = Sidecar(cfg)

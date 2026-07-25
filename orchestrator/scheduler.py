@@ -201,7 +201,23 @@ class Scheduler:
                 self.sidecar.kill()
 
     def _sidecar_events(self) -> list[dict]:
-        path = self.artifacts_dir / "sidecar_events.jsonl"
+        """This run's sidecar events. Empty when no sidecar was started.
+
+        The empty-on-no-sidecar case is not a shortcut, it is a correctness fix.
+        The event log is shared across runs, so a run with no sidecar was picking
+        up a PREVIOUS run's rounds: CP10's baseline arms, which have no sidecar at
+        all, were recorded as having published 30 LLM seeds over 2 rounds (D-053).
+        A baseline arm crediting itself with LLM seeds would invalidate the whole
+        comparison, and nothing about the number looked wrong.
+        """
+        if self.sidecar_cmd is None:
+            return []
+
+        # Same per-label name the sidecar writes (SidecarConfig.label), falling
+        # back to the shared file for a run started without a label.
+        path = self.artifacts_dir / f"sidecar_events_{self.label}.jsonl"
+        if not path.exists():
+            path = self.artifacts_dir / "sidecar_events.jsonl"
         if not path.exists():
             return []
         out = []
@@ -277,6 +293,7 @@ def main(argv: list[str] | None = None) -> int:
             "--plateau-execs", str(args.plateau_execs),
             "--seeds", str(args.seeds),
             "--samples", str(args.samples),
+            "--label", args.label,
         ]
 
     scheduler = Scheduler(

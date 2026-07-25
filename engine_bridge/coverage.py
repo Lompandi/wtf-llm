@@ -83,19 +83,43 @@ class MasterStats:
         return self.nodes > 1
 
 
+_MAGNITUDE = {"k": 1_000.0, "m": 1_000_000.0, "g": 1_000_000_000.0}
+
+
+def _parse_magnitude(raw: str) -> float:
+    """Parse wtf's abbreviated numbers: "374.0", "8.3k", "1.2m".
+
+    Returns 0.0 on anything unparseable rather than raising: a malformed rate on
+    one stat line must not lose the whole line, which carries the execution and
+    coverage counters that actually matter.
+    """
+    text = raw.strip().lower()
+    multiplier = 1.0
+    if text and text[-1] in _MAGNITUDE:
+        multiplier = _MAGNITUDE[text[-1]]
+        text = text[:-1]
+    try:
+        return float(text) * multiplier
+    except ValueError:
+        return 0.0
+
+
 def parse_stat_line(line: str) -> MasterStats | None:
     """Parse one master stat line, or return None if it is not one."""
     m = _STAT_RE.match(line.strip())
     if not m:
         return None
 
-    # exec/s can be a garbage sentinel on the very first line
-    # ("9223372036854.8m") before any testcase has completed.
+    # exec/s carries a MAGNITUDE SUFFIX once it grows: wtf prints "374.0" but
+    # also "8.3k" and "1.2m". Stripping non-digits, which is what this did
+    # originally, turned 8.3k into 8.3 -- a 1000x under-read that stayed invisible
+    # for as long as our own mutator ran under 1000 exec/s, and only surfaced when
+    # a CP10 baseline arm hit 8.3k and was recorded as slower than us (D-052).
+    #
+    # The first line can also be a garbage sentinel ("9223372036854.8m") before
+    # any testcase has completed, so the suffix cannot simply be trusted either.
     raw_rate = m.group("execs_per_sec")
-    try:
-        execs_per_sec = float(re.sub(r"[^\d.]", "", raw_rate) or 0.0)
-    except ValueError:
-        execs_per_sec = 0.0
+    execs_per_sec = _parse_magnitude(raw_rate)
 
     return MasterStats(
         execs=int(m.group("execs")),

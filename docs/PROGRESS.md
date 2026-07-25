@@ -19,9 +19,9 @@ table and `arch/graph.yaml` agree, so they cannot drift apart.
 | 5 | LLM client | **PASS** | 2026-07-25 | 19 tests including live endpoint calls. All 5 roles answer; JSON round-trips into a contract; usage log and budget caps verified |
 | 6 | GhidraMCP + A2 + LLM entry selection | **PASS** | 2026-07-25 | 20 tests incl. live MCP + live LLM. A2 = 14 functions (closure) / 193 (module). **The LLM picked `ProcessPacket` from 84 candidates, matching ground truth exactly** |
 | 7 | Plateau detection + LLM seed gen | **PARTIAL** | 2026-07-25 | 48 tests. Four of five gate criteria met; the coverage-increase criterion is **not**, and is quantified rather than assumed — see the log below and docs/RESULTS.md. Edges 27/28/28b/29/10b held **pending** under RULE 3 |
-| 8 | Dedup, classification, replay, traces | not started | — | Needs `symbolizer-rs` |
-| 9 | DSPy triage (5 signals) + report | not started | — | |
-| 10 | Evaluation harness | not started | — | |
+| 8 | Dedup, classification, replay, traces | **PASS** | 2026-07-25 | 46 tests. 53 crashes → **4 buckets** from 52 distinct fault addresses; 4/4 reproduced *and* deterministic on bochscpu with byte-identical traces; 4 traces all reaching the fuzz entry; pseudo-C for every bucket. No LLM in the path (negative control confirms the check fires) |
+| 9 | DSPy triage (5 signals) + report | **PASS** | 2026-07-25 | 30 tests. All 4 real buckets triaged with **all five signals**; reads rated CWE-125/info_leak and writes CWE-122/possible_rce. Held-out split **4/4** (precision 1.00, recall 1.00) — but **n=4** and the negatives are synthetic, so the number is indicative only. GHSA advisory renders confirmed-only; discards logged |
+| 10 | Evaluation harness | **PASS** | 2026-07-25 | 22 tests. 5 arms (both built-in mutators + system + both ablations), identical budget/seed/workers. **4 distinct bugs vs 2 and 1**, **+3,095 coverage** over the best baseline, at **70×/366× fewer executions per bug** — despite 10–31× lower throughput. **LLM seed gen's contribution is NOT demonstrated** (4 vs 4 buckets against the no-seedgen ablation). Curves plotted; numbers in docs/RESULTS.md |
 
 ## Edges
 
@@ -67,26 +67,165 @@ sub-edges), plus 3 derived edges recorded in [DEVIATIONS.md](DEVIATIONS.md).
 | 30 | master.corpus | a4_corpus | 4, 4b | live |
 | 31 | worker.execute | master.crash_collect | 4, 4b | live |
 | 31b | master.crash_collect | a5_crashes *(derived)* | 4, 4b | live |
-| 32 | a4_corpus | analysis.cov_trace_gen | 10 | pending |
-| 32b | analysis.cov_trace_gen | analysis.symbolize_cov | 10 | pending |
-| 32c | analysis.symbolize_cov | analysis.lighthouse_report | 10 | pending |
-| 33 | a5_crashes | analysis.crash_dedup | 8 | pending |
-| 34 | analysis.crash_dedup | analysis.crash_classification | 8 | pending |
-| 35 | analysis.crash_classification | analysis.deterministic_replay | 8 | pending |
-| 36 | analysis.deterministic_replay | analysis.trace_gen | 8 | pending |
-| 36b | analysis.trace_gen | analysis.symbolize_trace | 8 | pending |
-| 37 | analysis.symbolize_trace | analysis.reverse_engineer | 6, 8 | pending |
-| 37b | a2_pseudoc_cache | analysis.reverse_engineer | 6, 8 | pending |
-| 38 | analysis.crash_dedup | analysis.llm_triage *(signal 1 — dedup)* | 9 | pending |
-| 39 | analysis.crash_classification | analysis.llm_triage *(signal 2 — classification)* | 9 | pending |
-| 40 | analysis.deterministic_replay | analysis.llm_triage *(signal 3 — replay)* | 9 | pending |
-| 41 | analysis.symbolize_trace | analysis.llm_triage *(signal 4 — DYNAMIC)* | 9 | pending |
-| 41b | analysis.reverse_engineer | analysis.llm_triage *(signal 5 — STATIC)* | 9 | pending |
-| 42 | analysis.llm_triage | report *(confirmed)* | 9 | pending |
-| 43 | analysis.llm_triage | discard *(false_positive)* | 9 | pending |
+| 32 | a4_corpus | analysis.cov_trace_gen | 10 | live |
+| 32b | analysis.cov_trace_gen | analysis.symbolize_cov | 10 | live |
+| 32c | analysis.symbolize_cov | analysis.lighthouse_report | 10 | live |
+| 33 | a5_crashes | analysis.crash_dedup | 8 | live |
+| 34 | analysis.crash_dedup | analysis.crash_classification | 8 | live |
+| 35 | analysis.crash_classification | analysis.deterministic_replay | 8 | live |
+| 36 | analysis.deterministic_replay | analysis.trace_gen | 8 | live |
+| 36b | analysis.trace_gen | analysis.symbolize_trace | 8 | live |
+| 37 | analysis.symbolize_trace | analysis.reverse_engineer | 6, 8 | live |
+| 37b | a2_pseudoc_cache | analysis.reverse_engineer | 6, 8 | live |
+| 38 | analysis.crash_dedup | analysis.llm_triage *(signal 1 — dedup)* | 9 | live |
+| 39 | analysis.crash_classification | analysis.llm_triage *(signal 2 — classification)* | 9 | live |
+| 40 | analysis.deterministic_replay | analysis.llm_triage *(signal 3 — replay)* | 9 | live |
+| 41 | analysis.symbolize_trace | analysis.llm_triage *(signal 4 — DYNAMIC)* | 9 | live |
+| 41b | analysis.reverse_engineer | analysis.llm_triage *(signal 5 — STATIC)* | 9 | live |
+| 42 | analysis.llm_triage | report *(confirmed)* | 9 | live |
+| 43 | analysis.llm_triage | discard *(false_positive)* | 9 | live |
 | 1000 | ghidra.analyze | ghidra.fuzz_entry_selection *(derived)* | 6 | live |
 
 ## Log
+
+### 2026-07-25 (14) — GATE 10 PASS: the central claim, measured, and one half of it fails
+
+22 tests. Five arms, identical snapshot / single poor seed / empty corpus /
+`bochscpu` / 2 workers / 5-minute budget. Numbers in [RESULTS.md](RESULTS.md),
+curves in `artifacts/runs/gate10/coverage_curves.png`.
+
+**Supported: the structure-aware harness wins by being slower.** 746 exec/s
+against libfuzzer's 7,914 and honggfuzz's 22,954 — and 35× fewer executions than
+libfuzzer, 92× fewer than honggfuzz — yet **4 distinct bugs to their 2 and 1** and
+**+3,095 covered blocks** over the best baseline. That is **70× fewer executions
+per bug than libFuzzer and 366× fewer than honggfuzz**.
+
+honggfuzz makes the mechanism obvious: 5.9 million executions, a corpus of **two**,
+one bug. A byte-level mutator cannot emit valid JSON, so `InsertTestcase` rejects
+nearly everything before the parser sees it. Six million executions bought almost
+nothing.
+
+**Not supported: LLM seed generation.** Against the no-seedgen ablation — same
+mutator, sidecar off — it is 41 vs 35 corpus entries, **4 vs 4 buckets**, and
+12,781 vs 12,761 coverage. The mutator is doing the work. This is consistent with
+GATE 7's PARTIAL and its stated reason, and it is recorded as a negative result
+rather than presented as a win. Ablation (b), no pseudo-C, came out slightly worse
+(3 buckets) — the predicted direction, but one run is not evidence.
+
+**Two measurement bugs the comparison found in itself**, both of which would have
+biased it:
+
+* **D-052** — `exec/s: 8.3k` parsed as **8.3**: the magnitude suffix was stripped
+  with the other non-digits. A 1000× under-read, invisible for as long as our own
+  mutator stayed under 1,000 exec/s, and it first showed up as a baseline arm being
+  recorded as *slower* than ours.
+* **D-053** — the sidecar event log is shared across runs, so the **baseline arms,
+  which start no sidecar at all, were credited with 30 LLM seeds over 2 rounds.**
+  Nothing about the number looked wrong. The log is now per-run, and a no-sidecar
+  arm reports zero by construction rather than by reading a file.
+* Also: `peak_executions` came from the scheduler's live ticks, which lag the
+  master's buffered output by an **arm-dependent** amount — libfuzzer's true count
+  was 2,269,008 against 82,831 recorded (27×), while quieter arms were accurate.
+  Now taken from the final log, with `--recompute` to re-derive past results from
+  archived logs without re-running anything.
+
+Honest limits, all in RESULTS.md: **one run per arm** so small gaps are noise;
+every arm plateaus within 15–65 s so most of the budget is post-saturation; the
+harness is held fixed in every arm, so this isolates *generation*; and it is one
+target.
+
+### 2026-07-25 (13) — GATE 9 PASS: five-signal triage, and the report
+
+30 tests. All four real buckets triaged, every one of them using **all five
+signals**, and the severity distinction that matters came out right without being
+told: the out-of-bounds **reads** were rated CWE-125 / `info_leak`, the
+**writes** CWE-122 / `possible_rce`.
+
+Held-out accuracy is **4/4** — precision 1.00, recall 1.00 — and that number
+should be read with its caveats, which the scorecard itself carries:
+
+* **n = 4.** Perfect scores over four cases are close to uninformative.
+* **The negatives are synthetic.** The positives are real buckets whose ground
+  truth comes from the target's own source, but the false-positive cases were
+  constructed by the same person who wrote the prompt, so a model can score well
+  by recognising the construction. `eval/cases.py` states this; the scorecard's
+  `caveat` field repeats it so a JSON reader cannot miss it.
+
+**A case was removed rather than kept as a failure, and this is worth recording.**
+The first negative was a fuzzer-induced out-of-memory null dereference in
+`operator_new`, labelled benign on the grounds that it is not attacker-interesting.
+Triage called it `confirmed` with CWE-690 — unchecked return value to null
+dereference — which is a **defensible reading**; an unchecked allocation result *is*
+a defect. The ground truth was contestable, so the case was measuring the
+labeller's opinion rather than the model's reasoning. It was replaced with a case
+whose benignness is not arguable: a crash whose trace shows
+`reached_fuzz_entry: False`, i.e. a finding about code that never ran.
+
+`eval/planted_bugs/` holds labelled **triage cases**, not planted-bug targets.
+Building the latter needs a snapshot per binary, which is still outside this
+checkpoint. Triage consumes signals and never sees a binary, so the measurement is
+sound for what it measures and is explicitly not an end-to-end claim.
+
+Also: DSPy `BootstrapFewShot` compiles on the train split (2 demos bootstrapped)
+and scores identically on held-out — there is no headroom to show at n=4. The
+advisory renders confirmed findings only, refuses to render a `false_positive`,
+and discards go to a JSONL log kept for evaluation. One real rendering bug fixed:
+dedup keys contain a literal `|`, which was splitting a Markdown table cell and
+shifting every column after it — a shifted row misattributes a severity.
+
+### 2026-07-25 (12) — GATE 8 PASS: 53 crashes, 4 buckets
+
+46 tests. The headline is the dedup result, and it needed a design the spec does
+not describe.
+
+**Why section 8's key ladder did not apply.** A crash file is a name plus the
+test-case bytes: no registers, no backtrace. And every fault on this target lands
+*outside* the target module, so `fault_static_addr` is 0 by design (D-035) — the
+documented fallback `(fault_static_addr, fault_type)` is therefore unusable, and
+bucketing by fault address gives **52 buckets for one bug**.
+
+What works is bucketing by the **function** containing the fault. Symbolizing an
+address list through symbolizer-rs against the memory dump costs nothing measurable
+— 52 addresses in 0.0 s — so this happens before any expensive stage, preserving
+the edge order dedup → classify → replay → trace. Result: **53 crashes → 4
+buckets**, split by fault type and function:
+
+| Bucket | Hits | Key |
+|---|---|---|
+| 1 | 47 | read \| `VCRUNTIME140.dll!memmove` |
+| 2 | 4 | **write** \| `VCRUNTIME140.dll!memmove` |
+| 3 | 1 | read \| `VCRUNTIME140.dll!memcpy_repmovs` |
+| 4 | 1 | **write** \| `VCRUNTIME140.dll!memcpy_repmovs` |
+
+The keys degrade through an explicit ladder — `stack_hash`, `fault_function`,
+`fault_module`, `fault_type` — and every bucket records **which rung produced it**,
+because a coarse bucket that is indistinguishable from a precise one invites
+reading "same bucket" as "same bug".
+
+**Replay: 4/4 reproduced, 4/4 deterministic.** `wtf run` reports a crash only as
+`crash: 1` — it never prints the fault address and writes no crash file — so
+determinism, defined as the same address across N replays, is not readable from its
+output at all. The address is recovered from a rip trace as the last user-mode
+address before the final user→kernel transition, since control passes to the
+kernel's exception dispatcher and the trace runs on for thousands of instructions
+past the fault. Verified against the address wtf itself put in the filename, on
+three crashes (D-051). That also buys a stronger check than the contract asks for:
+every replay produced a **byte-identical** trace, so the whole execution matched.
+
+**Static context had to be redesigned too.** Section 8 asks for pseudo-C of the
+faulting function; on this target that is `memmove`, which A2 will never have and
+which explains nothing. The context is anchored instead on the deepest function on
+the fault path that A2 *can* describe — `ProcessPacket` — and is labelled as a
+**caller**, so nobody reads it as the fault site. The function-transition tails
+distinguish the two bug variants cleanly: reads arrive via
+`make_unique → memset → ProcessPacket → memcpy` (the Allocate path), writes via
+`operator==<Chunk_t> → ProcessPacket → memcpy` (the Edit path).
+
+Symbolization also settled a speculation left in `crash_watch.py`: the fault range
+was guessed to be Application Verifier because it sits ~192 KB below verifier.dll.
+It is VCRUNTIME's memcpy. Proximity is not attribution, and symbols were available
+the whole time (D-050 records that symbolizer-rs was installed at CP4 but never
+written into `config/fuzz.yaml`, so CP8 looked blocked on a tool sitting on disk).
 
 ### 2026-07-25 (11) — GATE 7 PARTIAL: the slow clock works, the coverage claim does not land on this target
 

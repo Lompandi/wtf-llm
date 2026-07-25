@@ -359,8 +359,46 @@ class CustomMutator_t : public Mutator_t {
   uint64_t SpoolServed_ = 0;
 
 public:
+  //
+  // CP10's baseline arms select a BUILT-IN mutator here.
+  //
+  // wtf has no --mutator flag: which mutator runs is decided by what the module
+  // registers, so the only way to measure our mutator against wtf's own is for
+  // this factory to hand back a built-in when asked. SNAPFUZZ_MUTATOR takes
+  // "libfuzzer" or "honggfuzz"; anything else, including unset, gives ours.
+  //
+  // Note precisely what this does and does not hold fixed. Init, InsertTestcase
+  // and Restore stay OURS in every arm -- they are the harness that delivers
+  // packets, without which nothing runs at all. So the comparison isolates
+  // test-case *generation*, which is the contribution, and does not claim to
+  // measure a from-scratch wtf harness.
+  //
   static std::unique_ptr<Mutator_t> Create(std::mt19937_64 &Rng,
                                            const size_t TestcaseMaxSize) {
+    if (const char *Env = std::getenv("SNAPFUZZ_MUTATOR"); Env && *Env) {
+      const std::string Which(Env);
+      if (Which == "libfuzzer") {
+        fmt::print("snapfuzz: BASELINE arm -- using wtf's libfuzzer mutator\n");
+        return LibfuzzerMutator_t::Create(Rng, TestcaseMaxSize);
+      }
+      if (Which == "honggfuzz") {
+        fmt::print("snapfuzz: BASELINE arm -- using wtf's honggfuzz mutator\n");
+        return HonggfuzzMutator_t::Create(Rng, TestcaseMaxSize);
+      }
+      if (Which != "custom") {
+        // Refuse rather than silently running the wrong arm: a typo here would
+        // label our own mutator's numbers as a baseline.
+        fmt::print(
+            "snapfuzz: SNAPFUZZ_MUTATOR={} is not one of libfuzzer/honggfuzz/"
+            "custom; refusing to guess which arm this is\n",
+            Which);
+        // abort() does not flush C stdio, and without this the process dies with
+        // exit code 0xC0000409 and no explanation at all -- which is worse than
+        // the typo it is complaining about.
+        std::fflush(stdout);
+        std::abort();
+      }
+    }
     return std::make_unique<CustomMutator_t>(Rng, TestcaseMaxSize);
   }
 

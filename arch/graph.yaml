@@ -601,65 +601,65 @@ edges:
   - id: "32"
     from: a4_corpus
     to: analysis.cov_trace_gen
-    status: pending
+    status: live
     gates: [10]
     note: wtf run --trace-type=cov on the minset.
   - id: "32b"
     from: analysis.cov_trace_gen
     to: analysis.symbolize_cov
-    status: pending
+    status: live
     gates: [10]
     note: symbolizer-rs --style modoff.
   - id: "32c"
     from: analysis.symbolize_cov
     to: analysis.lighthouse_report
-    status: pending
+    status: live
     gates: [10]
 
   # --- stage 3: the crash chain -----------------------------------------
   - id: "33"
     from: a5_crashes
     to: analysis.crash_dedup
-    status: pending
+    status: live
     gates: [8]
   - id: "34"
     from: analysis.crash_dedup
     to: analysis.crash_classification
-    status: pending
+    status: live
     gates: [8]
   - id: "35"
     from: analysis.crash_classification
     to: analysis.deterministic_replay
-    status: pending
+    status: live
     gates: [8]
   - id: "36"
     from: analysis.deterministic_replay
     to: analysis.trace_gen
-    status: pending
+    status: live
     gates: [8]
     note: wtf run --trace-type=rip / tenet.
   - id: "36b"
     from: analysis.trace_gen
     to: analysis.symbolize_trace
-    status: pending
+    status: live
     gates: [8]
     note: symbolizer-rs.
   - id: "37"
     from: analysis.symbolize_trace
     to: analysis.reverse_engineer
-    status: pending
+    status: live
     gates: [6, 8]
   - id: "37b"
     from: a2_pseudoc_cache
     to: analysis.reverse_engineer
-    status: pending
+    status: live
     gates: [6, 8]
 
   # --- stage 3: five independent signals into triage --------------------
   - id: "38"
     from: analysis.crash_dedup
     to: analysis.llm_triage
-    status: pending
+    status: live
     gates: [9]
     signal: 1
     signal_name: dedup
@@ -667,7 +667,7 @@ edges:
   - id: "39"
     from: analysis.crash_classification
     to: analysis.llm_triage
-    status: pending
+    status: live
     gates: [9]
     signal: 2
     signal_name: classification
@@ -675,7 +675,7 @@ edges:
   - id: "40"
     from: analysis.deterministic_replay
     to: analysis.llm_triage
-    status: pending
+    status: live
     gates: [9]
     signal: 3
     signal_name: replay
@@ -683,7 +683,7 @@ edges:
   - id: "41"
     from: analysis.symbolize_trace
     to: analysis.llm_triage
-    status: pending
+    status: live
     gates: [9]
     signal: 4
     signal_name: symbolize_trace
@@ -691,7 +691,7 @@ edges:
   - id: "41b"
     from: analysis.reverse_engineer
     to: analysis.llm_triage
-    status: pending
+    status: live
     gates: [9]
     signal: 5
     signal_name: reverse_engineer
@@ -699,13 +699,13 @@ edges:
   - id: "42"
     from: analysis.llm_triage
     to: report
-    status: pending
+    status: live
     gates: [9]
     condition: verdict == confirmed
   - id: "43"
     from: analysis.llm_triage
     to: discard
-    status: pending
+    status: live
     gates: [9]
     condition: verdict == false_positive
 

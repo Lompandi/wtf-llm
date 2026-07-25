@@ -1,0 +1,103 @@
+{
+  "case_id": "measured-02-write",
+  "origin": "measured",
+  "label": "confirmed",
+  "label_rationale": "Out-of-bounds WRITE: the Edit path copies BodySize bytes into a chunk buffer allocated for a size chosen by an earlier packet, so a later packet can specify more. Heap overflow. ProcessPacket reads the packet's 16-bit BodySize field and memcpy's that many bytes without validating it against either how much data actually arrived or the size of the destination buffer. Confirmed against the target's own source, which ships as a wtf example; the pipeline itself only ever saw Ghidra pseudo-C.",
+  "expected_cwe": "CWE-787",
+  "expected_exploitability": "possible_rce",
+  "bucket": {
+    "bucket_id": "fault_function-7eded8d3f102",
+    "representative": {
+      "input_bytes": "eyJQYWNrZXRzIjpbeyJCb2R5IjpbMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDBdLCJCb2R5U2l6ZSI6OTAsIkNvbW1hbmQiOjAsIklkIjowLCJXaXJlU2l6ZSI6MH0seyJCb2R5IjpbMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMF0sIkJvZHlTaXplIjozMSwiQ29tbWFuZCI6MiwiSWQiOjEsIldpcmVTaXplIjowfSx7IkJvZHkiOlswLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMF0sIkJvZHlTaXplIjozMywiQ29tbWFuZCI6MCwiSWQiOjIsIldpcmVTaXplIjowfSx7IkJvZHkiOlswLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMF0sIkJvZHlTaXplIjo5MywiQ29tbWFuZCI6MSwiSWQiOjIsIldpcmVTaXplIjowfSx7IkJvZHkiOlswLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDBdLCJCb2R5U2l6ZSI6NTYsIkNvbW1hbmQiOjQsIklkIjo0LCJXaXJlU2l6ZSI6MH0seyJCb2R5IjpbMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwXSwiQm9keVNpemUiOjE3LCJDb21tYW5kIjo2LCJJZCI6NSwiV2lyZVNpemUiOjB9LHsiQm9keSI6WzAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwXSwiQm9keVNpemUiOjMyNSwiQ29tbWFuZCI6NiwiSWQiOjYsIldpcmVTaXplIjowfSx7IkJvZHkiOlswLDAsMCwwLDAsMF0sIkJvZHlTaXplIjo2LCJDb21tYW5kIjo5LCJJZCI6NywiV2lyZVNpemUiOjB9LHsiQm9keSI6WzAsMCwwLDAsMCwwLDAsMF0sIkJvZHlTaXplIjo4LCJDb21tYW5kIjoyLCJJZCI6OCwiV2lyZVNpemUiOjB9XX0=",
+      "fault_type": "access-violation-write",
+      "fault_runtime_addr": 140705984419152,
+      "fault_static_addr": 0,
+      "fault_module": null,
+      "registers": {},
+      "backtrace": [],
+      "coverage_delta": 0,
+      "worker_id": null,
+      "backend": "bochscpu",
+      "timestamp": 1784968931.5561843
+    },
+    "hit_count": 4,
+    "key_kind": "fault_function",
+    "key_detail": "access-violation-write|VCRUNTIME140.dll!memmove"
+  },
+  "classification": {
+    "bucket_id": "fault_function-7eded8d3f102",
+    "fault_type": "access-violation-write",
+    "access": "write",
+    "fault_runtime_addr": 140705984419152,
+    "fault_static_addr": 0,
+    "fault_module": null,
+    "fault_symbol": "VCRUNTIME140.dll!memmove",
+    "near_null": false,
+    "wild": null,
+    "registers_available": false,
+    "faulting_instruction": null,
+    "disasm_source": "unavailable",
+    "attacker_influenced": false,
+    "influence_offsets": [],
+    "influence_widths": [],
+    "notes": [
+      "no module map was supplied, so 'wild' cannot be decided -- an address inside an unlisted system DLL would look wild when it is not",
+      "the fault is not attributable to the target module, so its bytes cannot be read from the binary on disk and no disassembly is available -- a system DLL in the guest may differ from any copy here",
+      "no registers: a crash file carries only its name and the test-case bytes, so register-derived judgements need CP8's replay stage"
+    ]
+  },
+  "replay": {
+    "bucket_id": "fault_function-7eded8d3f102",
+    "reproduced": true,
+    "deterministic": true,
+    "replays": 3,
+    "backend": "bochscpu",
+    "notes": "faulted at 0x7ff8aa381550 on 3/3 run(s) | every replay produced a BYTE-IDENTICAL rip trace, so the whole execution matched, not just the fault address -- the strongest determinism evidence bochscpu can give"
+  },
+  "trace": {
+    "bucket_id": "fault_function-7eded8d3f102",
+    "trace_type": "rip",
+    "raw_path": "D:\\wtf-llm\\artifacts\\analysis\\gate8\\traces\\fault_function-7eded8d3f102\\crash-EXCEPTION_ACCESS_VIOLATION_WRITE-0x7ff8aa381550.trace",
+    "symbolized_path": "D:\\wtf-llm\\artifacts\\runs\\gate8\\traces\\fault_function-7eded8d3f102.rip.txt",
+    "reached_fuzz_entry": true
+  },
+  "context": {
+    "bucket_id": "fault_function-7eded8d3f102",
+    "context_frame": "tlv_server!ProcessPacket",
+    "context_static_addr": 5368713552,
+    "is_faulting_frame": false,
+    "faulting_frame": "VCRUNTIME140.dll!memmove+0x260",
+    "function": "ProcessPacket",
+    "pseudo_c": "\r\nvoid __cdecl ProcessPacket(uchar *param_1,uint param_2)\r\n\r\n{\r\n  _Compressed_pair<std::default_delete<unsigned_char_[0]>,unsigned_char_*,1> _Var1;\r\n  int iVar2;\r\n  Chunk_t *pCVar3;\r\n  undefined8 uVar4;\r\n  void *pvVar5;\r\n  uchar *puVar6;\r\n  bool bVar7;\r\n  unique_ptr<unsigned_char_[0],std::default_delete<unsigned_char_[0]>_> uVar8;\r\n  _func___cdecl_void_void_ptr_ulong_void_ptr **pp_Var9;\r\n  unique_ptr<Chunk_t,std::default_delete<Chunk_t>_> uVar10;\r\n  unique_ptr<Chunk_t,std::default_delete<Chunk_t>_> *puVar11;\r\n  unique_ptr<Chunk_t,std::default_delete<Chunk_t>_> local_res8;\r\n  void *local_res18 [2];\r\n  \r\n  if (param_2 < 8) {\r\n    printf(\"[!] Packet is not big enough to check the header\\n\");\r\n    return;\r\n  }\r\n  iVar2 = *(int *)param_1;\r\n  if (iVar2 == 0) {\r\n    printf(\"Allocate command\\n\");\r\n    puVar11 = ChunkList;\r\n    pp_Var9 = &__dyn_tls_dtor_callback;\r\n    do {\r\n      bVar7 = std::operator==<Chunk_t,std::default_delete<Chunk_t>_>(puVar11,(void *)pp_Var9);\r\n      if (bVar7) break;\r\n      puVar11 = puVar11 + 1;\r\n    } while (puVar11 != (unique_ptr<Chunk_t,std::default_delete<Chunk_t>_> *)pp_Var9);\r\n    std::make_unique<Chunk_t,0>();\r\n    *(undefined2 *)local_res8._Mypair._Myval2 = *(undefined2 *)(param_1 + 4);\r\n    *(ushort *)((longlong)local_res8._Mypair._Myval2 + 2) = *(ushort *)(param_1 + 6);\r\n    uVar8 = std::make_unique<unsigned_char_[0],0>((ulong64)local_res18);\r\n    _Var1._Myval2 = (uchar *)((longlong)local_res8._Mypair._Myval2 + 8);\r\n    if ((_Compressed_pair<std::default_delete<unsigned_char_[0]>,unsigned_char_*,1>)_Var1._Myval2 !=\r\n        uVar8._Mypair._Myval2) {\r\n      uVar4 = *(undefined8 *)uVar8._Mypair._Myval2;\r\n      *(undefined8 *)uVar8._Mypair._Myval2 = 0;\r\n      pvVar5 = *(void **)_Var1._Myval2;\r\n      *(undefined8 *)_Var1._Myval2 = uVar4;\r\n      if (pvVar5 != (void *)0x0) {\r\n        operator_delete__(pvVar5);\r\n      }\r\n    }\r\n    if (local_res18[0] != (void *)0x0) {\r\n      operator_delete__(local_res18[0]);\r\n    }\r\n    memcpy(*(void **)_Var1._Myval2,param_1 + 8,\r\n           (ulonglong)*(ushort *)((longlong)local_res8._Mypair._Myval2 + 2));\r\n    uVar10._Mypair._Myval2 = local_res8._Mypair._Myval2;\r\n    if (puVar11 != &local_res8) {\r\n      pCVar3 = (puVar11->_Mypair)._Myval2;\r\n      (puVar11->_Mypair)._Myval2 = (Chunk_t *)local_res8._Mypair._Myval2;\r\n      uVar10._Mypair._Myval2 =\r\n           (_Compressed_pair<std::default_delete<Chunk_t>,Chunk_t_*,1>)\r\n           (_Compressed_pair<std::default_delete<Chunk_t>,Chunk_t_*,1>)(Chunk_t *)0x0;\r\n      if (pCVar3 != (Chunk_t *)0x0) {\r\n        puVar6 = (pCVar3->Buf)._Mypair._Myval2;\r\n        if (puVar6 != (uchar *)0x0) {\r\n          operator_delete__(puVar6);\r\n        }\r\n        operator_delete(pCVar3,0x10);\r\n        uVar10._Mypair._Myval2 =\r\n             (_Compressed_pair<std::default_delete<Chunk_t>,Chunk_t_*,1>)\r\n             (_Compressed_pair<std::default_delete<Chunk_t>,Chunk_t_*,1>)(Chunk_t *)0x0;\r\n      }\r\n    }\r\nLAB_140001338:\r\n    if (uVar10._Mypair._Myval2 != (Chunk_t *)0x0) {\r\n      puVar6 = (((Chunk_t *)uVar10._Mypair._Myval2)->Buf)._Mypair._Myval2;\r\n      if (puVar6 != (uchar *)0x0) {\r\n        operator_delete__(puVar6);\r\n      }\r\n      operator_delete((void *)uVar10._Mypair._Myval2,0x10);\r\n    }\r\n    return;\r\n  }\r\n  if (iVar2 == 1) {\r\n    printf(\"Edit command\\n\");\r\n    puVar11 = ChunkList;\r\n    pp_Var9 = &__dyn_tls_dtor_callback;\r\n    do {\r\n      bVar7 = std::operator==<Chunk_t,std::default_delete<Chunk_t>_>(puVar11,(void *)pp_Var9);\r\n      if ((!bVar7) && (pCVar3 = (puVar11->_Mypair)._Myval2, pCVar3->Id == *(ushort *)(param_1 + 4)))\r\n      {\r\n        if (puVar11 != (unique_ptr<Chunk_t,std::default_delete<Chunk_t>_> *)pp_Var9) {\r\n          memcpy((pCVar3->Buf)._Mypair._Myval2,param_1 + 8,(ulonglong)*(ushort *)(param_1 + 6));\r\n          return;\r\n        }\r\n        break;\r\n      }\r\n      puVar11 = puVar11 + 1;\r\n    } while (puVar11 != (unique_ptr<Chunk_t,std::default_delete<Chunk_t>_> *)pp_Var9);\r\n  }\r\n  else {\r\n    if (iVar2 != 2) {\r\n      return;\r\n    }\r\n    printf(\"Delete command\\n\");\r\n    puVar11 = ChunkList;\r\n    pp_Var9 = &__dyn_tls_dtor_callback;\r\n    do {\r\n      bVar7 = std::operator==<Chunk_t,std::default_delete<Chunk_t>_>(puVar11,(void *)pp_Var9);\r\n      if ((!bVar7) &&\r\n         (uVar10._Mypair._Myval2 =\r\n               (_Compressed_pair<std::default_delete<Chunk_t>,Chunk_t_*,1>)\r\n               (puVar11->_Mypair)._Myval2,\r\n         ((Chunk_t *)uVar10._Mypair._Myval2)->Id == *(ushort *)(param_1 + 4))) {\r\n        if (puVar11 != (unique_ptr<Chunk_t,std::default_delete<Chunk_t>_> *)pp_Var9) {\r\n          (puVar11->_Mypair)._Myval2 = (Chunk_t *)0x0;\r\n          goto LAB_140001338;\r\n        }\r\n        break;\r\n      }\r\n      puVar11 = puVar11 + 1;\r\n    } while (puVar11 != (unique_ptr<Chunk_t,std::default_delete<Chunk_t>_> *)pp_Var9);\r\n  }\r\n  printf(\"[!] Couldn\\'t find ChunkId 0x%x\\n\");\r\n  return;\r\n}\r\n\r\n",
+    "pseudo_c_source": "a2_cache",
+    "approach_path": [
+      "tlv_server.exe!ProcessPacket+0xf3 [C:\\work\\codes\\wtf\\src\\tlv_server\\tlv_server.cc @ 65]",
+      "tlv_server.exe!ProcessPacket+0xf6 [C:\\work\\codes\\wtf\\src\\tlv_server\\tlv_server.cc @ 65]",
+      "tlv_server.exe!ProcessPacket+0xf8 [C:\\work\\codes\\wtf\\src\\tlv_server\\tlv_server.cc @ 71]",
+      "tlv_server.exe!ProcessPacket+0xfd [C:\\work\\codes\\wtf\\src\\tlv_server\\tlv_server.cc @ 71]",
+      "tlv_server.exe!ProcessPacket+0x100 [C:\\work\\codes\\wtf\\src\\tlv_server\\tlv_server.cc @ 71]",
+      "tlv_server.exe!ProcessPacket+0x104 [C:\\work\\codes\\wtf\\src\\tlv_server\\tlv_server.cc @ 92]",
+      "tlv_server.exe!ProcessPacket+0x109 [C:\\work\\codes\\wtf\\src\\tlv_server\\tlv_server.cc @ 92]",
+      "tlv_server.exe!ProcessPacket+0x10d [C:\\work\\codes\\wtf\\src\\tlv_server\\tlv_server.cc @ 92]",
+      "tlv_server.exe!ProcessPacket+0x10e [C:\\work\\codes\\wtf\\src\\tlv_server\\tlv_server.cc @ 92]",
+      "tlv_server.exe!ProcessPacket+0x10f [C:\\work\\codes\\wtf\\src\\tlv_server\\tlv_server.cc @ 92]",
+      "tlv_server.exe!ProcessPacket+0x110 [C:\\work\\codes\\wtf\\src\\tlv_server\\tlv_server.cc @ 71]",
+      "tlv_server.exe!memcpy+0x0"
+    ],
+    "in_module_call_path": [
+      "ProcessPacket",
+      "printf",
+      "ProcessPacket",
+      "std::operator==<Chunk_t,std::default_delete<Chunk_t>",
+      "ProcessPacket",
+      "std::operator==<Chunk_t,std::default_delete<Chunk_t>",
+      "ProcessPacket",
+      "memcpy"
+    ],
+    "globals_touched": "GLOBAL VARIABLES THE CODE ABOVE TOUCHES, with the extents Ghidra knows and decompilation dropped. A loop written as `p = Table; q = &next_sym; do {...} while (p != q);` iterates over exactly the slots between those two addresses, so these numbers give the capacity the pseudo-C does not:\n  0x1400066d8  _OptionsStorage  (8 bytes = 1 pointer-sized slot)\n  0x140006a18  ChunkList  (32 bytes = 4 pointer-sized slots)\n  0x140006a38  __dyn_tls_dtor_callback  (8 bytes = 1 pointer-sized slot)\n\n",
+    "notes": [
+      "skipped ['memcpy'] between this function and the fault -- no pseudo-C in A2 for them (a CRT thunk has none and would explain nothing)",
+      "the pseudo-C below is a CALLER on the fault path, not the faulting instruction. The fault is in VCRUNTIME140.dll!memmove+0x260, for which no pseudo-C exists or ever will -- it is outside the analysed module."
+    ]
+  }
+}

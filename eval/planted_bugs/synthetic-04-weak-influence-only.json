@@ -1,0 +1,79 @@
+{
+  "case_id": "synthetic-04-weak-influence-only",
+  "origin": "synthetic",
+  "label": "false_positive",
+  "label_rationale": "The only evidence of attacker influence is a 2-byte match, which occurs by chance in almost any binary input -- classify.py flags this explicitly as weak. Everything else points away from a bug: the fault is a near-null read on a path that does not consume packet data, and the input byte that 'matched' is a length field that is never used as a pointer. Accepting a 2-byte coincidence as influence is the mistake this case exists to catch.",
+  "expected_cwe": null,
+  "expected_exploitability": "unknown",
+  "bucket": {
+    "bucket_id": "synthetic-synthetic-04-weak-influence-only",
+    "representative": {
+      "input_bytes": "NBJyZXN0LW9mLWlucHV0",
+      "fault_type": "access-violation-read",
+      "fault_runtime_addr": 4660,
+      "fault_static_addr": 0,
+      "fault_module": null,
+      "registers": {},
+      "backtrace": [],
+      "coverage_delta": 0,
+      "worker_id": null,
+      "backend": "bochscpu",
+      "timestamp": 1784985983.67813
+    },
+    "hit_count": 1,
+    "key_kind": "fault_function",
+    "key_detail": "access-violation-read|tlv_server.exe!printf"
+  },
+  "classification": {
+    "bucket_id": "synthetic-synthetic-04-weak-influence-only",
+    "fault_type": "access-violation-read",
+    "access": "read",
+    "fault_runtime_addr": 4660,
+    "fault_static_addr": 0,
+    "fault_module": null,
+    "fault_symbol": null,
+    "near_null": true,
+    "wild": false,
+    "registers_available": false,
+    "faulting_instruction": null,
+    "disasm_source": "unavailable",
+    "attacker_influenced": true,
+    "influence_offsets": [
+      0
+    ],
+    "influence_widths": [
+      2
+    ],
+    "notes": [
+      "the only matches are 2 bytes wide, which occurs by chance in most binary inputs; treat this as weak evidence of influence"
+    ]
+  },
+  "replay": {
+    "bucket_id": "synthetic-synthetic-04-weak-influence-only",
+    "reproduced": true,
+    "deterministic": true,
+    "replays": 3,
+    "backend": "bochscpu",
+    "notes": "faulted at 0x1234 on 3/3 run(s)"
+  },
+  "trace": null,
+  "context": {
+    "bucket_id": "synthetic-synthetic-04-weak-influence-only",
+    "context_frame": "tlv_server.exe!printf",
+    "context_static_addr": 0,
+    "is_faulting_frame": false,
+    "faulting_frame": null,
+    "function": "printf",
+    "pseudo_c": "void printf(char *fmt, ...) { /* CRT stdio */ }",
+    "pseudo_c_source": "a2_cache",
+    "approach_path": [],
+    "in_module_call_path": [
+      "ProcessPacket",
+      "printf"
+    ],
+    "globals_touched": "",
+    "notes": [
+      "fault is in stdio internals"
+    ]
+  }
+}
