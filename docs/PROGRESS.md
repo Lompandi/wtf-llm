@@ -17,7 +17,7 @@ table and `arch/graph.yaml` agree, so they cannot drift apart.
 | 4 | Fuzzer module + first real run (1 worker) | **PASS** | 2026-07-25 | 33 tests. 663 s run, 32 new-coverage events, harness validation passes. Edge 22 held pending — bochscpu ignores `.cov` (D-004) |
 | 4b | Distributed bring-up (>= 2 workers) | **PASS** | 2026-07-25 | **Scoped.** 13 tests. 4 workers, ~1450 exec/s (4× one worker), injected seed proven executed, kill/restart works. Edge 22 still pending — WHP is not enabled (D-036) |
 | 5 | LLM client | **PASS** | 2026-07-25 | 19 tests including live endpoint calls. All 5 roles answer; JSON round-trips into a contract; usage log and budget caps verified |
-| 6 | GhidraMCP + A2 + LLM entry selection | not started | — | |
+| 6 | GhidraMCP + A2 + LLM entry selection | **PASS** | 2026-07-25 | 20 tests incl. live MCP + live LLM. A2 = 14 functions (closure) / 193 (module). **The LLM picked `ProcessPacket` from 84 candidates, matching ground truth exactly** |
 | 7 | Plateau detection + LLM seed gen | not started | — | |
 | 8 | Dedup, classification, replay, traces | not started | — | Needs `symbolizer-rs` |
 | 9 | DSPy triage (5 signals) + report | not started | — | |
@@ -32,14 +32,14 @@ sub-edges), plus 3 derived edges recorded in [DEVIATIONS.md](DEVIATIONS.md).
 |---|---|---|---|---|
 | 1 | target_binary | snapshot.break_at_entry | 3 | pending |
 | 2 | target_binary | ghidra.analyze | 2 | live |
-| 3 | ghidra.fuzz_entry_selection | snapshot.break_at_entry | 6 | pending |
-| 4 | ghidra.fuzz_entry_selection | ghidra.decompile | 6 | pending |
+| 3 | ghidra.fuzz_entry_selection | snapshot.break_at_entry | 6 | live |
+| 4 | ghidra.fuzz_entry_selection | ghidra.decompile | 6 | live |
 | 5 | ghidra.fuzz_entry_selection | ghidra.bb_enumerate | 2 | live |
 | 6 | snapshot.break_at_entry | snapshot.windows_kd | 3 | pending |
 | 6b | snapshot.break_at_entry | snapshot.linux_gdb *(derived)* | 3 | pending |
 | 7 | snapshot.windows_kd | a1_snapshot | 3 | pending |
 | 8 | snapshot.linux_gdb | a1_snapshot | 3 | pending |
-| 9 | ghidra.decompile | a2_pseudoc_cache | 6 | pending |
+| 9 | ghidra.decompile | a2_pseudoc_cache | 6 | live |
 | 10 | ghidra.bb_enumerate | a3_bp_list | 2 | live |
 | 11 | a1_snapshot | fuzz_target.snapshot | 3 | live |
 | 12 | a2_pseudoc_cache | fuzzer_module.llm_input_struct | 6 | pending |
@@ -82,7 +82,7 @@ sub-edges), plus 3 derived edges recorded in [DEVIATIONS.md](DEVIATIONS.md).
 | 41b | analysis.reverse_engineer | analysis.llm_triage *(signal 5 — STATIC)* | 9 | pending |
 | 42 | analysis.llm_triage | report *(confirmed)* | 9 | pending |
 | 43 | analysis.llm_triage | discard *(false_positive)* | 9 | pending |
-| 1000 | ghidra.analyze | ghidra.fuzz_entry_selection *(derived)* | 6 | pending |
+| 1000 | ghidra.analyze | ghidra.fuzz_entry_selection *(derived)* | 6 | live |
 
 ## Log
 
@@ -121,6 +121,63 @@ One modelling note worth flagging: the §3.1 diagram marks the custom
 The mutator *consumes* LLM seeds on the master's hot path and must never call
 the LLM itself. `graph.yaml` therefore separates `ours: llm_layer` from
 `calls_llm`, and the gate enforces it.
+
+### 2026-07-25 (10) — GATE 6 PASS; contribution 1 demonstrated
+
+**GATE 6 PASS**, 20 tests including live GhidraMCP and live LLM selection.
+Edges 3, 4, 9 and 1000 live; 26 of 53 edges now live.
+
+**The headline result for contribution 1.** Given the module-scope A2 — **193
+functions, 84 after noise filtering** — and no hint about which is the parser,
+the LLM shortlisted `ProcessPacket` and `find_pe_section`, chose
+**`ProcessPacket`**, and described how its input arrives:
+
+| | LLM | ground truth | source of truth |
+|---|---|---|---|
+| function | `ProcessPacket` | `ProcessPacket` | the entry wtf's author chose |
+| static addr | `0x140001150` | `0x140001150` | A2 (we resolve it, not the model) |
+| `input_param` | `rcx` | `rcx` | `fuzzer_tlv_server.cc:121` |
+| `size_param` | `rdx` | `rdx` | `fuzzer_tlv_server.cc:113` |
+
+Confidence 0.95. Complete agreement, derived independently from decompiler output
+alone. Re-running CP3 with that entry produced a valid A1 whose `rip` matches, so
+the snapshot loads at the LLM's chosen address — GATE 6's last condition.
+
+Two design decisions in `entry_select.py` worth keeping:
+
+- **The model never supplies an address.** It returns a function *name*; the
+  static address comes from A2. A hallucinated hex address would yield a
+  `FuzzEntry` that validates, snapshots somewhere arbitrary, fuzzes happily and
+  reports coverage — the exact silent failure RULE 4 exists to prevent. Names are
+  checkable; addresses are not. This immediately earned its keep: the model
+  returned `"ProcessPacket @ 0x140001150"`, echoing a prompt header, and the
+  guard caught the mismatch. Header echo is decoration rather than a wrong
+  answer, so `_resolve_name` normalises it — but an invented name is still
+  refused, and a test pins both behaviours.
+- **Two stages.** Signatures first (cheap) to shortlist, then full pseudo-C for
+  the shortlist only. 193 functions of pseudo-C is 74 KB and would neither fit a
+  prompt nor respect section 7.3's "summaries only".
+
+**A2 is a database, not files**, because the query that matters is a **range**
+query: triage arrives with a fault address in the middle of a body, never at an
+entry point. `get_by_addr(0x140001200)` correctly returns `ProcessPacket`, whose
+entry is `0x140001150`. Where bodies overlap, the tightest span wins.
+
+**Rows from GhidraMCP are deliberately not range-findable.** `/decompile` takes a
+name and returns text, so no body bounds come back. Those rows are stored with
+`min == max == entry`, findable by exact address and by name only. Fabricating a
+span would make later range lookups confidently wrong.
+
+**Four edges GATE 6 nominally covers are held pending**, because CP6 did not
+exercise them: **12** (A2 → LLM-generated input struct — our module is
+hand-written), **28** (A2 → seed generation — that is CP7), **37** and **37b**
+(→ `analysis.reverse_engineer` — that is CP8, and the module does not exist).
+
+**A caveat that matters for the writeup.** `tlv_server.pdb` ships beside the
+binary, so this pseudo-C has real parameter names and a real function name. A
+genuine no-source target gives `FUN_140001150(long param_1, ...)`. This result
+demonstrates the mechanism works; it does **not** establish how well selection
+performs without symbols, and the report must not conflate the two (DEC-007).
 
 ### 2026-07-25 (9) — GATE 4b PASS, scoped; edge 22 blocked on WHP
 

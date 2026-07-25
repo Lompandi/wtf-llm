@@ -316,13 +316,13 @@ edges:
   - id: "3"
     from: ghidra.fuzz_entry_selection
     to: snapshot.break_at_entry
-    status: pending
+    status: live
     gates: [6]
     note: The entry address tells the snapshotter where to break.
   - id: "4"
     from: ghidra.fuzz_entry_selection
     to: ghidra.decompile
-    status: pending
+    status: live
     gates: [6]
   - id: "5"
     from: ghidra.fuzz_entry_selection
@@ -359,7 +359,7 @@ edges:
   - id: "9"
     from: ghidra.decompile
     to: a2_pseudoc_cache
-    status: pending
+    status: live
     gates: [6]
   - id: "10"
     from: ghidra.bb_enumerate
@@ -663,7 +663,7 @@ edges:
   - id: "1000"
     from: ghidra.analyze
     to: ghidra.fuzz_entry_selection
-    status: pending
+    status: live
     gates: [6]
     derived: true
     note: >-
