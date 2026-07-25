@@ -125,8 +125,10 @@ nodes:
     calls_llm: true
     desc: >-
       LLM-derived description of the input structure. Generated at BUILD time,
-      not at run time -- the output is C++ that goes into the module.
-    impl: llm/seed_gen.py
+      not at run time -- the model emits a validated InputSpec and ordinary code
+      turns it into C++, so the output cannot fail to compile and the model's
+      claims about units and encoding are schema-checked (RULE 4).
+    impl: prep/input_struct.py
   fuzzer_module.insert_testcase:
     kind: input
     stage: fuzz
@@ -397,8 +399,18 @@ edges:
   - id: "12"
     from: a2_pseudoc_cache
     to: fuzzer_module.llm_input_struct
-    status: pending
-    gates: [6]
+    status: live
+    gates: [11]
+    note: >-
+      The model reads the fuzz entry's pseudo-C (plus its CALLERS, since
+      statefulness is a property of how the parser is invoked and not of the
+      parser) and emits an InputSpec. Verified against ground truth on
+      tlv_server: it reproduced the hand-written struct's layout exactly -- four
+      fields, uint32/uint16/uint16 then a variable tail at offset 8, with the
+      length field counting the tail in BYTES and excluding the header. Field
+      names differ because pseudo-C has none.
+      NOTE: no gate in CLAUDE.md section 8 lists this edge, which is why it was
+      the last component built (D-055). GATE 11 was added for it.
   - id: "13"
     from: a3_bp_list
     to: fuzz_target.bp_list
@@ -409,8 +421,22 @@ edges:
   - id: "14"
     from: fuzzer_module.llm_input_struct
     to: fuzzer_module.bus
-    status: live
-    gates: [4]
+    status: pending
+    gates: [4, 11]
+    note: >-
+      CORRECTED FROM live. It was marked live at GATE 4 because a struct did reach
+      the bus -- but a HAND-WRITTEN one. This edge says the LLM-DERIVED struct
+      reaches it, and that is a different claim.
+      The generated header is proven ready: it compiles under MSVC /W4 /WX and its
+      wire format is byte-checked (8-byte header, little-endian, length recomputed
+      from the payload rather than trusted). What is NOT done is adopting it in the
+      shipped tlv_server module, and that is deliberate rather than unfinished:
+      the model names the fields Cmd/HeaderInfo/PayloadSize/Payload, so switching
+      would rename the JSON keys and make every existing artifact unparseable --
+      53 crash files, the corpus, and the 8 eval cases all carry
+      Command/Id/BodySize/Body. Retrofitting tlv_server costs real evidence and
+      buys nothing; the generator exists for the NEXT target, which is where the
+      cost of hand-writing a module is actually paid.
   - id: "15"
     from: fuzzer_module.insert_testcase
     to: fuzzer_module.bus

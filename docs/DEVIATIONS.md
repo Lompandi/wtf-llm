@@ -2041,3 +2041,118 @@ arm definition is the authority there and not the log.
 
 `tests/gates/test_cp10.py::test_the_ablation_arms_consumed_no_seeds_where_they_should_not`
 asserts the property, and it is what caught this.
+
+
+## D-054 — model prose decided whether the generated C++ compiled
+
+**Measured at CP11.** `prep/input_struct.py` derives an `InputSpec` from pseudo-C
+and `fuzzer/codegen.py` renders it as a C++ header, embedding the model's
+`rationale` strings as comments so a reader can see why each field is there.
+
+The first generated header would not compile:
+
+```
+generated_input.h(1): error C2220: the following warning is treated as an error
+generated_input.h(1): warning C4819: The file contains a character that cannot be
+                      represented in the current code page (950)
+```
+
+The cause was one character. The model had written *"a 4‑byte command"* using
+**U+2011 NON-BREAKING HYPHEN** instead of an ASCII `-`. On a machine whose ANSI
+codepage is 950 (Traditional Chinese) MSVC cannot represent it, and `/WX` turns the
+warning into a failure.
+
+**The general shape matters more than the character.** Model-supplied text was
+flowing into a compiled artifact, so *what the model happened to type* decided
+whether the build succeeded. Encoding is only the first of three ways that goes
+wrong:
+
+1. non-ASCII breaks MSVC under a non-UTF-8 codepage;
+2. a `*/` in the prose closes the comment early and spills the rest into code;
+3. a field *name* becomes a C++ identifier, so `"my field"`, `"2nd"` or `class`
+   would not compile at all.
+
+**Fixes, at two layers.**
+
+*Codegen* (`ascii_comment`) transliterates the punctuation a model actually
+reaches for -- non-breaking and en/em dashes, smart quotes, arrows, ellipsis --
+drops anything else non-ASCII, and neuters `*/` to `* /`.
+
+A UTF-8 BOM would also have satisfied MSVC and was rejected: it fixes only the
+encoding symptom, leaves comment injection open, and makes the generated file
+depend on every downstream tool tolerating a BOM.
+
+*The contract* (`arch/contracts.py`) validates `InputField.name`,
+`InputSpec.struct_name` and `sequence_field_name` as C identifiers and rejects C++
+reserved words. That belongs in the contract rather than in codegen: a spec that
+cannot produce compilable code is invalid where it is created, not where someone
+tries to use it, and a compiler error is thousands of tokens away from the model's
+mistake.
+
+Verified: a rationale of `4‑byte “value” → memcpy */ int x = 1; 中文` yields an
+all-ASCII header with no comment break, and the header compiles under `/W4 /WX`.
+
+## D-055 — the one component with no gate was the one never built
+
+**Observed at CP11, and it is a process finding rather than a bug.**
+
+CLAUDE.md section 3.1 draws a box labelled *"LLM-generated input struct / reads
+pseudo-C (A2) `[LLM]`"*, and section 3.1's ownership list names it one of the five
+things that are **our** contribution rather than wtf features. Section 3.2 gives it
+two edges:
+
+```
+12. A2 pseudo-C cache -> fuzzer_module.llm_input_struct
+14. fuzzer_module.llm_input_struct -> fuzzer_module.bus
+```
+
+But **no gate in section 8 lists either edge.** GATE 4 covers edges 18-26, 30 and
+31; GATE 6 covers 3, 4, 9, 28 and 37. Nothing covers 12 or 14. Section 6 also
+defines no contract for it, and section 5's repo layout names no file that
+produces it.
+
+RULE 3 says "the gate is the definition of done". This box therefore had **no
+definition of done** -- it was the only component in the architecture that could
+not fail. Everything around it was driven to completion by a gate that would go
+red; this stayed a hand-written struct in `fuzzer_snapfuzz.cc` while looking
+finished on the diagram, through CP4 to CP10.
+
+It was also mis-recorded. Edge 14 had been marked **live** at GATE 4, on the
+grounds that a struct did reach the module bus. It did -- a *hand-written* one.
+The edge claims the LLM-derived struct reaches the bus, which is a different
+statement, and marking it live made the diagram agree with itself while being
+wrong.
+
+**What was built:** `arch/contracts.py` gained `InputField`/`InputSpec` (the
+section 6 model that was missing), `prep/input_struct.py` derives a spec from the
+entry's pseudo-C **plus its callers**, `fuzzer/codegen.py` renders it as C++, and
+`tests/gates/test_cp11.py` is the gate CLAUDE.md never wrote.
+
+**Edge 12 is live.** Measured against ground truth on tlv_server, the derived spec
+reproduced the hand-written struct's layout exactly: four fields, `uint32` /
+`uint16` / `uint16` then a variable tail at offset 8, an 8-byte header, and the
+length field counting the tail in **bytes** and **excluding** the header. Field
+names differ (`Cmd`/`HeaderInfo`/`PayloadSize`/`Payload` against
+`Command`/`Id`/`BodySize`/`Body`) because pseudo-C has no names -- so the gate
+asserts on the layout and deliberately not on the names.
+
+`supports_sequence` was **wrong on the first attempt**, and the reason generalises:
+statefulness is a property of the **caller**, not of the parser. `ProcessPacket`'s
+own pseudo-C contains a `while` loop, but that is the chunk-table search; the
+`recv` loop and the repeated `ProcessPacket(buf, len)` call are in `main`. The
+question was unanswerable from what the model had been shown, so callers are now
+found (textually, from A2) and included. With `main` in the prompt the answer
+flipped to correct.
+
+**Edge 14 stays pending, deliberately.** The generated header compiles under MSVC
+`/W4 /WX` and its wire format is byte-checked, but adopting it in the shipped
+tlv_server module would rename the JSON keys to the model's names -- and every
+existing artifact carries `Command`/`Id`/`BodySize`/`Body`: 53 crash files, the
+corpus, and the 8 eval cases. Retrofitting this target destroys evidence and buys
+nothing. The generator exists for the **next** target, which is where the cost of
+hand-writing a module is actually paid.
+
+The lesson for the writeup: a box on an architecture diagram is not a deliverable
+until something can fail. Two of the three checkpoints in this project that came in
+partial or late -- this one and GATE 7's coverage claim -- were the two whose
+success criteria were least mechanically checkable.

@@ -21,6 +21,7 @@ table and `arch/graph.yaml` agree, so they cannot drift apart.
 | 7 | Plateau detection + LLM seed gen | **PARTIAL** | 2026-07-25 | 48 tests. Four of five gate criteria met; the coverage-increase criterion is **not**, and is quantified rather than assumed — see the log below and docs/RESULTS.md. Edges 27/28/28b/29/10b held **pending** under RULE 3 |
 | 8 | Dedup, classification, replay, traces | **PASS** | 2026-07-25 | 46 tests. 53 crashes → **4 buckets** from 52 distinct fault addresses; 4/4 reproduced *and* deterministic on bochscpu with byte-identical traces; 4 traces all reaching the fuzz entry; pseudo-C for every bucket. No LLM in the path (negative control confirms the check fires) |
 | 9 | DSPy triage (5 signals) + report | **PASS** | 2026-07-25 | 30 tests. All 4 real buckets triaged with **all five signals**; reads rated CWE-125/info_leak and writes CWE-122/possible_rce. Held-out split **4/4** (precision 1.00, recall 1.00) — but **n=4** and the negatives are synthetic, so the number is indicative only. GHSA advisory renders confirmed-only; discards logged |
+| 11 | LLM-derived input structure (edges 12, 14) | **PASS** | 2026-07-26 | **Scoped**, like GATE 3. 33 tests. **NOT A GATE IN CLAUDE.md** -- section 8 lists neither edge, which is why this was the last component built (D-055). Edge 12 **live**: the derived spec reproduces the hand-written layout exactly. Edge 14 held **pending** -- and CORRECTED from live: it was never the LLM-derived struct that reached the bus |
 | 10 | Evaluation harness | **PASS** | 2026-07-25 | 22 tests. 5 arms (both built-in mutators + system + both ablations), identical budget/seed/workers. **4 distinct bugs vs 2 and 1**, **+3,095 coverage** over the best baseline, at **70×/366× fewer executions per bug** — despite 10–31× lower throughput. **LLM seed gen's contribution is NOT demonstrated** (4 vs 4 buckets against the no-seedgen ablation). Curves plotted; numbers in docs/RESULTS.md |
 
 ## Edges
@@ -43,9 +44,9 @@ sub-edges), plus 3 derived edges recorded in [DEVIATIONS.md](DEVIATIONS.md).
 | 10 | ghidra.bb_enumerate | a3_bp_list | 2 | live |
 | 10b | ghidra.analyze | a6_data_symbols *(derived, CP7)* | 7 | pending |
 | 11 | a1_snapshot | fuzz_target.snapshot | 3 | live |
-| 12 | a2_pseudoc_cache | fuzzer_module.llm_input_struct | 6 | pending |
+| 12 | a2_pseudoc_cache | fuzzer_module.llm_input_struct | 11 | live |
 | 13 | a3_bp_list | fuzz_target.bp_list | 4 | live |
-| 14 | fuzzer_module.llm_input_struct | fuzzer_module.bus | 4 | live |
+| 14 | fuzzer_module.llm_input_struct | fuzzer_module.bus | 4, 11 | pending |
 | 15 | fuzzer_module.insert_testcase | fuzzer_module.bus | 4 | live |
 | 16 | fuzzer_module.restore_hook | fuzzer_module.bus | 4 | live |
 | 17 | fuzzer_module.manual_tweaks | fuzzer_module.bus | 4 | live |

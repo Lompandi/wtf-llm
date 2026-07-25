@@ -128,7 +128,7 @@ python -m prep.snapshot_win ingest --state targets\tlv_server\state `
     --entry-symbol ProcessPacket --out artifacts\a1_snapshot.json
 ```
 
-**LLM 選擇 fuzz entry**（貢獻 1 —— 自動化原本需要逆向工程專家的決定）：
+**LLM 選擇 fuzz entry**（貢獻 1 的前半 —— 自動化原本需要逆向工程專家的決定）：
 
 ```powershell
 python -m prep.entry_select --cache artifacts\a2_pseudoc_module.sqlite `
@@ -138,6 +138,33 @@ python -m prep.entry_select --cache artifacts\a2_pseudoc_module.sqlite `
 
 兩階段流程：先看函式簽章挑出 shortlist，再讀完整 pseudo-C 做決定。**位址永遠來自
 A2，模型不提供位址。**
+
+**LLM 推導輸入結構**（貢獻 1 的後半 —— 邊 12/14）：
+
+```powershell
+# 從 fuzz entry 的 pseudo-C（以及它的 caller）推出輸入格式
+python -m prep.input_struct --entry artifacts\fuzz_entry_llm.json `
+    --cache artifacts\a2_pseudoc_module.sqlite --out artifacts\input_spec.json
+
+# InputSpec -> C++ 標頭（這一層是普通程式碼，不含 LLM）
+python -m fuzzer.codegen --spec artifacts\input_spec.json `
+    --out fuzzer\module\generated_input.h
+```
+
+**模型不直接寫 C++。** 它產出一個 pydantic 可驗證的 `InputSpec`（欄位、型別、
+位元組序、哪個欄位是長度且以位元組或元素為單位、magic value），再由 `codegen`
+轉成 C++。理由是：讓模型直接吐 C++ 的話，編譯錯誤會出現在 C++ 工具鏈裡、離模型
+的錯誤很遠；自由格式的 C++ 無法用 schema 檢查；而 RULE 4 要求的「單位與編碼要
+寫明」在 prose 裡無法強制。
+
+**caller 也要餵給模型**，因為「這個 parser 是否被反覆呼叫」是 caller 的性質而不是
+parser 的性質。實測：只給 `ProcessPacket` 時模型答 `supports_sequence: False`
+（它自己的 `while` 是 ChunkList 搜尋迴圈，不是接收迴圈）；把 `main` 的
+`recv` 迴圈一起給之後就答對了。
+
+驗證方式是拿 tlv_server 的手寫版當 ground truth 對照 **layout**（偏移、寬度、
+長度語意），不對照欄位名 —— pseudo-C 沒有名字，模型自己取的，對照名字是在測
+它的用詞而不是理解。
 
 ### 2. 模糊測試
 
@@ -399,8 +426,8 @@ python -m prep.snapshot_win ingest --state targets\tlv_server\state `
     --entry-symbol ProcessPacket --out artifacts\a1_snapshot.json
 ```
 
-**LLM fuzz-entry selection** (contribution 1 — automating the decision that
-normally needs a reverse-engineering expert):
+**LLM fuzz-entry selection** (contribution 1, first half — automating the decision
+that normally needs a reverse-engineering expert):
 
 ```powershell
 python -m prep.entry_select --cache artifacts\a2_pseudoc_module.sqlite `
@@ -410,6 +437,35 @@ python -m prep.entry_select --cache artifacts\a2_pseudoc_module.sqlite `
 
 Two stages: signatures produce a shortlist, then full pseudo-C decides. **The
 address always comes from A2 — the model never supplies one.**
+
+**LLM input-structure derivation** (contribution 1, second half — edges 12/14):
+
+```powershell
+# Derive the wire format from the fuzz entry's pseudo-C AND its callers
+python -m prep.input_struct --entry artifacts\fuzz_entry_llm.json `
+    --cache artifacts\a2_pseudoc_module.sqlite --out artifacts\input_spec.json
+
+# InputSpec -> C++ header (this layer is ordinary code, no LLM)
+python -m fuzzer.codegen --spec artifacts\input_spec.json `
+    --out fuzzer\module\generated_input.h
+```
+
+**The model does not write C++.** It emits a pydantic-validated `InputSpec` —
+fields, types, endianness, which field is a length and in bytes or elements, magic
+values — and `codegen` renders that as C++. Asking for C++ directly fails three
+ways: a compile error surfaces in the C++ toolchain far from the model's mistake;
+free-form C++ cannot be schema-checked; and RULE 4's "units and encoding are
+stated" is unenforceable in prose.
+
+**Callers go in the prompt too**, because whether a parser is invoked repeatedly is
+a property of the caller, not the parser. Measured: shown only `ProcessPacket` the
+model answered `supports_sequence: False` — its own `while` is the chunk-table
+search, not a receive loop. With `main`'s `recv` loop included it answered
+correctly.
+
+Verification compares the derived spec against the hand-written struct's **layout**
+— offsets, widths, length semantics — and deliberately not its field names, since
+pseudo-C has none and the model invents them.
 
 To emit the KD commands for taking a snapshot (untested, see Limitations):
 

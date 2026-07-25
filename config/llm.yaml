@@ -70,6 +70,21 @@ roles:
       (1.9s vs 0.9s), but the vendor's own evaluation matrix marks
       llama-3.3-70b as failing on all four coding agents, so the alternative
       the section already sanctions is the safer default. See D-029.
+  input_struct:
+    model: ais3/nemotron-cascade-2-30b
+    # 0.0, unlike entry_select's 0.2 and seed_gen's 0.9. There is exactly ONE
+    # correct answer to "what shape is this parser's input" -- the target has one
+    # wire format -- so sampling diversity buys nothing and costs correctness.
+    # Contrast seed_gen, where diversity IS the goal.
+    temperature: 0.0
+    max_tokens: 16384
+    why: >-
+      Section 3.1's "LLM-generated input struct / reads pseudo-C" box (edges 12
+      and 14). Same task shape as entry_select -- code comprehension over lossy
+      decompiler output, run once per target -- so the same model, which section
+      7.2 sanctions for reasoning over pseudo-C. max_tokens matches seed_gen's
+      because this is the same reasoning model that spends 28k-60k characters
+      thinking before it answers (D-043).
   crash_prefilter:
     model: ais3/gemma-4-26b
     temperature: 0.0
