@@ -18,9 +18,13 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.gates.conftest import read_internal_doc
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GRAPH_PATH = REPO_ROOT / "arch" / "graph.yaml"
 PROGRESS_PATH = REPO_ROOT / "docs" / "PROGRESS.md"
+# Internal: the gate scorecard is not distributed. `read_internal_doc` skips
+# rather than fails when it is absent -- see tests/gates/conftest.py.
 
 CANONICAL_EDGE_IDS = frozenset(
     [str(i) for i in range(1, 21)]
@@ -46,6 +50,14 @@ EXPECTED_LAYOUT = [
     "orchestrator",
     "eval/planted_bugs",
     "tests/gates",
+]
+
+# Section 5 also lists these five, and they exist on a working checkout -- but they
+# are INTERNAL and gitignored: the spec, the gate scorecard, the decision and
+# deviation logs, and the measured results are how this was built, not how it is
+# used. A clone does not have them, so requiring them would fail every clone's
+# suite. Checked separately, and skipped when absent.
+INTERNAL_DOCS = [
     "docs/PROGRESS.md",
     "docs/DECISIONS.md",
     "docs/DEVIATIONS.md",
@@ -63,6 +75,17 @@ def graph() -> dict:
 @pytest.mark.parametrize("relpath", EXPECTED_LAYOUT)
 def test_layout_exists(relpath: str) -> None:
     assert (REPO_ROOT / relpath).exists(), f"missing from section 5 layout: {relpath}"
+
+
+@pytest.mark.parametrize("relpath", INTERNAL_DOCS)
+def test_internal_docs_exist_on_a_working_checkout(relpath: str) -> None:
+    """Section 5 lists these, and they must not silently disappear from a working
+    tree -- but a clone does not have them, so this skips there rather than failing.
+
+    Verified by hiding all five and re-running the suite: without this split, five
+    tests failed on a simulated clone.
+    """
+    read_internal_doc(REPO_ROOT / relpath)
 
 
 def test_graph_impl_paths_live_in_real_directories(graph: dict) -> None:
@@ -277,7 +300,7 @@ def test_five_triage_signals_are_named(graph: dict) -> None:
 
 
 def _progress_rows() -> dict[str, str]:
-    text = PROGRESS_PATH.read_text(encoding="utf-8")
+    text = read_internal_doc(PROGRESS_PATH)
     return dict(
         re.findall(r"^\|\s*(\d+[a-z]?)\s*\|.*?\|\s*(pending|live)\s*\|", text, re.M)
     )
@@ -317,7 +340,7 @@ def test_live_edges_have_a_passed_gate(graph: dict) -> None:
     # ONLY the gate table. The EDGE table's rows also start `| <number> |`, and
     # collecting both into a dict let an edge row overwrite a gate's status --
     # `| 10 | ghidra.bb_enumerate | a3_bp_list |` became gate 10's "status".
-    text = _gate_table(PROGRESS_PATH.read_text(encoding="utf-8"))
+    text = _gate_table(read_internal_doc(PROGRESS_PATH))
     rows = dict(
         re.findall(
             r"^\|\s*(\d+b?)\s*\|[^|]*\|\s*\*{0,2}(\w+)\*{0,2}\s*\|", text, re.M
@@ -383,7 +406,7 @@ def test_a_partial_gate_says_what_it_does_not_prove(graph: dict) -> None:
     skimming (D-070). Every PARTIAL row has to name the unproven condition or the
     variable that would prove it.
     """
-    text = _gate_table(PROGRESS_PATH.read_text(encoding="utf-8"))
+    text = _gate_table(read_internal_doc(PROGRESS_PATH))
     rows = re.findall(
         r"^\|\s*(\d+b?)\s*\|([^|]*)\|\s*\*{0,2}(\w+)\*{0,2}\s*\|[^|]*\|([^|]*)\|",
         text,
@@ -407,7 +430,7 @@ def test_no_gate_is_pass_with_a_scoped_style_caveat() -> None:
     exercised present as green. Any word that means "passed, except" belongs in a
     PARTIAL row, not next to PASS.
     """
-    text = _gate_table(PROGRESS_PATH.read_text(encoding="utf-8"))
+    text = _gate_table(read_internal_doc(PROGRESS_PATH))
     for line in text.splitlines():
         if not re.match(r"^\|\s*\d+b?\s*\|", line):
             continue

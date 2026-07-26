@@ -41,3 +41,28 @@ def missing_gate_evidence(reason: str) -> None:
     if STRICT_GATE:
         pytest.fail(f"GATE EVIDENCE MISSING: {reason}", pytrace=False)
     pytest.skip(reason)
+
+
+def read_internal_doc(path: Path) -> str:
+    """Read a design/progress document, skipping the test if it is not distributed.
+
+    `CLAUDE.md`, `docs/PROGRESS.md`, `docs/DEVIATIONS.md` and friends are internal:
+    they hold the spec, the gate scorecard and the failure log, none of which
+    belongs in a published tool's repository. They are gitignored, so they exist
+    on a working checkout and not on a clone.
+
+    Several gates legitimately assert against them -- the spec/contract drift
+    check, the gate-table drift check, the edge status table. Those assertions are
+    worth keeping where the documents are present and cannot run where they are
+    not, so this skips rather than fails. NOT `missing_gate_evidence`: an absent
+    internal document is not missing gate evidence, it is a file that was never
+    meant to ship, and conflating the two would make a clone's gate report claim
+    conditions are unproven when nothing is wrong.
+    """
+    if not path.is_file():
+        pytest.skip(
+            f"{path.name} is an internal document and is not distributed "
+            f"(gitignored); this assertion only applies on a working checkout"
+        )
+    return path.read_text(encoding="utf-8")
+

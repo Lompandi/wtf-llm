@@ -65,3 +65,23 @@ logs/
 # path in config/target.yaml, so a clone stays small and still needs no manual
 # configuration. Commit it deliberately if an offline machine needs it.
 third_party/
+
+# Internal design, spec and progress documents. This is a tool; the spec, the gate
+# scorecard, the deviation log and the measured results are how it was built, not
+# how it is used. Tests that assert against them skip when absent
+# (tests/gates/conftest.py::read_internal_doc), so a clone's suite stays green.
+#
+# docs/evidence-manifest.json is deliberately NOT here: it is a list of artifact
+# hashes whose entire purpose is to be committed, so untracking it would remove the
+# thing it exists to provide (D-069). It contains no design narrative.
+CLAUDE.md
+docs/PROGRESS.md
+docs/DEVIATIONS.md
+docs/DECISIONS.md
+docs/RESULTS.md
+docs/ENVIRONMENT.md
+snapfuzz_code_review_recommendations.md
+snapfuzz_new_review_fixes.md
+# Any further review write-ups: same category, and the first one was deleted
+# from the remote by hand rather than caught by a pattern.
+snapfuzz_*review*.md

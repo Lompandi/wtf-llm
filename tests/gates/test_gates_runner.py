@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.gates.conftest import read_internal_doc
 from tools.gates import GATE_ORDER, GATES, Condition, _evaluate, run_gates
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -143,7 +144,7 @@ def test_gate_order_is_checkpoint_order() -> None:
 
 def _gate_rows() -> dict[str, tuple[str, str]]:
     """{gate: (status, note)} from PROGRESS.md's gate table only."""
-    head, _, _ = PROGRESS.read_text(encoding="utf-8").partition("## Edges")
+    head, _, _ = read_internal_doc(PROGRESS).partition("## Edges")
     rows = re.findall(
         r"^\|\s*(\d+b?)\s*\|([^|]*)\|\s*\*{0,2}(\w+)\*{0,2}\s*\|[^|]*\|([^|]*)\|",
         head,
@@ -223,7 +224,7 @@ def test_the_spec_and_the_contract_declare_the_same_fields(model_name: str) -> N
     model = getattr(contracts, model_name)
     actual = set(model.model_fields)
 
-    text = CLAUDE_MD.read_text(encoding="utf-8")
+    text = read_internal_doc(CLAUDE_MD)
     match = re.search(rf"^class {model_name}\(BaseModel\):\n(.*?)(?=\n\nclass |\n```)",
                       text, re.M | re.S)
     assert match, f"CLAUDE.md section 6 has no `class {model_name}(BaseModel)` block"
@@ -248,7 +249,7 @@ def test_the_spec_no_longer_names_the_renamed_coverage_fields() -> None:
     """The specific drift D-068 was: the spec kept `total_edges` after the code
     stopped using it. Aliases keep old ARTIFACTS loading, which is deliberate --
     but the spec must describe the current field."""
-    text = CLAUDE_MD.read_text(encoding="utf-8")
+    text = read_internal_doc(CLAUDE_MD)
     section6 = text[text.index("## 6. Data contracts") : text.index("## 7.")]
     assert "coverage_units" in section6
     # `total_edges` may appear in prose explaining the rename, but not as a

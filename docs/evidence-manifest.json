@@ -1,7 +1,7 @@
 {
   "type": "evidence-manifest",
-  "recorded_at": 1785033921.7531662,
-  "commit": "64885560622b7a3008ac5f045ec50d12818f994d",
+  "recorded_at": 1785035220.4046605,
+  "commit": "a5e5a76b4d1ab81501d776e7daa93dd0a7a2654b",
   "branch": "snapfuzz/cp0-cp4",
   "note": "artifacts/ and the large target files are gitignored. This manifest is tracked so a recorded gate result can be tied to specific bytes and regenerated -- see tools/evidence.py.",
   "present": 18,

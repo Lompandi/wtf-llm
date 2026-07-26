@@ -307,7 +307,9 @@ def test_the_curve_plot_was_produced() -> None:
 
 def test_results_are_written_up() -> None:
     """GATE 10: results in docs/RESULTS.md, not only in JSON."""
-    text = (REPO_ROOT / "docs" / "RESULTS.md").read_text(encoding="utf-8")
+    from tests.gates.conftest import read_internal_doc
+
+    text = read_internal_doc(REPO_ROOT / "docs" / "RESULTS.md")
     if "baseline-libfuzzer" not in text:
         pytest.skip("the CP10 comparison has not been written into docs/RESULTS.md yet")
     for arm in ("baseline-libfuzzer", "baseline-honggfuzz", "llm-guided"):
