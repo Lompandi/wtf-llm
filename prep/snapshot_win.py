@@ -96,6 +96,10 @@ def ingest_state_dir(
     binary: Path | None = None,
     ghidra_image_base: int | None = None,
     require_rip_at_entry: bool = True,
+    # Supplied by stage 02b (prep/layout.py) so a snapshot with no symbol-store.json
+    # can still be ingested -- see the three sources documented below (D-075).
+    module_base: int | None = None,
+    entry_static_addr: int | None = None,
 ) -> SnapshotRef:
     """Build A1 from an existing ``state/`` directory.
 
@@ -136,31 +140,65 @@ def ingest_state_dir(
             raise SnapshotError("pass either --binary or --ghidra-image-base")
         ghidra_image_base = read_pe_image_base(Path(binary))
 
-    if not symbol_store.exists():
-        raise SnapshotError(
-            f"{symbol_store} is missing. On Windows wtf regenerates it at "
-            f"runtime, so run the target once first; on Linux it is required "
-            f"up front because there is no dbgeng (section 13.1)."
-        )
-
-    symbols = parse_symbol_store(symbol_store)
-    if module not in symbols:
-        raise SnapshotError(
-            f"{module!r} is not in {symbol_store.name}; known modules: "
-            f"{sorted(k for k in symbols if '!' not in k)}"
-        )
-    module_base = symbols[module]
-
     rip = _read_rip(regs_json)
+
+    # WHERE THE MODULE IS MAPPED. Three sources, and the first two are new: this used
+    # to require `symbol-store.json` and fail without it, which made a memory dump plus
+    # a register state plus the executable -- the three things a user actually has --
+    # insufficient to ingest anything (D-075).
+    #
+    #   1. `module_base` passed in, from prep/layout.py's derivation or by hand;
+    #   2. `symbol-store.json`, when there is one -- a direct statement beats a
+    #      derivation, so it wins when both are available;
+    #   3. neither, which is now an error that explains the derivation rather than an
+    #      error about a missing file.
+    #
+    # wtf regenerates the symbol store at runtime on Windows, so its absence never
+    # blocked fuzzing; it only ever blocked this function.
+    symbols: dict[str, int] = {}
+    if symbol_store.exists():
+        symbols = parse_symbol_store(symbol_store)
+        if module_base is None:
+            if module not in symbols:
+                raise SnapshotError(
+                    f"{module!r} is not in {symbol_store.name}; known modules: "
+                    f"{sorted(k for k in symbols if '!' not in k)}. Pass module_base "
+                    f"(or --module-base) if this snapshot is of {module!r} under "
+                    f"another name."
+                )
+            module_base = symbols[module]
+
+    if module_base is None:
+        raise SnapshotError(
+            f"the runtime base of {module!r} in this snapshot is unknown: "
+            f"{symbol_store.name} is absent and no module_base was given.\n"
+            f"It can be DERIVED from the snapshot itself -- `python -m prep.layout "
+            f"--binary <exe> --regs {regs_json.name} --export <A2>` matches rip "
+            f"against the executable's function addresses and the 64 KB image "
+            f"alignment -- and `orchestrator.pipeline` does that for you in stage "
+            f"02b. Pass --module-base to state it directly."
+        )
+
     if entry_symbol:
         key = f"{module}!{entry_symbol}"
-        if key not in symbols:
+        if symbols and key in symbols:
+            entry_runtime_addr = symbols[key]
+        elif entry_static_addr is not None:
+            # From the static address, which is what A2 records and what layout.py
+            # resolves. Equivalent, and available when the symbol store is not.
+            entry_runtime_addr = entry_static_addr - ghidra_image_base + module_base
+        elif symbols:
             raise SnapshotError(
                 f"{key!r} is not in {symbol_store.name}; known symbols for "
                 f"{module}: "
                 f"{sorted(k for k in symbols if k.startswith(module + '!'))}"
             )
-        entry_runtime_addr = symbols[key]
+        else:
+            raise SnapshotError(
+                f"cannot place {key!r}: there is no {symbol_store.name} to look it up "
+                f"in and no entry_static_addr was given. Pass entry_static_addr, or "
+                f"let stage 02b derive it."
+            )
     else:
         # No symbol given: the snapshot's rip *is* the entry, which is what
         # "break at the fuzz entry" means.
@@ -516,6 +554,14 @@ def main(argv: list[str] | None = None) -> int:
     ing.add_argument("--entry-symbol")
     ing.add_argument("--binary", type=Path, help="to read the PE ImageBase")
     ing.add_argument("--ghidra-image-base", type=lambda s: int(s, 0))
+    ing.add_argument(
+        "--layout",
+        type=Path,
+        default=None,
+        help="prep/layout.py output. Supplies module_base and the entry's static "
+             "address, so no symbol-store.json is needed",
+    )
+    ing.add_argument("--module-base", type=lambda s: int(s, 0), default=None)
     ing.add_argument("--out", type=Path, default=Path("artifacts/a1_snapshot.json"))
     ing.add_argument(
         "--allow-rip-mismatch",
@@ -580,13 +626,36 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     if args.cmd == "ingest":
+        module_base, entry_static, entry_symbol = args.module_base, None, args.entry_symbol
+        if args.layout:
+            from prep.layout import Layout
+
+            layout = Layout.load(args.layout)
+            module_base = module_base or layout.module_base
+            entry_static = layout.entry_static_addr
+            # The layout's entry comes from the snapshot's rip. A caller who passed
+            # --entry-symbol wins, but a DISAGREEMENT is worth printing: it means the
+            # snapshot stopped somewhere other than the function being fuzzed, which
+            # `require_rip_at_entry` is about to reject anyway, and saying why here is
+            # more use than the rejection alone.
+            if entry_symbol and entry_symbol != layout.entry_symbol:
+                print(
+                    f"  [warn] --entry-symbol {entry_symbol!r} but the snapshot's rip "
+                    f"is in {layout.entry_symbol!r}; the snapshot is the ground truth "
+                    f"about where execution stopped"
+                )
+                entry_static = None
+            entry_symbol = entry_symbol or layout.entry_symbol
+
         ref = ingest_state_dir(
             args.state,
             args.module,
-            entry_symbol=args.entry_symbol,
+            entry_symbol=entry_symbol,
             binary=args.binary,
             ghidra_image_base=args.ghidra_image_base,
             require_rip_at_entry=not args.allow_rip_mismatch,
+            module_base=module_base,
+            entry_static_addr=entry_static,
         )
         path = write_snapshot_ref(ref, args.out)
         space = AddressSpace(args.module, ref.module_base, ref.ghidra_image_base)

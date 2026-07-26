@@ -68,6 +68,9 @@ SOURCE = SOURCE_PATH.read_text(encoding="utf-8")
 # because a driver resolving the placeholder from a file no stage produces would
 # fail for every new target and the two facts live in different functions.
 ENTRY_ARTIFACT_NAME = "fuzz_entry_llm.json"
+# The snapshot's own answer, which outranks the model's: rip is where execution
+# stopped, so it is where fuzzing resumes (D-075).
+LAYOUT_ARTIFACT_NAME = "a0_layout.json"
 
 # Substrings that mean a module talks to the model. Deliberately NOT the bare
 # string "llm": `analysis/reverse.py` legitimately imports `llm.ghidra_mcp`, a
@@ -212,16 +215,18 @@ def _result(key: str, status: str, detail: str = "") -> StageResult:
 # --- ordering: derived from the stage list, not pinned --------------------
 
 
-def test_the_stage_list_is_the_fourteen_stage_pipeline() -> None:
+def test_the_stage_list_is_the_sixteen_stage_pipeline() -> None:
     """A canary on the count only. The ORDER is derived by the tests below, so a
     reorder must fail for a reason that names the constraint it broke.
 
-    Fourteen since `08b-harness`, which derives the HarnessSpec. `prep/harness_derive.py`
-    existed from CP11 and no stage ran it, so the harness spec could only be produced
-    by hand -- which is why the generated module in the tree was built once for
-    tlv_server and never again (D-073)."""
+    Sixteen. `08b-harness` derives the HarnessSpec -- `prep/harness_derive.py` existed
+    from CP11 and no stage ran it, which is why the generated module in the tree was
+    built once for tlv_server and never again (D-073). `02b-layout` reads the module
+    base and the fuzz entry out of the snapshot, and `09b-seed` builds a first
+    test-case from the InputSpec, which together are what let a user supply a memory
+    dump, a register state and an executable and nothing else (D-075)."""
     stages = _stages()
-    assert len(stages) == 14
+    assert len(stages) == 16
     keys = [s.key for s in stages]
     assert len(set(keys)) == len(keys), f"duplicate stage keys: {keys}"
 
@@ -358,7 +363,16 @@ def test_every_stage_names_at_least_one_artifact() -> None:
     marked done because its command exited 0 -- and analyzeHeadless and wtf both
     exit 0 having produced nothing (D-026, D-042)."""
     for stage in _stages():
-        assert stage.produces, f"{stage.key} names no artifact, so it cannot be checked"
+        # `produces` OR a `verify` hook. Neither means the stage is marked done on its
+        # exit code alone, which is the thing this rule exists to prevent -- but a
+        # stage whose correct outcome is sometimes to write NOTHING cannot name an
+        # artifact, and 09b-seed is one: it leaves a user's own seed alone. Its hook
+        # checks the property the artifact was standing in for, that inputs/ is not
+        # empty. Same trade as `output_may_be_unchanged` (D-065).
+        assert stage.produces or stage.verify is not None, (
+            f"{stage.key} names no artifact and has no verify hook, so it would be "
+            f"marked done on its exit code alone"
+        )
 
 
 def test_a_stage_with_no_artifact_can_never_look_up_to_date() -> None:
@@ -430,10 +444,17 @@ def test_the_late_bound_entry_is_read_from_the_stage_that_makes_it() -> None:
         and isinstance(node.value, str)
         and node.value.endswith(".json")
     }
-    assert literals == {ENTRY_ARTIFACT_NAME}, (
+    # TWO sources now, in order of authority: the snapshot's own layout, then the
+    # model's choice. The property this test defends is unchanged -- every name
+    # run_pipeline resolves from must be an artifact some stage actually produces,
+    # because a placeholder resolving from a file nothing produces fails only for a
+    # NEW target, which is the case nobody tests by hand.
+    assert literals == {ENTRY_ARTIFACT_NAME, LAYOUT_ARTIFACT_NAME}, (
         f"run_pipeline resolves the entry from {literals}"
     )
-    _index_producing(_stages(), ENTRY_ARTIFACT_NAME)  # asserts exactly one producer
+    stages = _stages()
+    for name in literals:
+        _index_producing(stages, name)  # asserts exactly one producer, per file
 
 
 def test_resolve_entry_substitutes_the_symbol_from_the_artifact(tmp_path: Path) -> None:
@@ -639,11 +660,29 @@ def test_prerequisites_report_every_missing_per_target_directory(
 def test_prerequisites_report_an_empty_inputs_directory(
     tmp_path: Path, satisfied_env
 ) -> None:
-    """inputs/ is the startup seed directory: an empty one gives the mutator
-    nothing to work from, and the campaign runs to completion finding nothing."""
+    """inputs/ is the startup seed directory: an empty one gives the mutator nothing to
+    work from, and the campaign runs to completion finding nothing.
+
+    Conditional now, and both halves matter. Stage 09b builds a first test-case from the
+    derived InputSpec, so demanding a seed up front would ask the user for something
+    this run is about to produce -- that was the last thing standing between "I have a
+    dump, a register state and an exe" and a run (D-075). But when 09b is NOT in the
+    plan -- `--only 11`, or `--from 10` -- nothing will write one, and then an empty
+    corpus is exactly the silent nothing-explored campaign this check exists for.
+    """
     config = _fake_target(tmp_path, seed=False)
-    problems = check_prerequisites(config, build_stages(config))
-    assert any("holds no seeds" in p for p in problems), problems
+    full_plan = build_stages(config)
+    assert not any("holds no seeds" in p for p in check_prerequisites(config, full_plan)), (
+        "the full plan includes stage 09b, which writes a seed, so requiring one up "
+        "front asks the user for what the pipeline already derives"
+    )
+
+    campaign_only = [s for s in full_plan if s.key == "11-fuzz"]
+    problems = check_prerequisites(config, campaign_only)
+    assert any("holds no seeds" in p for p in problems), (
+        f"a campaign with no seed stage and an empty inputs/ must still be refused: "
+        f"{problems}"
+    )
 
 
 def test_prerequisites_report_a_missing_state_directory_as_not_ours_to_make(
@@ -783,7 +822,9 @@ def test_the_snapshot_stage_ingests_and_refuses_to_invent_a_snapshot() -> None:
     assert "VM" in stage.note
 
     # The refusal is structural too: it needs files it cannot create.
-    assert {p.name for p in stage.needs} == {"mem.dmp", "regs.json"}
+    # A superset now -- it also needs stage 02b's layout -- but the two files it
+    # CANNOT create are what make this a refusal rather than a fallback.
+    assert {"mem.dmp", "regs.json"} <= {p.name for p in stage.needs}
 
 
 def test_codegen_is_wired_for_a_new_target_and_not_for_the_development_one() -> None:
@@ -972,7 +1013,13 @@ def test_acquire_stage_produces_what_ingest_needs():
     from orchestrator.pipeline import build_stages
 
     stages = {s.key: s for s in build_stages(_config(kd_pipe="p"))}
-    assert set(stages["07-snapshot"].needs) <= set(stages["07a-acquire"].produces)
+    # Restricted to the SNAPSHOT files. Ingest also needs stage 02b's layout, which
+    # acquisition has no business producing -- it is derived from the dump afterwards.
+    snapshot_needs = {
+        p for p in stages["07-snapshot"].needs if p.name in ("mem.dmp", "regs.json")
+    }
+    assert snapshot_needs, "ingest no longer needs the snapshot files at all"
+    assert snapshot_needs <= set(stages["07a-acquire"].produces)
 
 
 def test_acquire_stage_breaks_on_the_chosen_entry():

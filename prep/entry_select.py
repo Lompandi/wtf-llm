@@ -230,8 +230,22 @@ def select_entry(
     module: str | None = None,
     shortlist_size: int = 5,
     ghidra_image_base: int | None = None,
+    # THE ENTRY IS ALREADY KNOWN. When a snapshot is supplied, `rip` says where
+    # execution stopped, and that is where fuzzing resumes -- so there is nothing left
+    # to choose and the model's job narrows to DESCRIBING that function: which register
+    # holds the buffer, which holds the length.
+    #
+    # Not an optimisation. Left free to choose, the model picked a different function
+    # from the one rip was in, and then derived `input_param` for THAT function -- and
+    # input_param is compiled into the harness's register writes, so the harness would
+    # have written fuzz bytes into a register chosen by reading a function the snapshot
+    # never stopped in (D-075).
+    fixed_symbol: str | None = None,
 ) -> tuple[FuzzEntry, _Choice, list[str]]:
-    """Pick the fuzz entry. Returns (FuzzEntry, raw choice, shortlist names)."""
+    """Pick the fuzz entry, or describe the one the snapshot already determined.
+
+    Returns (FuzzEntry, raw choice, shortlist names).
+    """
     cands = candidates(cache, module=module)
     if not cands:
         raise EntrySelectionError(
@@ -241,8 +255,26 @@ def select_entry(
 
     by_name = {c.function: c for c in cands}
 
-    # Stage 1 -- shortlist from signatures.
-    if len(cands) <= shortlist_size:
+    if fixed_symbol:
+        if fixed_symbol not in by_name:
+            # Deliberately NOT a fallback to free choice. The snapshot stopped in a
+            # function A2 does not describe, so the honest options are to widen A2 or
+            # to say so -- picking a different function would fuzz something the
+            # snapshot is not positioned at.
+            raise EntrySelectionError(
+                f"the snapshot's rip is in {fixed_symbol!r}, which is not among the "
+                f"{len(cands)} candidate functions in A2. Either it was filtered out "
+                f"as noise, or A2 does not cover it. Build A2 at --scope=module over "
+                f"the whole binary; do not substitute another function, because the "
+                f"snapshot resumes at rip and nowhere else."
+            )
+        shortlist = [by_name[fixed_symbol]]
+        shortlist_names = [fixed_symbol]
+
+    # Stage 1 -- shortlist from signatures. Skipped entirely when the entry is fixed:
+    # there is nothing to shortlist, and it would spend a model call to re-answer a
+    # question the snapshot already answered.
+    elif len(cands) <= shortlist_size:
         shortlist = list(cands)
         shortlist_names = [c.function for c in shortlist]
     else:
@@ -274,6 +306,18 @@ def select_entry(
     )
 
     resolved = _resolve_name(choice.function, by_name)
+    if fixed_symbol:
+        # The model was shown one function and asked to describe it. If it answered
+        # about a different one, its register answers are about that different one too,
+        # so the name is not the only thing to distrust -- but the entry itself is not
+        # up for revision: rip decided it.
+        if resolved != fixed_symbol:
+            print(
+                f"  [warn] the model answered about {choice.function!r} when asked "
+                f"about {fixed_symbol!r}; keeping {fixed_symbol!r}, which is where the "
+                f"snapshot's rip is, and treating the register answers with suspicion"
+            )
+        resolved = fixed_symbol
     if resolved is None:
         raise EntrySelectionError(
             f"the model chose {choice.function!r}, which is not a function in A2. "
@@ -313,6 +357,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--out", type=Path, default=REPO_ROOT / "artifacts" / "fuzz_entry_llm.json"
     )
+    ap.add_argument(
+        "--entry-symbol",
+        default=None,
+        help="the entry is already known (from the snapshot's rip): describe "
+             "this function rather than choosing one",
+    )
+    ap.add_argument(
+        "--layout",
+        type=Path,
+        default=None,
+        help="prep/layout.py output; its entry_symbol fixes the choice",
+    )
     ap.add_argument("--module-base", type=lambda s: int(s, 0))
     ap.add_argument("--ghidra-image-base", type=lambda s: int(s, 0))
     args = ap.parse_args(argv)
@@ -321,11 +377,17 @@ def main(argv: list[str] | None = None) -> int:
         cands = candidates(cache, module=args.module)
         print(f"candidates after filtering: {len(cands)}")
 
+        fixed = args.entry_symbol
+        if fixed is None and args.layout:
+            from prep.layout import Layout
+
+            fixed = Layout.load(args.layout).entry_symbol
         entry, choice, shortlist = select_entry(
             cache,
             client,
             module=args.module,
             shortlist_size=args.shortlist_size,
+            fixed_symbol=fixed,
         )
 
         print(f"shortlist   : {shortlist}")

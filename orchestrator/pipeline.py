@@ -227,6 +227,7 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
     entry_json = art / "fuzz_entry_llm.json"
     spec_json = art / "input_spec.json"
     a1_json = art / "a1_snapshot.json"
+    layout_json = art / "a0_layout.json"
     generated = config.repo_root / "fuzzer" / "module" / "generated_input.h"
     harness_json = art / "harness_spec.json"
     # The GENERATED MODULE. `fuzzer/build.py` copies `fuzzer/module/*.cc` into
@@ -270,6 +271,27 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
             )
         if payload.get("ticks", 0) <= 0:
             return "the campaign recorded no ticks, so it never observed the master"
+        return None
+
+    def inputs_hold_a_seed() -> str | None:
+        """After stage 09b, inputs/ must not be empty.
+
+        This stage cannot name a `produces` path: writing nothing is the CORRECT
+        outcome when the user already supplied a seed, so a required artifact would
+        make it fail for having respected them. The property that actually matters is
+        not "a file was written" but "there is something to fuzz from", which is what
+        this checks -- the same shape as the `output_may_be_unchanged` stages, which
+        also trade a byte comparison for a hook that checks the real thing (D-065).
+        """
+        inputs = config.target_dir / "inputs"
+        if not inputs.is_dir():
+            return f"{inputs} does not exist"
+        if not any(p.is_file() for p in inputs.iterdir()):
+            return (
+                f"{inputs} is still empty. The InputSpec described no usable structure "
+                f"to build a first test-case from, so a seed has to be supplied by "
+                f"hand: one input your target accepts, byte for byte"
+            )
         return None
 
     def input_spec_matches_entry() -> str | None:
@@ -347,13 +369,41 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
             produces=[a2_db],
         ),
         Stage(
+            key="02b-layout",
+            title="Snapshot -> module base + fuzz entry (no LLM)",
+            argv=py(
+                "prep.layout",
+                "--binary", str(config.binary),
+                "--regs", str(config.state_dir / "regs.json"),
+                "--mem-dmp", str(config.state_dir / "mem.dmp"),
+                "--export", str(a2_json),
+                "--module", Path(config.binary).stem,
+                "--out", str(layout_json),
+            ),
+            needs=[config.binary, config.state_dir / "regs.json", a2_json],
+            produces=[layout_json],
+            note=(
+                "reads the mapped image list out of the dump and identifies your "
+                "executable by its PE header, so module_base needs no "
+                "symbol-store.json and no config. rip is where the snapshot stopped, "
+                "so it IS the fuzz entry -- not something to be guessed and checked "
+                "later (D-075)"
+            ),
+        ),
+        Stage(
             key="03-entry",
-            title="LLM: choose the fuzz entry",
+            title="LLM: describe the fuzz entry",
             argv=py(
                 "prep.entry_select", "--cache", str(a2_db),
                 "--module", Path(config.binary).stem, "--out", str(entry_json),
+                # The entry is not open for choice once a snapshot exists: rip decided
+                # it in stage 02b. This stage derives the input REGISTERS for that
+                # function. Left free, the model chose a different function and derived
+                # input_param for it -- and input_param is compiled into the harness's
+                # register writes (D-075).
+                "--layout", str(layout_json),
             ),
-            needs=[a2_db],
+            needs=[a2_db, layout_json],
             produces=[entry_json],
             calls_llm=True,
             note=(
@@ -479,9 +529,17 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
                 "--module", Path(config.binary).stem,
                 "--binary", str(config.binary),
                 "--entry-symbol", entry_for_scoping,
+                # From stage 02b, so a snapshot with no symbol-store.json ingests --
+                # which is the whole point: a dump, a register state and the
+                # executable, nothing else (D-075).
+                "--layout", str(layout_json),
                 "--out", str(a1_json),
             ),
-            needs=[config.state_dir / "mem.dmp", config.state_dir / "regs.json"],
+            needs=[
+                config.state_dir / "mem.dmp",
+                config.state_dir / "regs.json",
+                layout_json,
+            ],
             produces=[a1_json],
             note=(
                 "INGEST only -- this reads a state/ directory and derives A1. "
@@ -566,6 +624,30 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
                      "target would rename the test-case JSON keys and invalidate the "
                      "recorded corpus and crash files (D-055). Pass "
                      "--generated-harness to use the derived one anyway"
+            ),
+        ),
+        Stage(
+            key="09b-seed",
+            title="InputSpec -> a first test-case, if inputs/ is empty",
+            argv=py(
+                "fuzzer.seed",
+                "--spec", str(spec_json),
+                "--inputs", str(config.target_dir / "inputs"),
+            ),
+            needs=[spec_json],
+            # No `produces`: writing nothing is the CORRECT outcome when the user
+            # already put a seed there, and a stage that must produce a file would
+            # then fail for having respected them. `idempotent=False` keeps it from
+            # being skipped as up to date, so it always gets to look.
+            produces=[],
+            idempotent=False,
+            verify=inputs_hold_a_seed,
+            note=(
+                "the pipeline used to refuse to start without a seed, which asked the "
+                "user for something it already knew: the InputSpec gives the field "
+                "widths, the length fields and any magic value, so a structurally "
+                "valid first case follows from it. Anything already in inputs/ is left "
+                "alone -- a captured real input is worth more than a derived one (D-075)"
             ),
         ),
         Stage(
@@ -913,7 +995,12 @@ def check_prerequisites(config: PipelineConfig, stages: list[Stage]) -> list[str
             f"so treat it as untested rather than as the easy option "
             f"(docs/GUEST-VM.md)."
         )
-    if not any((config.target_dir / "inputs").glob("*")):
+    # Derived from the stage list, like the Ghidra check above: stage 09b builds a
+    # first test-case from the InputSpec, so demanding one up front would ask the user
+    # for something this run is about to produce. Still demanded when 09b is not in the
+    # plan -- `--only 11` on an empty corpus is a campaign that explores nothing.
+    seed_stage = any("fuzzer.seed" in " ".join(s.argv) for s in stages)
+    if not seed_stage and not any((config.target_dir / "inputs").glob("*")):
         problems.append(
             f"{config.target_dir / 'inputs'} holds no seeds. Put at least one file "
             f"there: a single input your target accepts, byte for byte, as it would "
@@ -1013,8 +1100,18 @@ def _display(path: Path, repo_root: Path) -> str:
         return str(path)
 
 
-def resolve_entry(argv: list[str], entry_json: Path) -> list[str] | str:
-    """Substitute ``ENTRY_PLACEHOLDER`` from the FuzzEntry artifact.
+def resolve_entry(
+    argv: list[str], entry_json: Path, layout_json: Path | None = None
+) -> list[str] | str:
+    """Substitute ``ENTRY_PLACEHOLDER`` from the snapshot, or from the FuzzEntry.
+
+    The LAYOUT wins when there is one, and the reason is not preference: rip is where
+    the snapshot stopped, so it is where fuzzing resumes whatever any model concluded
+    from reading pseudo-C. Resolving from the layout also means the placeholder is
+    answerable at stage 02b instead of stage 03, which matters because stage 07 would
+    otherwise reject a snapshot whose rip disagreed with the model's choice -- and
+    reject it with a message about re-taking the snapshot, for a function the user never
+    asked for (D-075).
 
     Returns the resolved argv, or an error string. An error rather than a
     fallback: the alternative is guessing a symbol name, and a plausible wrong
@@ -1038,6 +1135,16 @@ def resolve_entry(argv: list[str], entry_json: Path) -> list[str] | str:
         )
     if ENTRY_PLACEHOLDER not in argv:
         return argv
+
+    if layout_json is not None and layout_json.exists():
+        try:
+            from prep.layout import Layout
+
+            symbol = Layout.load(layout_json).entry_symbol
+        except Exception as exc:
+            return f"{layout_json} is not a readable Layout: {exc}"
+        if symbol:
+            return [symbol if part == ENTRY_PLACEHOLDER else part for part in argv]
 
     if not entry_json.exists():
         return (
@@ -1184,7 +1291,11 @@ def run_pipeline(
             )
             break
 
-        resolved = resolve_entry(stage.argv, config.artifacts / "fuzz_entry_llm.json")
+        resolved = resolve_entry(
+            stage.argv,
+            config.artifacts / "fuzz_entry_llm.json",
+            config.artifacts / "a0_layout.json",
+        )
         if isinstance(resolved, str) and dry_run:
             # Same exemption the needs check above already makes: in a dry run the
             # entry has not been chosen yet BECAUSE stage 03 has not run. Two lines
