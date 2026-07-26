@@ -237,6 +237,9 @@ def derive_harness(
     *,
     target_name: str = "snapfuzz",
     role: str = "harness_derive",
+    # For turning A2's static addresses into RVAs. Defaults to the usual PE64 base so
+    # an existing caller keeps working; the pipeline passes the real one from A2.
+    ghidra_image_base: int = 0x140000000,
 ) -> tuple[HarnessSpec, list[str]]:
     """Derive a HarnessSpec. Returns the spec and any consistency warnings."""
     if not entry.symbol:
@@ -295,6 +298,35 @@ def derive_harness(
     if not spec.source_functions:
         spec.source_functions = [record.function]
 
+    # WHERE EACH BREAKPOINT GOES, as an offset from the module base.
+    #
+    # wtf resolves a breakpoint symbol through dbgeng, which needs the target to have a
+    # PDB. Stripped binaries are the normal case here, and Ghidra names their functions
+    # `FUN_140001150` -- a label it invented, in no symbol table. wtf then reports
+    # `Could not set a breakpoint at mytarget!FUN_140001150`, every worker dies in Init,
+    # and the campaign records zero executions (D-075).
+    #
+    # A2 already holds the static address of every function, so the RVA is subtraction.
+    # Filled in here rather than asked of the model: it is arithmetic over recorded
+    # facts, and a model has nothing to add to it.
+    resolved, unresolved = 0, []
+    for bp in spec.breakpoints:
+        name = bp.symbol.split("!", 1)[-1]
+        target = cache.get_by_function(name, module=entry.module)
+        if target is None:
+            unresolved.append(name)
+            continue
+        bp.rva = target.static_addr - ghidra_image_base
+        resolved += 1
+    if unresolved:
+        # Not fatal: a breakpoint on something outside A2 -- a CRT import thunk, say --
+        # can still resolve by name if the target does have symbols for it. Said out
+        # loud because if it does not, the failure is every worker dying in Init.
+        print(
+            f"  [warn] no address in A2 for {unresolved}; those breakpoints stay "
+            f"name-resolved and will fail on a target without symbols for them"
+        )
+
     return spec, check_harness(spec, input_spec, code)
 
 
@@ -314,6 +346,19 @@ def main(argv: list[str] | None = None) -> int:
         "--out", type=Path, default=REPO_ROOT / "artifacts" / "harness_spec.json"
     )
     ap.add_argument("--target-name", default="snapfuzz")
+    ap.add_argument(
+        "--ghidra-image-base",
+        type=lambda s: int(s, 0),
+        default=None,
+        help="for converting A2 static addresses to RVAs; read from --export "
+             "or defaults to 0x140000000",
+    )
+    ap.add_argument(
+        "--export",
+        type=Path,
+        default=None,
+        help="the A2 json, read only for its image_base",
+    )
     args = ap.parse_args(argv)
 
     entry = FuzzEntry.model_validate_json(args.entry.read_text(encoding="utf-8"))
@@ -323,8 +368,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"deriving the harness for {entry.module}!{entry.symbol}")
 
     with PseudoCCache(args.cache) as cache, LlmClient.from_config() as client:
+        image_base = args.ghidra_image_base
+        if image_base is None and args.export and args.export.is_file():
+            image_base = json.loads(args.export.read_text(encoding="utf-8"))["image_base"]
         spec, warnings = derive_harness(
-            entry, input_spec, cache, client, target_name=args.target_name
+            entry, input_spec, cache, client,
+            target_name=args.target_name,
+            **({"ghidra_image_base": image_base} if image_base is not None else {}),
         )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

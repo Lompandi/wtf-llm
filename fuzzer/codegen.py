@@ -496,6 +496,19 @@ def generate_module(
     # --- symbol constants and simulated returns --------------------------
     entry_bp = next(b for b in harness.breakpoints if b.purpose == "fuzz_entry")
     constants = [f'constexpr const char *kFuzzEntry = "{entry_bp.symbol}";']
+
+    # THE FUZZ ENTRY BREAKPOINT, by address when the spec carries an RVA. This is the
+    # one that actually killed the campaign: with no PDB, Ghidra's invented
+    # `FUN_140001150` resolves to nothing, wtf prints `Could not set a breakpoint at
+    # mytarget!FUN_140001150`, and every worker dies in Init while the campaign reports
+    # zero executions (D-075). `kFuzzEntry` stays as the string used in the log lines.
+    if entry_bp.rva is not None:
+        entry_module = entry_bp.symbol.split("!", 1)[0]
+        fuzz_entry_target = (
+            f'Gva_t(g_Dbg->GetModuleBase("{entry_module}") + {entry_bp.rva:#x})'
+        )
+    else:
+        fuzz_entry_target = "kFuzzEntry"
     simulated: list[str] = []
     for index, bp in enumerate(harness.breakpoints):
         if bp.action != "simulate_return":
@@ -505,12 +518,24 @@ def generate_module(
             f'constexpr const char *{name} = "{bp.symbol}";'
             f"  // {bp.purpose}: {ascii_comment(bp.rationale)[:90]}"
         )
+        # BY ADDRESS when the spec carries an RVA. Resolving by symbol needs dbgeng to
+        # know the name, which needs a PDB -- and a stripped binary has none, so Ghidra
+        # invents `FUN_140001150`, wtf reports `Could not set a breakpoint at
+        # mytarget!FUN_140001150`, and every worker dies in Init. The campaign then
+        # reports zero executions, which is what "all workers dead" looks like from the
+        # outside (D-075). `GetModuleBase(name) + rva` is what wtf's own .cov loader
+        # does for the same reason (utils.cc:366).
+        if bp.rva is not None:
+            module = bp.symbol.split("!", 1)[0]
+            target = f'Gva_t(g_Dbg->GetModuleBase("{module}") + {bp.rva:#x})'
+        else:
+            target = name
         simulated.append(
             f"  //\n"
             f"  // {bp.symbol}: {bp.purpose}.\n"
             f"  // {ascii_comment(bp.rationale)[:180]}\n"
             f"  //\n"
-            f"  if (!g_Backend->SetBreakpoint({name}, [](Backend_t *Backend) {{\n"
+            f"  if (!g_Backend->SetBreakpoint({target}, [](Backend_t *Backend) {{\n"
             f"        Backend->SimulateReturnFromFunction({bp.return_value});\n"
             f"      }})) {{\n"
             f'    fmt::print("{namespace}: failed to SetBreakpoint on {{}}\\n",'
@@ -520,6 +545,7 @@ def generate_module(
         )
 
     return MODULE_TEMPLATE.format(
+        fuzz_entry_target=fuzz_entry_target,
         spec_path=spec_path,
         harness_path=harness_path,
         entry_symbol=harness.entry_symbol,
@@ -827,6 +853,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  sequence per test-case: {harness.deliver_sequence}")
         print(f"wrote {path} ({len(text.splitlines())} lines, "
               f"{'ASCII' if all(ord(c) < 128 for c in text) else 'NON-ASCII!'})")
+        # AND the header, when one was asked for. This used to `return 0` here, so a
+        # caller passing both --out and --module-out -- which the pipeline's stage 09
+        # does -- got the module written and the header left exactly as it was. On a
+        # tree that already had one from an earlier target, that meant a STALE header
+        # sitting next to a fresh module, describing different fields under different
+        # names, with nothing to say so (D-075).
+        if args.out:
+            header = write_header(spec, args.out, spec_path=str(args.spec))
+            print(f"wrote {header}")
         return 0
 
     path = write_header(spec, args.out, spec_path=str(args.spec))

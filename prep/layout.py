@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 __all__ = [
     "IMAGE_ALIGNMENT",
@@ -135,6 +135,75 @@ def candidates_from_rip(
     for names in out.values():
         names.sort()
     return out
+
+
+def pe_module_name(binary: Path) -> str | None:
+    """The module name the PE records for itself, from its CodeView debug entry.
+
+    **The name has to be the one the SNAPSHOT uses**, not the filename on disk, because
+    the generated harness resolves its breakpoints through
+    ``g_Dbg->GetModuleBase(name)``. A name that does not match returns 0, the breakpoint
+    lands at ``0 + rva``, no input is ever delivered, and the campaign runs to
+    completion with zero coverage and no error -- which is exactly what happened when
+    this was tested on a renamed copy (D-075).
+
+    The filename is not that name: anyone may rename an executable, and the copy in a
+    dump is whatever it was called when it was loaded. The CodeView record survives
+    renaming because it is written at link time -- `C:\\work\\...\\tlv_server.pdb` gives
+    `tlv_server`.
+
+    Returns None for a binary with no debug directory, which is the normal case for a
+    stripped release build. The caller then falls back to the filename, which is the
+    best available answer and is usually right.
+    """
+    try:
+        data = Path(binary).read_bytes()
+    except OSError:
+        return None
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        return None
+    try:
+        pe = int.from_bytes(data[0x3C:0x40], "little")
+        if data[pe : pe + 4] != b"PE\0\0":
+            return None
+        sections = int.from_bytes(data[pe + 6 : pe + 8], "little")
+        opt_size = int.from_bytes(data[pe + 0x14 : pe + 0x16], "little")
+        opt = pe + 0x18
+        # Data directory entry 6 is IMAGE_DIRECTORY_ENTRY_DEBUG.
+        entry = opt + 0x70 + 6 * 8
+        rva = int.from_bytes(data[entry : entry + 4], "little")
+        size = int.from_bytes(data[entry + 4 : entry + 8], "little")
+        if not rva or not size:
+            return None
+
+        table = opt + opt_size
+        offset = None
+        for index in range(sections):
+            header = table + index * 40
+            va = int.from_bytes(data[header + 12 : header + 16], "little")
+            vsize = int.from_bytes(data[header + 8 : header + 12], "little")
+            raw = int.from_bytes(data[header + 20 : header + 24], "little")
+            if va <= rva < va + max(vsize, 1):
+                offset = raw + (rva - va)
+                break
+        if offset is None:
+            return None
+
+        for index in range(size // 28):
+            record = offset + index * 28
+            kind = int.from_bytes(data[record + 12 : record + 16], "little")
+            pointer = int.from_bytes(data[record + 24 : record + 28], "little")
+            if kind != 2:  # IMAGE_DEBUG_TYPE_CODEVIEW
+                continue
+            if data[pointer : pointer + 4] != b"RSDS":
+                continue
+            # RSDS: signature(4) guid(16) age(4) then a NUL-terminated path.
+            raw_name = data[pointer + 24 :].split(b"\0", 1)[0]
+            stem = PureWindowsPath(raw_name.decode("ascii", "replace")).stem
+            return stem or None
+    except (IndexError, ValueError):
+        return None
+    return None
 
 
 def read_cr3(regs_json: Path) -> int | None:
@@ -313,8 +382,19 @@ def derive_layout(
     from prep.snapshot_win import read_pe_image_base
 
     binary = Path(binary)
-    module = module or binary.stem
     notes: list[str] = []
+    # The module name the harness will pass to GetModuleBase. The PE's own recorded
+    # name wins over the filename, because a renamed executable still has to be found
+    # under the name the snapshot loaded it as (D-075).
+    if module is None:
+        recorded = pe_module_name(binary)
+        module = recorded or binary.stem
+        if recorded and recorded.lower() != binary.stem.lower():
+            notes.append(
+                f"the file is named {binary.stem!r} but the PE records itself as "
+                f"{recorded!r}; using the recorded name, which is what the snapshot "
+                f"loaded it as and what GetModuleBase must be given"
+            )
     image_base = read_pe_image_base(binary)
     rip = read_rip(regs_json)
     functions = _functions_from_export(

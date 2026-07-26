@@ -188,7 +188,7 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {{
   // The fuzz entry. Each hit delivers the next structure; an empty queue ends the
   // test-case.
   //
-  if (!g_Backend->SetBreakpoint(kFuzzEntry, [](Backend_t *Backend) {{
+  if (!g_Backend->SetBreakpoint({fuzz_entry_target}, [](Backend_t *Backend) {{
         if (GlobalState.Inputs.empty()) {{
           return Backend->Stop(Ok_t());
         }}

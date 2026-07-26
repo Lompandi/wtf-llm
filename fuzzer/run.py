@@ -360,7 +360,10 @@ class Campaign:
         # The backend goes in so the summaries say what their numbers count
         # (D-068): the same integer means edges on one backend and breakpoint hits
         # on another, and CP10 compares them.
-        tracker = CoverageTracker(backend=self.cfg.backend)
+        # `self.config`, not `self.cfg`. An AttributeError on a path nothing had
+        # exercised: rebuild_history only runs from write_artifacts, and the
+        # recorded campaigns went through a code path that skipped it (D-075).
+        tracker = CoverageTracker(backend=self.config.backend)
         if self.master is not None:
             for stats in self.master.snapshot_stats():
                 tracker.observe(stats)

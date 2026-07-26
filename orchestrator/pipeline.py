@@ -263,14 +263,68 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             return f"{path.name} is unreadable: {exc}"
-        if payload.get("peak_executions", 0) <= 0:
+        # EITHER signal. `peak_executions` comes from the master's stat lines, and
+        # D-033 established that wtf block-buffers stdout and never flushes it -- a
+        # 123-second run leaves a 0-byte master log while the fuzzer is healthily
+        # saving new-coverage testcases. So requiring it failed every healthy campaign,
+        # including the development target's, and this hook was enforcing the one signal
+        # `fuzzer/run.py` documents as unreliable (D-075).
+        #
+        # `new_coverage_events` is the filesystem signal: the master writes into
+        # outputs/ exactly when a testcase produced new coverage, and a file appearing
+        # on disk is not buffered. Zero of BOTH is what every worker dying in Init
+        # looks like; zero of just the first is normal.
+        executions = payload.get("peak_executions", 0)
+        coverage_events = payload.get("new_coverage_events", 0)
+        if executions <= 0 and coverage_events <= 0:
             return (
-                "the campaign executed ZERO test-cases. That is what every worker "
-                "dying in Init looks like -- check _NT_SYMBOL_PATH and that the "
-                "module resolves its breakpoints (D-023, D-042)"
+                "the campaign produced ZERO executions and ZERO new-coverage events. "
+                "That is what every worker dying in Init looks like -- check "
+                "_NT_SYMBOL_PATH, and that the harness can place its breakpoints "
+                "(a stripped target needs them by ADDRESS, and the module name has to "
+                "be the one the DUMP uses, not the filename on disk) (D-023, D-042, "
+                "D-075)"
             )
         if payload.get("ticks", 0) <= 0:
             return "the campaign recorded no ticks, so it never observed the master"
+        return None
+
+    def generated_code_matches_the_spec() -> str | None:
+        """The generated C++ must describe THIS run's InputSpec.
+
+        Replaces a byte comparison that produced a false failure the first time the
+        pipeline was run twice on equivalent input: codegen is a deterministic renderer,
+        so identical input gives identical output, and "byte-for-byte the file that was
+        already there" means the generator agreed with itself rather than that it did
+        not run. Same shape as stage 10 and the same reason (D-065).
+
+        What the comparison was standing in for is that the code on disk corresponds to
+        the spec on disk, so that is what this checks -- by name, which is the thing that
+        changes when the spec changes.
+        """
+        try:
+            spec = json.loads(spec_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return f"{spec_json.name} is unreadable: {exc}"
+
+        wanted = [spec.get("struct_name")] + [
+            f.get("name") for f in (spec.get("fields") or [])
+        ]
+        wanted = [w for w in wanted if w]
+        if not wanted:
+            return f"{spec_json.name} names no struct and no fields"
+
+        targets = [generated] + ([generated_module] if use_generated_harness else [])
+        for path in targets:
+            if not path.exists():
+                return f"{path.name} was not written"
+            text = path.read_text(encoding="utf-8", errors="replace")
+            missing = [name for name in wanted if name not in text]
+            if missing:
+                return (
+                    f"{path.name} does not mention {missing} from "
+                    f"{spec_json.name}, so it was generated from a different spec"
+                )
         return None
 
     def inputs_hold_a_seed() -> str | None:
@@ -580,6 +634,11 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
                 "--input-spec", str(spec_json),
                 "--cache", str(a2_db),
                 "--target-name", generated_target_name,
+                # For turning A2's static addresses into RVAs, so breakpoints are
+                # placed by ADDRESS. A stripped target has no symbols for dbgeng to
+                # resolve, and a name-resolved breakpoint then kills every worker in
+                # Init (D-075).
+                "--export", str(a2_json),
                 "--out", str(harness_json),
             ),
             needs=[entry_json, spec_json, a2_db],
@@ -612,6 +671,12 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
             produces=(
                 [generated, generated_module] if use_generated_harness else [generated]
             ),
+            # A deterministic renderer given the same spec writes the same bytes. That
+            # is agreement, not a no-op, and treating it as failure made a second run on
+            # one target impossible (D-065/D-075). The hook below checks the property
+            # the byte comparison stood in for.
+            output_may_be_unchanged=True,
+            verify=generated_code_matches_the_spec,
             note=(
                 "EDGE 14: the generated module is compiled by stage 10 and run by "
                 "stage 11, so the derived structure is what reaches the guest. The "
@@ -758,6 +823,68 @@ def _read_dotenv_value(dotenv: Path, name: str) -> str | None:
         if key.strip() == name:
             return value.strip().strip("'\"") or None
     return None
+
+
+def _same_dir(a: Path, b: Path) -> bool:
+    """Whether two paths are the same directory, following links."""
+    try:
+        return a.resolve() == b.resolve() or a.samefile(b)
+    except OSError:
+        return False
+
+
+def _link_state(state_dir: Path, canonical: Path, repo_root: Path) -> str | None:
+    """Make `targets/<name>/state` resolve to the supplied snapshot. Reason on failure.
+
+    A junction rather than a symlink on Windows: creating a symlink needs either
+    developer mode or elevation, and needing to elevate to fuzz a binary is not a
+    trade anybody should be asked to make. `mklink /J` needs neither.
+    """
+    if canonical.exists() or canonical.is_symlink():
+        if _same_dir(canonical, state_dir):
+            return None
+        return (
+            f"{canonical} already exists and is not the snapshot you passed "
+            f"({state_dir}). wtf resolves --state from the target directory, so these "
+            f"have to be the same place. Remove it, or use --target-name to pick a "
+            f"different target directory."
+        )
+
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        canonical.symlink_to(state_dir, target_is_directory=True)
+        print(
+            f"linked {_display(canonical, repo_root)} -> {state_dir}  "
+            f"(wtf resolves --state from the target directory)"
+        )
+        return None
+    except (OSError, NotImplementedError):
+        pass  # no symlink privilege; a junction needs none
+
+    if os.name == "nt":
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(canonical), str(state_dir)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            print(
+                f"linked {_display(canonical, repo_root)} -> {state_dir}  "
+                f"(junction; wtf resolves --state from the target directory)"
+            )
+            return None
+        detail = (result.stderr or result.stdout).strip()
+        return (
+            f"could not link {canonical} to your snapshot at {state_dir}: {detail}. "
+            f"wtf resolves --state from the target directory, so either move the "
+            f"snapshot there or create the link by hand: "
+            f"mklink /J \"{canonical}\" \"{state_dir}\""
+        )
+    return (
+        f"could not link {canonical} to your snapshot at {state_dir}. wtf resolves "
+        f"--state from the target directory, so link or move it: "
+        f"ln -s \"{state_dir}\" \"{canonical}\""
+    )
 
 
 def _config_describes(target_cfg: dict, binary: Path) -> bool:
@@ -983,6 +1110,22 @@ def check_prerequisites(config: PipelineConfig, stages: list[Stage]) -> list[str
             f"created {', '.join(created)} under "
             f"{_display(config.target_dir, config.repo_root)}"
         )
+
+    # THE SNAPSHOT HAS TO BE FINDABLE AT targets/<name>/state.
+    #
+    # wtf is launched with `--state` derived from the target directory, and section
+    # 13.1's per-target tree is what the campaign, the corpus and the crash watcher all
+    # resolve against. So a user who keeps their dump somewhere else -- which is the
+    # normal case, since a 1.8 GB mem.dmp does not belong in a repo -- got the whole
+    # analysis half of the pipeline working and then `PREFLIGHT: mem.dmp missing` (D-075).
+    #
+    # Linked, not copied: copying a multi-gigabyte dump per target is not a reasonable
+    # thing to do to somebody's disk. A junction needs no privileges on Windows.
+    canonical_state = config.target_dir / "state"
+    if config.state_dir.is_dir() and not _same_dir(config.state_dir, canonical_state):
+        problem = _link_state(config.state_dir, canonical_state, config.repo_root)
+        if problem:
+            problems.append(problem)
 
     if not config.state_dir.is_dir():
         problems.append(

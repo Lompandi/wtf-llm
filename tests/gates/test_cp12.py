@@ -1103,14 +1103,33 @@ def test_an_unchanged_artifact_is_only_forgiven_where_a_verify_hook_replaces_it(
             )
 
 
-def test_only_the_incremental_build_is_exempt():
-    """Pinned narrowly on purpose. The exemption exists for ONE reason -- Ninja
-    relinks nothing when no source changed -- and every other stage here produces
-    generated data, where identical output really does mean the tool did not run.
+def test_only_deterministic_regenerators_are_exempt():
+    """Pinned narrowly on purpose, and every member has to earn it.
 
-    This is the bug the flag was added for (D-065): stage 10 is deliberately never
-    skipped as up-to-date, so it always invokes the build, and the byte comparison
-    then failed it on every second run. Two anti-false-success rules cancelling out.
+    The exemption is for a tool that, given input it has already seen, correctly writes
+    the same bytes -- which is agreement, not a no-op. Two qualify:
+
+    * **10-build.** Ninja relinks nothing when no source changed. This is the bug the
+      flag was added for (D-065): stage 10 is deliberately never skipped as up-to-date,
+      so it always invokes the build, and the byte comparison then failed it on every
+      second run. Two anti-false-success rules cancelling out.
+    * **09-codegen.** A deterministic renderer of the InputSpec. Hit for real the first
+      time the pipeline ran twice on equivalent input -- "byte-for-byte the file that
+      was already there" for a header that was correct (D-075).
+
+    Everywhere else -- the Ghidra exports especially -- identical output really does mean
+    the tool did not run, which is what analyzeHeadless does while exiting 0 (D-026).
+
+    The exemption is not free: each of these must carry a `verify` hook checking the
+    property the byte comparison was standing in for. Asserted below rather than
+    trusted, because an exemption without a replacement check is just a hole.
     """
-    exempt = {s.key for s in _stages() if s.output_may_be_unchanged}
-    assert exempt == {"10-build"}, exempt
+    stages = _stages()
+    exempt = {s.key for s in stages if s.output_may_be_unchanged}
+    assert exempt == {"10-build", "09-codegen"}, exempt
+    for stage in stages:
+        if stage.output_may_be_unchanged:
+            assert stage.verify is not None, (
+                f"{stage.key} is exempt from the byte comparison and has no verify "
+                f"hook, so nothing checks it did its work"
+            )

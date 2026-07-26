@@ -521,9 +521,22 @@ BreakpointAction = Literal[
 class HarnessBreakpoint(BaseModel):
     """One breakpoint the generated Init installs."""
 
-    symbol: str  # "module!Function", resolved by wtf through dbgeng
+    symbol: str  # "module!Function" -- a LABEL once `rva` is set; see below
     purpose: BreakpointPurpose
     action: BreakpointAction
+    # WHERE THE BREAKPOINT GOES, as an offset from the module's base.
+    #
+    # Resolving by symbol needs dbgeng to know the name, which means the target needs a
+    # PDB. Stripped binaries are the normal case for this tool, and Ghidra names their
+    # functions `FUN_140001150` -- a label it invented, present in no symbol table. wtf
+    # then reports `Could not set a breakpoint at mytarget!FUN_140001150` and every
+    # worker dies in Init, which the campaign reports as zero executions (D-075).
+    #
+    # An RVA needs no symbols: wtf's own .cov loader computes
+    # `GetModuleBase(name) + Rva` for exactly this reason (utils.cc:366). `symbol` stays
+    # for the generated comments and the log lines, where a name -- even an invented one
+    # -- is what makes the output readable.
+    rva: int | None = None
     # `simulate_return` only: what the skipped function should appear to return.
     return_value: int | None = None
     rationale: str = ""
