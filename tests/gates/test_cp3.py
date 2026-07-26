@@ -23,6 +23,7 @@ Regenerate A1 with:
 from __future__ import annotations
 
 import json
+import pathlib
 import os
 import subprocess
 import sys
@@ -739,22 +740,110 @@ def test_program_name_is_truncated_to_the_kernel_comm_length():
     assert f"sym_path='{long_name}'" in plan["bkpt_source"]
 
 
-def test_the_interactive_cpu_step_is_named_in_the_instructions():
-    """The step that cannot be automated. `wait_for_cpu_regs_dump`
-    (gdb_fuzzbkpt.py:352-369) spins in an unbounded loop until regs.json appears,
-    and only the `cpu` command in the SERVER gdb writes it -- so omitting this from
-    the instructions makes the snapshot hang rather than fail.
+def test_the_cpu_step_is_automated_and_its_fallback_is_documented():
+    """The step that used to need a human, and the honest description of it now.
 
-    An earlier version of this module drove gdb itself and did not perform this
-    step at all: it would have hung until the timeout and then blamed the stimulus.
+    `wait_for_cpu_regs_dump` spins in an unbounded loop until regs.json appears, and
+    only the `cpu` command in the SERVER gdb writes it -- so if nothing runs `cpu`, the
+    snapshot HANGS rather than failing. That is why the instructions have to be right
+    about who runs it.
+
+    This test used to require the words "CANNOT BE AUTOMATED", which was the claim in
+    the module and was wrong: Ctrl+C is SIGINT and `cpu` is a line on stdin, so a FIFO
+    for stdin plus a recorded pid is all it took (D-062's mistake repeated -- an
+    accurate reading of the code, and a conclusion about the world the code did not
+    support).
+
+    What must survive is that a reader is told BOTH things: it is automatic, and what
+    to do when the trigger cannot find the server gdb -- because in that case the old
+    prompt appears and the snapshot waits forever for someone who is not watching.
     """
     steps = "\n".join(remaining_steps(_plan()))
     assert "cpu" in steps
+    assert "done for you" in steps, "the reader is not told it is automatic"
+    # The fallback, which is the case that hangs if it is not documented.
     assert "Ctrl+C" in steps
-    assert "CANNOT BE AUTOMATED" in steps
-    # And it must come last: doing it before the breakpoint is hit accomplishes
-    # nothing.
+    assert "gdb_server.pid" in steps and "gdb_server.fifo" in steps, (
+        "the fallback must name what the trigger looks for, or a reader cannot tell "
+        "why it did not fire"
+    )
+    assert "CANNOT BE AUTOMATED" not in steps, (
+        "this claim was false and is what stopped it being automated"
+    )
+    # Still discussed after the client is attached: the dump is meaningless before the
+    # breakpoint has been hit.
     assert steps.rindex("cpu") > steps.rindex("gdb_client.sh")
+
+
+def test_the_server_gdb_launcher_exposes_stdin_and_its_pid():
+    """The two things the trigger needs, in the script that has to provide them.
+
+    Without either, `snapshot_trigger.request_cpu_dump` falls back to printing the
+    manual instructions -- correct, but silently manual again. This is the pair that
+    keeps the automation from rotting: someone editing gdb_server.sh has to keep them.
+    """
+    script = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "linux_mode" / "qemu_snapshot" / "gdb_server.sh"
+    ).read_text(encoding="utf-8")
+    assert "mkfifo" in script, "gdb has no FIFO on stdin, so `cpu` cannot be sent"
+    assert "< ${FIFO}" in script, "the FIFO is created but not used as stdin"
+    assert "gdb_server.pid" in script, "gdb's pid is not recorded, so it cannot be signalled"
+    # A pipeline would make $! the last stage's pid, not gdb's -- the reason this
+    # script writes to vm.log and tails it instead of piping through tee.
+    assert "| tee vm.log" not in script, (
+        "piping gdb through tee makes $! the pid of tee, so gdb_server.pid would name "
+        "the wrong process and SIGINT would go to it"
+    )
+
+
+def test_the_trigger_falls_back_rather_than_signalling_a_guess(tmp_path):
+    """Never signal a pid it cannot verify.
+
+    Sending SIGINT to the wrong process is not recoverable, so every uncertain case
+    returns the manual instructions instead. Checked here because the failure mode is
+    invisible in the happy path.
+    """
+    import sys
+
+    sys.path.insert(
+        0,
+        str(
+            pathlib.Path(__file__).resolve().parents[2]
+            / "linux_mode" / "qemu_snapshot"
+        ),
+    )
+    import snapshot_trigger
+
+    # No pid file at all.
+    assert snapshot_trigger.server_pid(tmp_path) is None
+    assert not snapshot_trigger.can_trigger(tmp_path)
+    message = snapshot_trigger.request_cpu_dump(tmp_path, delay_s=0)
+    assert snapshot_trigger.MANUAL_INSTRUCTIONS in message
+
+    # A pid file that is not a number.
+    (tmp_path / snapshot_trigger.PID_FILENAME).write_text("not a pid")
+    assert snapshot_trigger.server_pid(tmp_path) is None
+    assert snapshot_trigger.MANUAL_INSTRUCTIONS in snapshot_trigger.request_cpu_dump(
+        tmp_path, delay_s=0
+    )
+
+    # A dead pid -- reused numbers are exactly why liveness is checked separately.
+    (tmp_path / snapshot_trigger.PID_FILENAME).write_text("999999999")
+    assert snapshot_trigger.server_pid(tmp_path) == 999999999
+    assert not snapshot_trigger.is_alive(999999999)
+    assert not snapshot_trigger.can_trigger(tmp_path)
+
+    # A live pid but no FIFO: nothing to send the command through, so still manual.
+    # This process is alive by definition, which makes it the honest way to test it.
+    import os
+
+    (tmp_path / snapshot_trigger.PID_FILENAME).write_text(str(os.getpid()))
+    assert snapshot_trigger.is_alive(os.getpid())
+    assert not snapshot_trigger.can_trigger(tmp_path)
+    message = snapshot_trigger.request_cpu_dump(tmp_path, delay_s=0)
+    assert snapshot_trigger.MANUAL_INSTRUCTIONS in message
+    assert "fifo" in message.lower()
 
 
 def test_the_stimulus_step_comes_after_the_breakpoint_is_installed():

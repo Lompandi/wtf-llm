@@ -350,7 +350,26 @@ class FuzzBkpt(gdb.Breakpoint):
         self.restore_orig_bytes()
 
         def wait_for_cpu_regs_dump():
-            print("In the QEMU tab, press Ctrl+C, run the `cpu` command")
+            # ASK THE SERVER GDB DIRECTLY, instead of asking the operator to.
+            #
+            # This printed "press Ctrl+C, run the `cpu` command" and then spun until
+            # regs.json appeared. Both of those actions are mechanical -- Ctrl+C is
+            # SIGINT, `cpu` is a line on stdin -- and this function is running at
+            # precisely the right moment, because it is what stopped the guest.
+            #
+            # snapshot_trigger falls back to printing the same instructions whenever
+            # the pid file or the FIFO is missing, so a server gdb started by hand or
+            # by an older script behaves exactly as it always did. It never raises:
+            # the guest is stopped at the fuzz breakpoint here, and an exception would
+            # lose the snapshot rather than degrade the experience.
+            try:
+                import snapshot_trigger
+
+                print(snapshot_trigger.request_cpu_dump())
+            except Exception as exc:  # noqa: BLE001 -- see above
+                print(f"could not drive the server gdb ({exc})")
+                print(f"In the QEMU tab, press Ctrl+C, run the `cpu` command")
+
             while not REGS_JSON_FILENAME.exists():
                 time.sleep(1)
 

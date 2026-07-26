@@ -7,6 +7,31 @@ export QEMU=${LINUX_MODE_BASE}qemu_snapshot/target_vm/qemu/build/qemu-system-x86
 export KERNEL=${LINUX_MODE_BASE}qemu_snapshot/target_vm/linux/arch/x86_64/boot/bzImage
 export IMAGE=${LINUX_MODE_BASE}qemu_snapshot/target_vm/image/bookworm.img
 
+# STDIN ON A FIFO, AND THE PID RECORDED.
+#
+# The one manual step in Linux snapshotting was pressing Ctrl+C in this tab and typing
+# `cpu` at the moment the guest stopped at the fuzz breakpoint. Ctrl+C is SIGINT and
+# `cpu` is a line on stdin, so with a FIFO for stdin and a pid to signal, the client
+# gdb can do both itself -- it already knows the moment, because it is the thing that
+# stopped the guest. See snapshot_trigger.py.
+#
+# `sleep infinity` holds the write end open so gdb never sees EOF on stdin and exits.
+# Output goes to vm.log and is tailed rather than piped through tee, because a pipeline
+# makes $! the pid of the last stage and the pid we need is gdb's.
+FIFO=gdb_server.fifo
+rm -f ${FIFO} gdb_server.pid
+mkfifo ${FIFO}
+sleep infinity > ${FIFO} &
+FIFO_HOLDER=$!
+TAIL_PID=""
+
+cleanup() {
+    kill ${FIFO_HOLDER} 2>/dev/null
+    if [ -n "${TAIL_PID}" ]; then kill ${TAIL_PID} 2>/dev/null; fi
+    rm -f ${FIFO} gdb_server.pid
+}
+trap cleanup EXIT
+
 gdb \
     -q \
     --ex "set pagination off" \
@@ -27,4 +52,15 @@ gdb \
     -net nic,model=e1000 \
     -nographic \
     -pidfile vm.pid \
-    2>&1 | tee vm.log
+    < ${FIFO} > vm.log 2>&1 &
+
+GDB_PID=$!
+echo ${GDB_PID} > gdb_server.pid
+echo "server gdb is pid ${GDB_PID}; stdin on ${FIFO}; output in vm.log"
+echo "the client interrupts it and runs 'cpu' itself -- no Ctrl+C needed"
+
+tail -f vm.log &
+TAIL_PID=$!
+
+wait ${GDB_PID}
+

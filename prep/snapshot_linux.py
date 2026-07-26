@@ -172,29 +172,45 @@ def ingest_state_dir(
     )
 
 
-# --- preparation: every mechanical step, and the one that cannot be done ---
+# --- preparation, and the step that used to need a human ---
 #
-# `PROCEDURE_NOTES` below prints six steps for a human. This does the mechanical
-# ones and prints the rest, because ONE OF THEM CANNOT BE AUTOMATED and an earlier
-# version of this module pretended otherwise.
-#
-# THE STEP THAT BLOCKS FULL AUTOMATION. Mid-snapshot, `FuzzBkpt.stop()` calls
-# `wait_for_cpu_regs_dump()` (gdb_fuzzbkpt.py:352-369), which prints
+# WHAT THIS SECTION USED TO SAY, and why it was wrong. It said one step "CANNOT BE
+# AUTOMATED": mid-snapshot, `FuzzBkpt.stop()` calls `wait_for_cpu_regs_dump()`, which
+# printed
 #
 #     In the QEMU tab, press Ctrl+C, run the `cpu` command
 #
-# and then spins in `while not REGS_JSON_FILENAME.exists(): time.sleep(1)` -- an
-# unbounded loop. `regs.json` is written only by the `cpu` command, `cpu` is
-# registered by gdb_qemu.py in the **server** gdb rather than the client one, and
-# nothing in gdb_qemu.py stops that gdb on its own. Reaching its prompt means
-# interrupting it from a terminal.
+# and then spun in `while not REGS_JSON_FILENAME.exists(): time.sleep(1)`. The
+# reasoning was: `regs.json` is written only by `cpu`; `cpu` is registered by
+# gdb_qemu.py in the **server** gdb, not the client one; nothing stops that gdb on its
+# own; therefore reaching its prompt means interrupting it from a terminal.
 #
-# This is the opposite of the Windows path, where hanging the work off the
-# breakpoint (section 14.2) removed the need for anyone to decide when to act.
-# Here the interactive step is real, so this module does the mechanical work and
-# states exactly what is left. The earlier version drove gdb anyway: it would have
-# hung in that loop until the timeout and then reported a stimulus problem -- the
-# one explanation guaranteed to be believed and wrong.
+# Every clause of that is true and the conclusion does not follow. **Ctrl+C is SIGINT
+# and `cpu` is a line on stdin.** Give the server gdb its stdin on a FIFO and record
+# its pid -- both one line of gdb_server.sh -- and the client can do exactly what the
+# operator did, at exactly the right moment, because the client is the thing that
+# stopped the guest. `linux_mode/qemu_snapshot/snapshot_trigger.py` does that.
+#
+# This is D-062 repeated: an accurate reading of the code, and a conclusion about the
+# world that the code did not support. "Nobody has automated this" and "this cannot be
+# automated" are different statements, and only the first one was evidenced.
+#
+# WHAT IS STILL TRUE. `regs.json` genuinely has to come from the server gdb -- it
+# needs QEMU's internal `CPUX86State`, and `lstar`, `star`, `sfmask`,
+# `kernel_gs_base`, `apic_base` and `xcr0` are MSRs that QEMU's monitor does not print
+# and the gdbstub does not expose. So the automation DRIVES the `cpu` command rather
+# than reimplementing it. Reimplementing would mean producing that file by an
+# unvalidated path, where one wrong field silently corrupts every later address
+# conversion.
+#
+# The manual path is preserved unchanged, and is what happens whenever the pid file or
+# the FIFO is absent.
+#
+# NOT VERIFIED END TO END. This host is Windows: no KVM, no guest image, no QEMU. The
+# trigger's logic is unit-tested and the shell script is syntax-checked, and neither of
+# those is the same as having taken a snapshot with it. Stated here rather than
+# discovered by the next person, because the last time this module claimed a Linux
+# capability it had not exercised, the claim was wrong in nine separate ways (D-064).
 
 LINUX_MODE = "linux_mode"
 QEMU_SNAPSHOT = "qemu_snapshot"
@@ -508,13 +524,21 @@ def remaining_steps(plan: dict[str, Any]) -> list[str]:
         ]
     steps += [
         "",
-        "# tab 1 again -- THE STEP THAT CANNOT BE AUTOMATED. When tab 3 prints",
-        '#     "In the QEMU tab, press Ctrl+C, run the `cpu` command"',
-        "#   press Ctrl+C in tab 1 and type:  cpu",
+        "# Nothing else to do. The CPU dump used to be a seventh step here -- press",
+        "# Ctrl+C in tab 1 and type `cpu` -- and it is now done for you: gdb_server.sh",
+        "# gives the server gdb its stdin on a FIFO and records its pid, and the client",
+        "# sends it SIGINT and `cpu` at the moment it stops the guest. That moment is",
+        "# the whole difficulty: the client knows it exactly and a person has to watch",
+        "# for it.",
         "#",
-        "# `cpu` is registered in the SERVER gdb (gdb_qemu.py) and is the only thing",
-        "# that writes regs.json. FuzzBkpt waits for that file in an unbounded loop,",
-        "# so skipping this hangs the snapshot instead of failing it.",
+        "# `cpu` still has to run in the SERVER gdb, because regs.json needs QEMU's",
+        "# internal CPUX86State -- lstar, star, sfmask, kernel_gs_base, apic_base and",
+        "# xcr0 are MSRs the monitor does not print. So the trigger drives that command",
+        "# rather than reimplementing it.",
+        "#",
+        "# If tab 3 still prints \"press Ctrl+C, run the `cpu` command\", the trigger",
+        "# could not find gdb_server.pid or gdb_server.fifo -- do it by hand, and check",
+        "# that tab 1 is running the current gdb_server.sh.",
     ]
     return steps
 
@@ -539,18 +563,26 @@ purpose-built QEMU VM driven by GDB (docs/DEVIATIONS.md D-010). From
 linux_mode/README.md:
 
   1. linux_mode/qemu_snapshot/setup.sh          -- build the target VM + kernel
-  2. a bkpt.py deriving from gdb_fuzzbkpt.py    -- name the break symbol + file
+  2. a bkpt.py deriving from gdb_fuzzbkpt.py    -- written for you by `prepare`
   3. ../qemu_snapshot/gdb_server.sh             -- start QEMU (one tab)
   4. target_vm/scp.sh <your binary>             -- copy the target into the guest
   5. ../qemu_snapshot/gdb_client.sh             -- attach GDB (another tab)
-  6. (gdb) cpu                                  -- dump the CPU state
+
+Step 6 used to be "press Ctrl+C in tab 1 and type `cpu`". It is now done for you:
+gdb_server.sh puts the server gdb's stdin on a FIFO and records its pid, and the
+client sends it SIGINT and `cpu` itself at the moment it stops the guest -- which is
+the moment it knows and you would have to guess. If either the pid file or the FIFO
+is missing, the old prompt appears and the old procedure still works.
 
 Before any of it, IN THE GUEST:
 
     sysctl -w kernel.randomize_va_space=0
 
-and carry state/symbol-store.json over from a Windows run -- wtf cannot produce
-it on a Linux host.
+symbol-store.json is written by the snapshotter itself -- `FuzzBkpt` builds it from
+`nm` output and gdb_fuzzbkpt.py moves it into state/. An earlier version of this text
+said it had to be carried over from a Windows run; that was a misreading of the
+`#ifdef LINUX` guard in wtf.cc, which is a property of the host wtf was BUILT for and
+not of what can produce the file (D-062).
 """
 
 

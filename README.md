@@ -133,9 +133,13 @@ python -m prep.snapshot_linux prepare \
 ```
 
 `prepare` writes the `bkpt.py` gdb sources, puts the ELF where `nm` and `readelf` will
-read it, and prints the remaining steps — including one that cannot be automated:
-mid-snapshot gdb asks you to press Ctrl+C in the QEMU tab and run `cpu`. `--dry-run`
-shows the plan without touching anything.
+read it, and prints the remaining steps. `--dry-run` shows the plan without touching
+anything.
+
+The CPU dump is automatic: `gdb_server.sh` gives the server gdb its stdin on a FIFO and
+records its pid, and the client sends it `SIGINT` and `cpu` at the moment it stops the
+guest. If the trigger cannot find `gdb_server.pid` or `gdb_server.fifo` it prints the
+old instructions instead — press Ctrl+C in the QEMU tab and run `cpu` — and waits.
 
 When the three artifacts exist:
 

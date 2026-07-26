@@ -127,8 +127,12 @@ python -m prep.snapshot_linux prepare \
 ```
 
 `prepare` 會寫出 gdb 要 source 的 `bkpt.py`、把 ELF 放到 `nm` 和 `readelf` 讀得到的
-位置，然後印出剩下的步驟 —— 包含一個沒辦法自動化的：快照做到一半 gdb 會要你在 QEMU
-那個 tab 按 Ctrl+C 然後下 `cpu`。`--dry-run` 會印出計畫但不動任何東西。
+位置，然後印出剩下的步驟。`--dry-run` 會印出計畫但不動任何東西。
+
+CPU dump 是自動的：`gdb_server.sh` 把 server gdb 的 stdin 接到 FIFO 並記下 pid，client
+在停住 guest 的那一刻自己送 `SIGINT` 和 `cpu` 過去。如果 trigger 找不到
+`gdb_server.pid` 或 `gdb_server.fifo`，它會印出原本的指示 —— 在 QEMU 那個 tab 按
+Ctrl+C 然後下 `cpu` —— 然後等。
 
 三個 artifact 都出現後：
 
