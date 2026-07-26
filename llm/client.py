@@ -440,6 +440,13 @@ class LlmClient:
         budget_tokens = int(max_tokens or params.get("max_tokens", 4096))
         max_retries = int(self.provider_config.get("max_retries", 3))
         backoff = float(self.provider_config.get("retry_backoff_s", 2.0))
+        # Rate limits get their own, much larger schedule: 20s, 40s, 60s by default.
+        # Bounded, because a caller waiting on a build stage would rather be told the
+        # endpoint is saturated than block indefinitely.
+        rate_limit_backoff = float(
+            self.provider_config.get("rate_limit_backoff_s", 20.0)
+        )
+        rate_limit_max_s = float(self.provider_config.get("rate_limit_max_wait_s", 60.0))
         last_error: Exception | None = None
 
         for attempt in range(1, max_retries + 1):
@@ -478,6 +485,20 @@ class LlmClient:
                 )
                 if attempt == max_retries:
                     break
+                # A RATE LIMIT is not a failure to retry the same way as a 500. The
+                # server is saying "come back later", so the wait has to be long enough
+                # to matter: `backoff * attempt` is 2s then 4s, which against a shared
+                # endpoint burns every attempt inside the window that is throttling and
+                # reports a hard failure for something that only needed waiting (D-075).
+                if getattr(exc, "rate_limited", False):
+                    wait = exc.retry_after_s or (rate_limit_backoff * attempt)
+                    wait = min(wait, rate_limit_max_s)
+                    print(
+                        f"  [rate limited] {model} -- waiting {wait:.0f}s "
+                        f"(attempt {attempt}/{max_retries})"
+                    )
+                    time.sleep(wait)
+                    continue
                 time.sleep(backoff * attempt)
                 continue
 

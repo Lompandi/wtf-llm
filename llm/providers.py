@@ -73,7 +73,30 @@ __all__ = [
 
 
 class ProviderError(RuntimeError):
-    pass
+    """A transport or server failure. Retryable, unlike ProviderRefusal.
+
+    Carries the HTTP status when there was one, because 429 is not the same kind of
+    failure as 500 and must not be retried the same way. A rate limit is the server
+    saying "come back later", often with `Retry-After` saying how much later; a 500 is
+    the server failing now. Treating them alike burned three attempts in six seconds
+    against a shared endpoint and reported a hard failure for something that only needed
+    waiting (D-075).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retry_after_s: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after_s = retry_after_s
+
+    @property
+    def rate_limited(self) -> bool:
+        return self.status_code == 429
 
 
 class ProviderRefusal(ProviderError):
@@ -137,6 +160,26 @@ class Provider(Protocol):
     ) -> RawCompletion: ...
 
     def close(self) -> None: ...
+
+
+def _http_detail(exc: Exception) -> dict:
+    """Status code and Retry-After from an httpx error, when it has a response.
+
+    A `Retry-After` may be seconds or an HTTP date; only the seconds form is read,
+    because the date form on a shared endpoint has never appeared here and guessing at a
+    parse would be inventing a delay.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return {}
+    detail: dict = {"status_code": response.status_code}
+    header = response.headers.get("retry-after") if response.headers else None
+    if header:
+        try:
+            detail["retry_after_s"] = float(header.strip())
+        except ValueError:
+            pass
+    return detail
 
 
 # --- OpenAI-compatible ----------------------------------------------------
@@ -206,7 +249,7 @@ class OpenAICompatibleProvider:
             response.raise_for_status()
             payload = response.json()
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
-            raise ProviderError(str(exc)) from exc
+            raise ProviderError(str(exc), **_http_detail(exc)) from exc
 
         choice = (payload.get("choices") or [{}])[0]
         message = choice.get("message") or {}
