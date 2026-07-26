@@ -325,18 +325,53 @@ def _recorded_tool(key: str, label: str, *, required: bool, fix: str) -> Finding
 
 
 def check_api_key() -> Finding:
-    """The key lives in .env, which is gitignored. Never in config/llm.yaml."""
+    """Report which PROVIDERS are usable, not whether one variable is set.
+
+    Any provider's key is enough -- the client uses whichever resolves, in config
+    order. Reporting a single hardcoded variable would tell someone with an
+    Anthropic key that they have no LLM access, which is the same
+    working-tool-reported-missing shape as D-050.
+    """
     config = _read_yaml(REPO_ROOT / "config" / "llm.yaml")
-    var = ((config.get("endpoint") or {}).get("api_key_env")) or "SNAPFUZZ_LLM_API_KEY"
-    if os.environ.get(var):
-        return Finding("LLM API key", True, f"{var} is set in the environment")
+    providers = config.get("providers") or {}
+    if not providers:
+        return Finding(
+            "LLM provider", False,
+            "config/llm.yaml declares no providers",
+            fix="restore the `providers` block; see llm/client.py",
+        )
+
     dotenv = REPO_ROOT / ".env"
-    if dotenv.exists() and var in dotenv.read_text(encoding="utf-8"):
-        return Finding("LLM API key", True, f"{var} in .env")
+    dotenv_text = dotenv.read_text(encoding="utf-8-sig") if dotenv.exists() else ""
+    dotenv_keys = {
+        line.split("=", 1)[0].strip()
+        for line in dotenv_text.splitlines()
+        if line.strip() and not line.strip().startswith("#") and "=" in line
+    }
+
+    usable: list[str] = []
+    wanted: list[str] = []
+    for name, provider in providers.items():
+        var = (provider or {}).get("api_key_env")
+        if not var:
+            continue
+        wanted.append(var)
+        if os.environ.get(var) or var in dotenv_keys:
+            usable.append(f"{name} ({var})")
+
+    if usable:
+        # The FIRST one is what will actually run, so name it rather than listing
+        # a set and leaving the reader to guess the precedence.
+        detail = f"{usable[0]} -- active"
+        if len(usable) > 1:
+            detail += f"; also configured: {', '.join(usable[1:])}"
+        return Finding("LLM provider", True, detail)
+
     return Finding(
-        "LLM API key", False, f"{var} is set neither in the environment nor in .env",
-        fix=f'echo {var}=sk-... >> .env     (.env is gitignored; never put the key '
-        f"in config/llm.yaml -- a gate test fails if you do)",
+        "LLM provider", False,
+        f"no key for any provider ({', '.join(wanted)})",
+        fix=f"echo {wanted[0]}=sk-... >> .env     (.env is gitignored; never put "
+        f"the key in config/llm.yaml -- a gate test fails if you do)",
     )
 
 

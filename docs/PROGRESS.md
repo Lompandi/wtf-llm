@@ -16,7 +16,7 @@ table and `arch/graph.yaml` agree, so they cannot drift apart.
 | 3 | Snapshot acquisition -> A1 | **PASS** | 2026-07-25 | **Scoped.** 19 tests; all four gate conditions met, but only edge 11 goes live — the *acquisition* path is unexercised, see the log below |
 | 4 | Fuzzer module + first real run (1 worker) | **PASS** | 2026-07-25 | 33 tests. 663 s run, 32 new-coverage events, harness validation passes. Edge 22 held pending — bochscpu ignores `.cov` (D-004) |
 | 4b | Distributed bring-up (>= 2 workers) | **PASS** | 2026-07-25 | **Scoped.** 13 tests. 4 workers, ~1450 exec/s (4× one worker), injected seed proven executed, kill/restart works. Edge 22 still pending — WHP is not enabled (D-036) |
-| 5 | LLM client | **PASS** | 2026-07-25 | 19 tests including live endpoint calls. All 5 roles answer; JSON round-trips into a contract; usage log and budget caps verified |
+| 5 | LLM client | **PASS** | 2026-07-26 | 19 tests including live endpoint calls; **40 after the multi-provider rework**. All roles answer; JSON round-trips into a contract; usage log and budget caps verified. Now three providers chosen by **key presence** -- Anthropic via the official SDK, OpenAI, and any OpenAI-compatible endpoint. The Anthropic path is not a URL swap: temperature is a 400 and is translated to `effort`, `system` is top-level, the response is blocks, and a policy decline is a 200 with empty content (D-063). Live tests still only cover nchc |
 | 6 | GhidraMCP + A2 + LLM entry selection | **PASS** | 2026-07-25 | 20 tests incl. live MCP + live LLM. A2 = 14 functions (closure) / 193 (module). **The LLM picked `ProcessPacket` from 84 candidates, matching ground truth exactly** |
 | 7 | Plateau detection + LLM seed gen | **PARTIAL** | 2026-07-25 | 48 tests. Four of five gate criteria met; the coverage-increase criterion is **not**, and is quantified rather than assumed — see the log below and docs/RESULTS.md. Edges 27/28/28b/29/10b held **pending** under RULE 3 |
 | 8 | Dedup, classification, replay, traces | **PASS** | 2026-07-25 | 46 tests. 53 crashes → **4 buckets** from 52 distinct fault addresses; 4/4 reproduced *and* deterministic on bochscpu with byte-identical traces; 4 traces all reaching the fuzz entry; pseudo-C for every bucket. No LLM in the path (negative control confirms the check fires) |
@@ -89,6 +89,122 @@ sub-edges), plus 3 derived edges recorded in [DEVIATIONS.md](DEVIATIONS.md).
 | 1000 | ghidra.analyze | ghidra.fuzz_entry_selection *(derived)* | 6 | live |
 
 ## Log
+
+### 2026-07-26 (17) — three LLM providers chosen by key presence, and Linux acquisition
+
+**Two features, and a correction that matters more than either.**
+
+**1. The client speaks to three providers, and the key decides which.** `providers`
+in `config/llm.yaml` replaces the single `endpoint` block; whichever provider's key
+resolves wins, in config order, overridable with `SNAPFUZZ_LLM_PROVIDER`. `nchc`
+stays first deliberately — every number in docs/RESULTS.md came from it, and
+reordering would silently re-attribute them.
+
+`llm/providers.py` holds the wire differences. Claude goes through the **official
+`anthropic` SDK** rather than an OpenAI-compatible shim, because it is not one:
+
+* **`temperature` is an HTTP 400** on the current Claude models, and all seven roles
+  here set one — so a naive port fails on the first call of every role. Dropping it
+  is also wrong: `input_struct` is at 0.0 because there is one correct answer and
+  `seed_gen` is at 0.9 because diversity is the point, and dropping both would make
+  the second behave like the first. It is **translated** to `output_config.effort`
+  instead (D-063).
+* `system` is a top-level field, not a message.
+* The response is a list of blocks, so `content[0].text` is wrong whenever the first
+  block is a `thinking` one — the default on Opus 5.
+* A policy decline is a **successful 200 with an empty content list**. Not
+  theoretical here: triage sends fault addresses and memory-corruption analysis,
+  exactly what the cyber classifiers screen. So `stop_reason` is read before
+  `content`, server-side fallbacks are requested by default, and a decline raises a
+  distinct `Refused` — "no verdict obtainable" must not collapse into "judged
+  benign", which would silently discard findings.
+
+Anthropic also enforces JSON schemas natively, so `complete_json` uses
+`output_config.format` there and skips the ask-for-JSON-and-strip-fences path that
+the OpenAI-compatible providers still need.
+
+**The config reshape broke three modules**, because five places each read the config
+themselves and two had independently reimplemented the same `.env` reader (D-064).
+One resolver now owns the shape — with `orchestrator/pipeline.py` deliberately
+excepted, because a CP12 test enforces its "imports no LLM client" claim and caught
+that same mistake once already.
+
+**2. Linux snapshot preparation — written twice, because the first version did not
+work.** `prep/snapshot_linux.py prepare` does the mechanical steps and prints the
+rest; `verify` checks the three artifacts afterwards.
+
+The first version claimed to drive `linux_mode` end to end. An adversarial review
+found it could not, and the reason is structural rather than a bug: mid-snapshot
+`FuzzBkpt.stop()` calls `wait_for_cpu_regs_dump()`, which prints *"In the QEMU tab,
+press Ctrl+C, run the `cpu` command"* and spins in an unbounded loop until
+`regs.json` appears. Only `cpu` writes that file, `cpu` is registered in the
+**server** gdb, and nothing stops that gdb by itself. My version never performed the
+step — so it would have hung until the timeout and then reported a stimulus problem,
+which is the one explanation guaranteed to be believed and wrong.
+
+Eight more mechanical defects came out of the same review, each of which would have
+failed silently: `sym_path` is read host-side by `nm`/`readelf` but the ELF was only
+copied into the guest (bkpt.py raises inside gdb, gdb keeps running with no
+breakpoint); `program_name` is compared against `task->comm`, a `char[16]`, so any
+name over 15 characters never matches; `write_to_store` merges rather than truncates,
+so a retry ships the previous binary's symbols; the client gdb has no `-batch` so it
+never exits; the server's stdout was a pipe nobody drained, which stalls the guest's
+serial console at 64 KB; `terminate()` reached bash rather than gdb or QEMU, leaving
+an orphan VM on `/dev/kvm`; the stimulus was started before the breakpoint existed;
+and `check-host` tested `(target_vm / "image").is_dir()` — a directory **tracked in
+git**, so the check could never fire and a fresh clone was told it could acquire.
+That last one is D-057's rule again: existence is not evidence, directories included.
+
+What survives is smaller and true. `prepare` validates the host properly, refuses to
+overwrite a snapshot, copies the ELF where `nm` will read it, clears the state that
+would be merged into, writes `bkpt.py` with the comm-truncated name, and prints the
+remaining steps in order with the interactive one marked. It still knows
+`module_base`, because `FuzzBkpt` takes `target_base` and `prepare` sets it, so the
+reported `ingest` command comes with it filled in rather than as an exercise.
+
+**Also never exercised** — no Linux guest here either — so what is tested is the
+plan, the generated `bkpt.py`, each refusal, and that the instructions name the `cpu`
+step. A test reads `target_base`'s default back out of `gdb_fuzzbkpt.py` so our
+constant and wtf's cannot drift.
+
+**The review is worth recording as process, not just outcome.** Five reader agents
+over the diff found 46 candidates; the verification pass then died on an
+organisation spend limit, so `confirmed: []` came back — which is *not* the same as
+"nothing was real", and treating it that way would have shipped all of the above. I
+verified the two most severe by hand instead. A verifier that fails must not read as
+a verifier that passed.
+
+**3. The correction: I believed an error message over the code.** Both
+`prep/snapshot_linux.py` and the README said `symbol-store.json` "cannot be produced
+on Linux — generate it from Windows first", citing `wtf.cc:195-201`. The citation is
+accurate and the conclusion was wrong: that branch fires when the file is *absent*,
+and `linux_mode` writes it while taking the snapshot (`nm` →
+`gdb_utils.write_to_store` → moved into `state/` at `gdb_fuzzbkpt.py:377-380`).
+
+RULE 2 says the source wins over the document, and the source *was* read — the line
+numbers are right. What was read was an **error message**, which is a statement
+about the case where it fires, not about the world (D-062). Corrected in both
+places, with the wording pinned by a test so it cannot regress to the
+quotable-but-wrong version.
+
+**Anthropic fixes from the same review**, all confirmed against the API contract
+rather than guessed: native JSON is **off by default** (`output_config.format`
+requires `additionalProperties: false` on every object and rejects the constraints
+pydantic emits, and getting it wrong is a 400 on every structured call, so the
+proven prompted path runs until someone verifies the translation live);
+`temperature: 0.0` maps to `high` rather than `xhigh`, because thinking is billed
+against `max_tokens` and the 8192-16384 budgets here are sized for a JSON answer;
+`display: "summarized"` is requested so the reasoning-length diagnostic can be
+non-zero; and `close()` closes the SDK client instead of dropping the handle.
+
+One dead test found too: `test_cp0`'s inline-api_key check read `cfg["endpoint"]`,
+which stopped existing — so it compared `None` to `(None, "")` and passed
+unconditionally. A test whose entire job is to catch a pasted key had lost the
+ability to fail.
+
+Suite: **471 passed, 12 skipped** (up from 424; 47 new tests, the Anthropic ones
+against a fake SDK so the request shape and response reading are checked without
+spending allocation or needing a key).
 
 ### 2026-07-26 (16) — snapshot acquisition automated, and setup collapsed to one command
 

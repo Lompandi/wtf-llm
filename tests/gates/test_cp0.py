@@ -399,11 +399,17 @@ def test_no_secrets_committed_in_config() -> None:
     """
     text = (REPO_ROOT / "config" / "llm.yaml").read_text(encoding="utf-8")
     cfg = yaml.safe_load(text)
-    api_key = (cfg.get("endpoint") or {}).get("api_key")
-    assert api_key in (None, ""), (
-        "config/llm.yaml carries an inline api_key; it must come from the "
-        "environment variable named by endpoint.api_key_env"
-    )
+    # EVERY provider, not one `endpoint` block. This read `cfg["endpoint"]`, which
+    # stopped existing when the config became multi-provider -- so it resolved to
+    # None, compared None to (None, ""), and passed unconditionally. A test whose
+    # whole job is to catch a pasted key had stopped being able to fail.
+    providers = cfg.get("providers") or {}
+    assert providers, "config/llm.yaml declares no providers"
+    for name, provider in providers.items():
+        assert (provider or {}).get("api_key") in (None, ""), (
+            f"provider {name} carries an inline api_key; it must come from the "
+            f"environment variable named by its api_key_env"
+        )
     assert not re.search(r"\bsk-[A-Za-z0-9]{16,}", text), (
         "config/llm.yaml looks like it contains an API key"
     )

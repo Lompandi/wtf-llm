@@ -44,7 +44,39 @@ python -m prep.snapshot_win ingest --state targets\snapfuzz\state `
     --out artifacts\a1_snapshot.json
 ```
 
-Acquisition: see [GUEST-VM.md](GUEST-VM.md).
+Windows acquisition: see [GUEST-VM.md](GUEST-VM.md). Linux:
+
+```bash
+python -m prep.snapshot_linux check-host        # what is missing on this host
+
+python -m prep.snapshot_linux prepare \
+    --target-name mytarget --binary ./mytarget --break-at parse_packet \
+    --stimulus '/root/mytarget &'               # --dry-run to see it first
+
+python -m prep.snapshot_linux ingest --state targets/mytarget/state \
+    --module mytarget --module-base 0x555555554000 --ghidra-image-base 0x100000 \
+    --entry-runtime-addr 0x5555555551a9 --randomize-va-space 0
+```
+
+`prepare` writes `bkpt.py`, puts the ELF where `nm`/`readelf` will read it, clears
+stale state, and prints the remaining steps — including the interactive `cpu` step in
+the server gdb, which cannot be automated and which the snapshot hangs without. It
+reports the ingest command with `--module-base` filled in, because `FuzzBkpt`'s
+`target_base` — which `prepare` sets — *is* that value.
+
+## Choosing a provider
+
+Every LLM stage uses whichever provider's key is set, in `config/llm.yaml` order. To
+pin one for a single command:
+
+```bash
+SNAPFUZZ_LLM_PROVIDER=anthropic python -m prep.entry_select ...
+```
+
+Each role maps a model per provider, so `entry_select` on `anthropic` is
+`claude-opus-5` and on `nchc` is `ais3/nemotron-cascade-2-30b`. A role with no entry
+for the active provider is an error, never a default — a model nobody chose is how a
+campaign gets attributed to the wrong one (D-056).
 
 ## LLM derivation
 

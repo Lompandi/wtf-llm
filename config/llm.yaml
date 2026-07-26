@@ -1,24 +1,67 @@
 # LLM backend configuration (CLAUDE.md section 7).
 #
-# VERIFIED 2026-07-25 against the live endpoint. Every value below was
-# confirmed by calling it, not read off a README -- see docs/ENVIRONMENT.md
-# and docs/DEVIATIONS.md D-029/D-030.
+# THE TOKEN NEVER LIVES IN THIS FILE. Each provider names an environment
+# variable; `.env` is gitignored and a gate test fails if a key is pasted here.
 #
-# The token NEVER lives in this file. llm/client.py reads it from the
-# environment variable named by endpoint.api_key_env; `.env` is gitignored.
+# WHICH PROVIDER RUNS IS DECIDED BY WHICH KEY IS PRESENT. `providers` below is
+# tried in order and the first one whose key resolves wins, so a machine with
+# only an Anthropic key and a machine with only the NCHC key both work from this
+# same file with no edit and no flag. Override deliberately with
+# SNAPFUZZ_LLM_PROVIDER=<name>, or --provider on the tools that take it.
+#
+# Order matters and is not alphabetical: nchc is first because every measured
+# number in docs/RESULTS.md came from it. Putting a newly-added provider ahead of
+# it would silently change which models produced a comparison.
 
-endpoint:
-  base_url: https://llm-api.zoolab.org/v1
-  chat_completions_path: /chat/completions # base_url already ends in /v1
-  models_path: /models
-  api_key_env: SNAPFUZZ_LLM_API_KEY
-  api_key: null # MUST stay null -- the gate fails if a key is pasted here
-  auth_scheme: bearer # confirmed: Authorization: Bearer sk-...
-  openai_compatible: true # confirmed: /v1/models and /v1/chat/completions
-  timeout_s: 300 # reasoning models take 20s+; see max_tokens note below
-  max_retries: 3
-  retry_backoff_s: 2.0
-  stream: false
+providers:
+  nchc:
+    kind: openai_compatible
+    # VERIFIED 2026-07-25 by calling it, not read off a README -- see
+    # docs/ENVIRONMENT.md and docs/DEVIATIONS.md D-029/D-030.
+    base_url: https://llm-api.zoolab.org/v1
+    chat_completions_path: /chat/completions # base_url already ends in /v1
+    models_path: /models
+    api_key_env: SNAPFUZZ_LLM_API_KEY
+    api_key: null # MUST stay null -- the gate fails if a key is pasted here
+    auth_scheme: bearer # confirmed: Authorization: Bearer sk-...
+    timeout_s: 300 # reasoning models take 20s+; see the max_tokens note below
+    max_retries: 3
+    retry_backoff_s: 2.0
+
+  anthropic:
+    kind: anthropic
+    # Native Messages API through the official `anthropic` SDK, NOT an
+    # OpenAI-compatible shim: different auth header, `system` as a top-level
+    # field, content returned as blocks, and no temperature. See llm/providers.py
+    # for the four differences that each break a naive port.
+    api_key_env: ANTHROPIC_API_KEY
+    api_key: null
+    base_url: null # only for a gateway/proxy; the SDK's default is correct
+    timeout_s: 600 # thinking is on by default and long tasks run minutes
+    max_retries: 2 # the SDK retries 429/5xx itself
+    # Ask the API to re-run a policy-declined request on a fallback model.
+    # ON by default for this project specifically: triage sends fault addresses,
+    # register dumps and memory-corruption analysis, which is exactly what the
+    # cyber classifiers screen. Without this a decline loses the verdict.
+    request_fallbacks: true
+    # `output_config.format` (API-enforced JSON schema) instead of asking for JSON
+    # in the prompt. OFF until someone confirms it against the live API: Anthropic
+    # requires `additionalProperties: false` on every object and rejects the
+    # numeric/string constraints pydantic emits, and getting that wrong is a 400 on
+    # every structured call. llm/providers.py:anthropic_json_schema does the
+    # translation; the prompted path is what runs until this is true.
+    native_json: false
+
+  openai:
+    kind: openai_compatible
+    base_url: https://api.openai.com/v1
+    chat_completions_path: /chat/completions
+    models_path: /models
+    api_key_env: OPENAI_API_KEY
+    api_key: null
+    timeout_s: 300
+    max_retries: 3
+    retry_backoff_s: 2.0
 
 # CRITICAL, and the reason several max_tokens values below look large.
 #
@@ -32,20 +75,43 @@ endpoint:
 #   gemma-4-12b  max_tokens=4000 -> finish=stop,   5737 reasoning chars, correct JSON
 #   gemma-4-26b  max_tokens=4000 -> finish=stop,  10682 reasoning chars, correct JSON
 #
-# llm/client.py MUST therefore treat `content is None` and
-# `finish_reason == "length"` as errors worth retrying with a larger budget,
-# never as an empty answer.
+# The same failure exists on Anthropic under a different name: thinking is on by
+# default and billed against `max_tokens`, so an exhausted budget yields
+# `stop_reason: "max_tokens"` with truncated or absent text. llm/client.py treats
+# both as retryable with a doubled budget, never as an empty answer.
 response_handling:
   content_may_be_null: true
   treat_length_finish_as_error: true
-  # Strip ``` fences before validating against a pydantic model (CP5).
+  # Strip ``` fences before validating against a pydantic model (CP5). Skipped
+  # automatically on providers that enforce the schema natively -- Anthropic's
+  # output_config.format -- because there is no fence to strip.
   strip_code_fences: true
 
 # Roles, never model names, are what llm/client.py takes as an argument
 # (section 7.2). Swapping a model must not need a code change.
+#
+# `models` maps the role to one model PER PROVIDER. A role with no entry for the
+# active provider is an error naming the role and the provider, never a silent
+# fallback to some default -- picking a model the operator did not choose is how
+# a campaign ends up attributing results to the wrong thing (D-056).
+#
+# `temperature` is honoured on OpenAI-compatible providers and TRANSLATED on
+# Anthropic, where sending it is an HTTP 400 on the current models. The mapping
+# is temperature -> output_config.effort: 0.0 and 0.2 become `high`, and 0.7-0.9
+# becomes `medium` (diversity was the goal, and on Claude that comes from
+# independent samples instead -- which is how the seed-gen sidecar already works).
+#
+# 0.0 maps to `high` rather than `xhigh` because thinking is on by default and
+# billed against `max_tokens`, which caps thinking and text together. The budgets
+# below are sized for a JSON answer; at xhigh the budget can go entirely on
+# thinking, and the client then pays for two calls to get one. Raise both together
+# if you want more depth.
 roles:
   seed_gen:
-    model: ais3/nemotron-cascade-2-30b
+    models:
+      nchc: ais3/nemotron-cascade-2-30b
+      anthropic: claude-opus-5
+      openai: null # set to a model confirmed against GET /v1/models
     temperature: 0.9 # diversity matters more than precision here
     # 16384, not 4096. On the real seed-gen prompt this model spends 28k-60k
     # CHARS of reasoning before writing a single seed, and reasoning is billed
@@ -61,7 +127,10 @@ roles:
       task correctly in 1.9s. Since the stated rationale was speed, the faster
       model serves the intent better. See D-030.
   entry_select:
-    model: ais3/nemotron-cascade-2-30b
+    models:
+      nchc: ais3/nemotron-cascade-2-30b
+      anthropic: claude-opus-5
+      openai: null
     temperature: 0.2
     max_tokens: 8192
     why: >-
@@ -71,7 +140,10 @@ roles:
       llama-3.3-70b as failing on all four coding agents, so the alternative
       the section already sanctions is the safer default. See D-029.
   input_struct:
-    model: ais3/nemotron-cascade-2-30b
+    models:
+      nchc: ais3/nemotron-cascade-2-30b
+      anthropic: claude-opus-5
+      openai: null
     # 0.0, unlike entry_select's 0.2 and seed_gen's 0.9. There is exactly ONE
     # correct answer to "what shape is this parser's input" -- the target has one
     # wire format -- so sampling diversity buys nothing and costs correctness.
@@ -86,15 +158,20 @@ roles:
       because this is the same reasoning model that spends 28k-60k characters
       thinking before it answers (D-043).
   harness_derive:
-    # The 550B, not the 30B that input_struct uses. This is the hardest reasoning
-    # task in the pipeline: it has to work out which functions are I/O noise, where
-    # a test-case is finished, and what is non-deterministic -- from decompiler
-    # output, for a target it has never seen. Getting it wrong produces a harness
-    # that RUNS and reports coverage while never delivering input, which is the
-    # silent failure CP4's trace validation exists to catch.
-    model: ais3/nemotron-3-ultra-550b
-    # 0.0 for the same reason as input_struct: there is one right answer about how
-    # a given binary must be driven, so sampling diversity only costs correctness.
+    models:
+      # The 550B, not the 30B that input_struct uses. This is the hardest
+      # reasoning task in the pipeline: it has to work out which functions are
+      # I/O noise, where a test-case is finished, and what is non-deterministic
+      # -- from decompiler output, for a target it has never seen. Getting it
+      # wrong produces a harness that RUNS and reports coverage while never
+      # delivering input, which is the silent failure CP4's trace validation
+      # exists to catch.
+      nchc: ais3/nemotron-3-ultra-550b
+      anthropic: claude-opus-5
+      openai: null
+    # 0.0 for the same reason as input_struct: there is one right answer about
+    # how a given binary must be driven, so sampling diversity only costs
+    # correctness.
     temperature: 0.0
     max_tokens: 16384
     why: >-
@@ -104,7 +181,14 @@ roles:
       ended is judgement over lossy pseudo-C, not lookup. Runs once per target, so
       the cost is irrelevant next to a human doing it.
   crash_prefilter:
-    model: ais3/gemma-4-26b
+    models:
+      nchc: ais3/gemma-4-26b
+      # Left at opus-5 even though this role exists to be the CHEAP pass before
+      # the expensive one. `claude-haiku-4-5` is what the role's purpose implies
+      # and is a one-word change -- but which model to run is the operator's
+      # decision, not a default this file should make on cost grounds.
+      anthropic: claude-opus-5
+      openai: null
     temperature: 0.0
     max_tokens: 8192 # verbose reasoning model -- 10.7k chars measured
     why: >-
@@ -112,19 +196,29 @@ roles:
       volume, so its ~22s latency is acceptable; the large budget is mandatory,
       not generous, because of the reasoning-token behaviour above.
   triage:
-    model: ais3/nemotron-3-ultra-550b
+    models:
+      nchc: ais3/nemotron-3-ultra-550b
+      anthropic: claude-opus-5
+      openai: null
     temperature: 0.0
     max_tokens: 16384
     why: >-
       Strongest reasoning, applied where judgment matters. Verified to return
-      clean JSON with no reasoning_content and very low latency.
+      clean JSON with no reasoning_content and very low latency. On Anthropic
+      this is the role most likely to meet a policy decline -- it sends fault
+      addresses and memory-corruption analysis -- so providers.anthropic
+      requests server-side fallbacks.
   dspy_bootstrap:
-    model: ais3/nemotron-cascade-2-30b
+    models:
+      nchc: ais3/nemotron-cascade-2-30b
+      anthropic: claude-opus-5
+      openai: null
     temperature: 0.7
     max_tokens: 8192
     why: cheap demo generation for DSPy optimisation (CP9)
 
-# All seven ids confirmed against GET /v1/models on 2026-07-25.
+# All seven ids confirmed against GET /v1/models on 2026-07-25 (nchc). The
+# Anthropic ids are fixed aliases with no date suffix.
 models:
   ais3/llama-3.1-8b:
     context: 131072
@@ -142,6 +236,23 @@ models:
     note: "agent matrix: failed on all four agents; fine single-shot here"
   ais3/nemotron-3-ultra-550b:
     context: 262144
+  claude-opus-5:
+    context: 1000000
+    max_output: 128000
+    reasoning_model: true # thinking is ON by default and billed against max_tokens
+    note: "no temperature/top_p/top_k -- sending them is a 400"
+  claude-sonnet-5:
+    context: 1000000
+    max_output: 128000
+    reasoning_model: true
+  claude-haiku-4-5:
+    context: 200000
+    max_output: 64000
+  claude-opus-4-8:
+    context: 1000000
+    max_output: 128000
+    reasoning_model: true
+    note: "the fallback target for a policy decline on opus-5"
 
 # A safety classifier, NOT part of this pipeline (section 7.2). Listed only so
 # nobody wires it in by accident.
@@ -153,6 +264,10 @@ excluded_models:
 # crashes -- that is what dedup and summarisation are for. GATE 1 measured
 # 1113 crash events collapsing to 38 files that are probably ONE bug (D-024),
 # which is exactly how an allocation gets burned.
+#
+# The cap is shared across providers and counted per process. An Anthropic key
+# IS metered per token, so the cap stops being merely a guard rail there --
+# review it before pointing a long campaign at a paid provider.
 budget:
   usage_log: logs/llm_usage.jsonl
   max_total_calls: 5000

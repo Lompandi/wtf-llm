@@ -17,7 +17,17 @@ pytest>=8.0            # the interface gates (RULE 3)
 loguru>=0.7            # structured logging with a clock=fast|slow field
 
 # --- LLM client (CP5) ---
-httpx>=0.27            # HTTP client for the OpenAI-compatible endpoint
+httpx>=0.27            # OpenAI-compatible providers (NCHC, OpenAI)
+anthropic>=0.70        # the Anthropic provider, via the official SDK not raw HTTP:
+                       # it owns the auth and anthropic-version headers, typed
+                       # errors, and retry -- none of which this project should
+                       # re-derive. Only needed if you use that provider.
+                       #
+                       # The floor matters: `output_config` and the server-side
+                       # `fallbacks` parameter are recent, and Stainless-generated
+                       # create() signatures enumerate body params explicitly, so
+                       # an older SDK raises TypeError rather than sending them.
+                       # Raise this if a call fails on an unexpected keyword.
 
 # --- crash classification (CP8) ---
 capstone>=5.0          # disassembly around a fault address

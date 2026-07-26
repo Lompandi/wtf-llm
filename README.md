@@ -30,7 +30,7 @@ py -3.11 -m venv .venv
   [  ok   ] JDK                java 21 at C:\Program Files\Eclipse Adoptium\jdk-21...
   [  ok   ] Ghidra             D:\tools\ghidra_12.1.2_PUBLIC
   [  ok   ] wtf                D:\wtf-llm\src\build\wtf.exe
-  [  ok   ] LLM API key        SNAPFUZZ_LLM_API_KEY in .env
+  [  ok   ] LLM provider       nchc (SNAPFUZZ_LLM_API_KEY) -- active
   [  ok   ] symbolizer-rs      D:\tools\symbolizer-rs\symbolizer-rs.exe
   [  ok   ] kd.exe             C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\kd.exe
   [  ok   ] 0vercl0k/snapshot  D:\tools\snapshot\snapshot.dll
@@ -38,14 +38,19 @@ py -3.11 -m venv .venv
                                -> run as administrator, or join 'Hyper-V Administrators'
 ```
 
-The LLM key goes in `.env`:
+The LLM key goes in `.env`. **Whichever provider's key you set is the one that runs** —
+Claude, OpenAI, or any OpenAI-compatible endpoint:
 
 ```
-SNAPFUZZ_LLM_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...      # Claude, via the official SDK
+OPENAI_API_KEY=sk-...             # OpenAI
+SNAPFUZZ_LLM_API_KEY=sk-...       # any OpenAI-compatible endpoint
 ```
 
-Needs Python 3.11+, JDK 21+, a C++ toolchain, Ghidra, and an OpenAI-compatible LLM
-endpoint. Taking your own snapshots also needs Hyper-V, `kd.exe` from the Windows SDK,
+With more than one set, the order in `config/llm.yaml` decides; override with
+`SNAPFUZZ_LLM_PROVIDER=anthropic`. Each role maps a model per provider there.
+
+Needs Python 3.11+, JDK 21+, a C++ toolchain, Ghidra, and one provider key. Taking your own snapshots also needs Hyper-V, `kd.exe` from the Windows SDK,
 [0vercl0k/snapshot](https://github.com/0vercl0k/snapshot) and a guest VM
 ([docs/GUEST-VM.md](docs/GUEST-VM.md)).
 
@@ -140,21 +145,37 @@ Each stage runs standalone too: [docs/STAGES.md](docs/STAGES.md).
 
 ## Linux binaries
 
-ELF targets work. The snapshot is taken with wtf's own `linux_mode/` scripts
-(QEMU + GDB, user-mode ELF snapshotting) rather than the KD path above.
-
-In the guest, before snapshotting:
+ELF targets work. The snapshot comes from wtf's own `linux_mode/` scripts (QEMU + GDB,
+user-mode ELF snapshotting) rather than the KD path above, and it needs a Linux host
+with KVM. Build the guest once:
 
 ```bash
-sysctl -w kernel.randomize_va_space=0
+cd linux_mode/qemu_snapshot && ./setup.sh     # builds QEMU, a kernel and a disk image
 ```
 
-Take the snapshot per [`linux_mode/README.md`](linux_mode/README.md): `setup.sh` builds
-the target VM, `scp` your binary in, write a `bkpt.py` naming the break symbol, then
-`gdb_server.sh` and `gdb_client.sh`. Bring `state/symbol-store.json` from a Windows
-run — wtf cannot generate it on a Linux host.
+Then check the host and prepare the snapshot:
 
-Then ingest and run the rest:
+```bash
+python -m prep.snapshot_linux check-host
+
+python -m prep.snapshot_linux prepare \
+    --target-name mytarget --binary ./mytarget --break-at parse_packet \
+    --stimulus '/root/mytarget &'
+```
+
+`prepare` does the mechanical work — writes the `bkpt.py` gdb sources, puts the ELF
+where `nm` and `readelf` will find it, clears stale state, refuses to overwrite an
+existing snapshot — and prints the remaining steps in order, including the one that
+**cannot** be automated: mid-snapshot, gdb asks you to press Ctrl+C in the QEMU tab
+and run `cpu`, and only that writes `regs.json`. `--dry-run` shows the plan without
+touching anything.
+
+Unlike the Windows path, no amount of scripting removes that step: `cpu` lives in the
+server gdb and nothing stops it on its own. When the three artifacts exist:
+
+```bash
+python -m prep.snapshot_linux verify --target-name mytarget
+```
 
 ```bash
 python -m prep.snapshot_linux ingest --state targets/mytarget/state \
@@ -162,12 +183,16 @@ python -m prep.snapshot_linux ingest --state targets/mytarget/state \
     --entry-runtime-addr 0x5555555551a9 --randomize-va-space 0 \
     --out artifacts/a1_snapshot.json
 
-python -m orchestrator.pipeline --binary mytarget \
+python -m orchestrator.pipeline --binary ./mytarget \
     --state-dir targets/mytarget/state --target-name mytarget \
     --from 08 --workers 2 --minutes 15
 ```
 
-`python -m prep.snapshot_linux notes` prints the procedure.
+Two things to know. Ingest refuses unless ASLR is off — with it on, `module_base` is one
+sample of a moving value and every address conversion built on it is quietly wrong, so
+set `kernel.randomize_va_space=0` in the guest. And the pipeline's stage 07 is
+Windows-only, so on Linux you run ingest yourself and continue with `--from 08`.
+`python -m prep.snapshot_linux notes` prints the manual procedure.
 
 ## How it works
 

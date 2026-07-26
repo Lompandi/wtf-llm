@@ -1392,3 +1392,98 @@ exhaust a global array — the exact thing the frontier pointed at. A6 records e
 global's address, size, and the gap to the next symbol, produced by the same
 `prep/ghidra_headless.py` pass (edge 10b).
 
+### 14.7 Three LLM providers, chosen by which key exists
+
+§7 describes one OpenAI-compatible endpoint. There are now three providers in
+`config/llm.yaml`, and **which one runs is decided by which API key resolves**, in
+config order, overridable with `SNAPFUZZ_LLM_PROVIDER`. Roles map a model *per
+provider*; a role with no entry for the active provider is an error, never a
+default — a model nobody chose is how a campaign gets attributed to the wrong one
+(D-056).
+
+**Claude is not an OpenAI-compatible endpoint with a different URL.** Four things
+break a naive port, and the first one breaks every role:
+
+| | What happens |
+|---|---|
+| `temperature` / `top_p` / `top_k` | **HTTP 400** on the current models. All seven roles set one. |
+| `system` | Top-level field, not a `{"role": "system"}` message (that is a separate, model-gated feature). |
+| Response | A **list of blocks**. `content[0].text` is wrong whenever the first block is `thinking` — the default on Opus 5. |
+| Policy decline | A **successful 200 with an empty content list** and `stop_reason: "refusal"`. Read `stop_reason` before touching `content`. |
+
+**Do not simply drop the temperature.** The values are documented intent: 0.0 on
+`input_struct` because there is exactly one right answer, 0.9 on `seed_gen` because
+diversity is the goal. Dropping both makes the second behave like the first.
+Translate to `output_config.effort` instead, and get diversity from the sidecar's
+`N` independent samples — a mechanism that already exists and needs no sampling
+knob (D-063).
+
+**The refusal case is load-bearing for this project specifically.** Triage sends
+fault addresses, register dumps and memory-corruption analysis, which is exactly
+the material Claude's cyber classifiers screen. So server-side fallbacks are
+requested by default and a decline raises a distinct `Refused`: "no verdict could
+be obtained" and "the crash is judged benign" must stay different outcomes, or
+findings are discarded silently.
+
+Two structural rules that came out of the reshape:
+
+- **One resolver owns the config's shape.** Five places used to read it themselves
+  and two had reimplemented the same `.env` reader, BOM handling included (D-064).
+- **`orchestrator/pipeline.py` is a deliberate exception** and keeps its own copy,
+  because its docstring claims it imports no LLM client and a CP12 test enforces
+  that against the *imports*. The duplication is a considered cost of RULE 1, and
+  it is commented as such rather than left looking like an oversight.
+
+### 14.8 Linux snapshot preparation — and the step that cannot be automated
+
+§14.2 automates KD end to end. **The Linux flow cannot be**, and the difference is
+worth understanding before trying again.
+
+Mid-snapshot, `FuzzBkpt.stop()` calls `wait_for_cpu_regs_dump()`
+(`gdb_fuzzbkpt.py:352-369`), which prints *"In the QEMU tab, press Ctrl+C, run the
+`cpu` command"* and then spins in `while not REGS_JSON_FILENAME.exists()` — an
+unbounded loop. `regs.json` is written only by `cpu`, `cpu` is registered by
+`gdb_qemu.py` in the **server** gdb rather than the client one, and nothing stops
+that gdb on its own. Reaching its prompt means interrupting it from a terminal.
+Contrast §14.2, where hanging the work off the breakpoint removed the need for
+anyone to decide when to act.
+
+So `prep/snapshot_linux.py prepare` does the mechanical work and **prints the rest**,
+including that step. The first version of it drove gdb anyway and did not perform
+the `cpu` step at all: it would have hung in that loop until the timeout and then
+reported a stimulus problem — the one explanation guaranteed to be believed and
+wrong. If you extend this, that is the failure mode to design against.
+
+Details that are not obvious from the scripts, each of which was a bug first:
+
+- **The working directory is load-bearing.** `gdb_server.sh` and `gdb_client.sh` use
+  `../` paths and `gdb_client.sh` sources `./bkpt.py`.
+- **`sym_path` is read HOST-side.** FuzzBkpt shells out to `nm` and `readelf -S` on
+  it relative to gdb's cwd, so the ELF must be in the work directory — copying it
+  only into the guest leaves `bkpt.py` raising inside gdb, with gdb still running
+  and no breakpoint installed.
+- **`program_name` is compared against `task->comm`, which is `char[16]`.** A name
+  longer than 15 characters never matches, so the breakpoint fires and declines to
+  stop, forever, with no error.
+- **`write_to_store` MERGES.** A second run in the same work directory ships the
+  previous binary's symbols alongside the new ones unless the stale file is removed.
+- **The stimulus runs INSIDE the guest**, over ssh, and only *after* the breakpoint
+  is installed. Same shape as §14.2: target-specific, not derivable.
+- **`prepare` knows `module_base`.** `FuzzBkpt` takes `target_base` and `prepare`
+  sets it, so the reported `ingest` command has it filled in. `ghidra_image_base`
+  and `entry_runtime_addr` stay placeholders on purpose — guessing either puts a
+  wrong number into A1, where every address conversion is built on it.
+
+**One prerequisite check to copy the shape of.** "Has `setup.sh` run?" was tested as
+`(target_vm / "image").is_dir()`. That directory is *tracked in git*, so the check
+could never fire and `check-host` printed "host can acquire" on a fresh clone. It now
+looks for a `*.img`. Existence is not evidence (§14.5) applies to directories too.
+
+**One correction to record here, because it is a RULE 2 failure mode the rule does
+not name.** Both this project and its README claimed `symbol-store.json` "cannot be
+produced on Linux". The citation was accurate — `wtf.cc:195-201` really does say
+"You need to generate it from Windows" — and the conclusion was wrong: that branch
+fires when the file is *absent*, and `linux_mode` writes it while snapshotting.
+**RULE 2 says the source wins over the document. An error message is source that
+describes the case where it fires, not the world** (D-062).
+

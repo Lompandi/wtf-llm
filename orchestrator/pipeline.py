@@ -613,8 +613,13 @@ def check_prerequisites(config: PipelineConfig, stages: list[Stage]) -> list[str
         import yaml
 
         config_path = config.repo_root / "config" / "llm.yaml"
-        endpoint = yaml.safe_load(config_path.read_text(encoding="utf-8"))["endpoint"]
-        env_var = endpoint["api_key_env"]
+        llm_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        providers = llm_config.get("providers") or {}
+        # ANY provider's key is enough -- the client picks whichever resolves
+        # (llm/client.py resolve_provider). Checking one hardcoded variable would
+        # fail a machine that has an Anthropic key and no NCHC one, which is the
+        # whole point of the multi-provider config.
+        #
         # Parsed, not substring-matched: `# KEY=...` commented out in .env
         # satisfied `env_var in text` and passed a check whose entire job is to fail
         # before Ghidra runs (D-057).
@@ -624,13 +629,25 @@ def check_prerequisites(config: PipelineConfig, stages: list[Stage]) -> list[str
         # claim in the docstring -- "holds no client, sends no prompt, reads no key"
         # -- has to be true of the imports too, not just of the calls.
         # tests/gates/test_cp12.py enforces that, and it caught this.
-        has_key = bool(os.environ.get(env_var)) or bool(
-            _read_dotenv_value(config.repo_root / ".env", env_var)
-        )
-        if not has_key:
+        wanted = [
+            (p or {}).get("api_key_env")
+            for p in providers.values()
+            if (p or {}).get("api_key_env")
+        ]
+        dotenv = config.repo_root / ".env"
+        found = [
+            var
+            for var in wanted
+            if os.environ.get(var) or _read_dotenv_value(dotenv, var)
+        ]
+        if not wanted:
             problems.append(
-                f"no LLM API key: set {env_var} in the environment or in a "
-                f"gitignored .env at the repo root"
+                "config/llm.yaml declares no providers with an api_key_env"
+            )
+        elif not found:
+            problems.append(
+                f"no LLM API key: set one of [{', '.join(wanted)}] in the "
+                f"environment or in a gitignored .env at the repo root"
             )
 
     # wtf resolves breakpoints by symbol name through dbgeng and sets no symbol

@@ -120,8 +120,16 @@ def _index_producing(stages, name: str) -> int:
 
 
 def _api_key_env() -> str:
+    """The DEFAULT provider's key variable -- the one the pre-flight will find first."""
     config = yaml.safe_load((REPO_ROOT / "config" / "llm.yaml").read_text(encoding="utf-8"))
-    return config["endpoint"]["api_key_env"]
+    return next(iter(config["providers"].values()))["api_key_env"]
+
+
+def _all_api_key_envs() -> list[str]:
+    """Every provider's key variable. Any one of them satisfies the pre-flight, so
+    a test that wants the no-key case has to clear them all."""
+    config = yaml.safe_load((REPO_ROOT / "config" / "llm.yaml").read_text(encoding="utf-8"))
+    return [p["api_key_env"] for p in config["providers"].values() if p.get("api_key_env")]
 
 
 @pytest.fixture
@@ -659,7 +667,8 @@ def test_prerequisites_report_a_missing_llm_key_before_ghidra_runs(
     """Four stages call the model. Discovering a missing key after Ghidra has run
     wastes the Ghidra time, which is the whole argument for checking up front."""
     monkeypatch.setenv("GHIDRA_INSTALL_DIR", str(tmp_path))
-    monkeypatch.delenv(_api_key_env(), raising=False)
+    for var in _all_api_key_envs():
+        monkeypatch.delenv(var, raising=False)
     config = _fake_target(tmp_path)
     problems = check_prerequisites(config, build_stages(config))
     assert any("no LLM API key" in p and _api_key_env() in p for p in problems), problems

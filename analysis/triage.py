@@ -100,28 +100,19 @@ class SignalBundle:
         return [s for s in TRIAGE_SIGNALS if s not in self.available]
 
 
-def _read_api_key(config: dict, repo_root: Path = REPO_ROOT) -> str:
-    """The key, from the environment or the gitignored .env. Never from config."""
-    endpoint = config["endpoint"]
-    if endpoint.get("api_key"):
-        raise TriageError(
-            "config/llm.yaml contains an inline api_key; the token must come "
-            "from the environment (section 7.1, section 10)"
-        )
-    env_var = endpoint["api_key_env"]
-    key = os.environ.get(env_var)
-    if key:
-        return key
+def _resolve(config: dict, repo_root: Path = REPO_ROOT, prefer: str | None = None):
+    """Which provider and key to use, via the client's own resolver.
 
-    dotenv = repo_root / ".env"
-    if dotenv.exists():
-        # utf-8-sig: PowerShell writes a BOM, which otherwise ends up in the
-        # first key's name and produces a baffling auth failure.
-        for line in dotenv.read_text(encoding="utf-8-sig").splitlines():
-            name, _, value = line.partition("=")
-            if name.strip() == env_var:
-                return value.strip().strip("'\"")
-    raise TriageError(f"no API key: set {env_var} in the environment or in .env")
+    Delegated rather than reimplemented. This function used to duplicate the
+    key-reading logic -- including the utf-8-sig BOM handling -- and a duplicate
+    of that kind stays correct only until one copy is fixed.
+    """
+    from llm.client import LlmError, resolve_provider
+
+    try:
+        return resolve_provider(config, repo_root=repo_root, prefer=prefer)
+    except LlmError as exc:
+        raise TriageError(str(exc)) from exc
 
 
 def configure_dspy(
@@ -129,12 +120,24 @@ def configure_dspy(
     role: str = "triage",
     config_path: Path = DEFAULT_LLM_CONFIG,
     repo_root: Path = REPO_ROOT,
+    provider: str | None = None,
 ) -> Any:
-    """Point DSPy at the configured endpoint for ``role``, and return the LM.
+    """Point DSPy at the active provider for ``role``, and return the LM.
 
     Model, base URL and parameters all come from ``config/llm.yaml`` -- section 10
     forbids hardcoding any of them, and DSPy is no exception just because it
     brings its own client. The role is a role, never a model name.
+
+    DSPy reaches the model through litellm, which needs a provider prefix on the
+    model string; the two kinds this project configures need different ones, and
+    two other things differ with them:
+
+    * ``openai_compatible`` -> ``openai/<model>`` with an explicit ``api_base``,
+      so litellm uses the OpenAI wire format against a custom URL instead of
+      trying to infer a provider from the model name.
+    * ``anthropic`` -> ``anthropic/<model>``, no ``api_base``, and **no
+      ``temperature``** -- sending one is an HTTP 400 on the current Claude
+      models, so it is dropped here exactly as llm/providers.py drops it.
     """
     import dspy
 
@@ -143,27 +146,39 @@ def configure_dspy(
     if role not in roles:
         raise TriageError(f"unknown role {role!r}; configured: {sorted(roles)}")
 
+    resolved = _resolve(config, repo_root, prefer=provider)
+
     role_config = dict(roles[role])
-    model = role_config.pop("model")
     role_config.pop("why", None)
+    models = role_config.pop("models", None) or {}
+    model = models.get(resolved.name)
+    if not model:
+        raise TriageError(
+            f"role {role!r} has no model configured for provider "
+            f"{resolved.name!r}; it maps {sorted(k for k, v in models.items() if v)}"
+        )
 
     excluded = set(config.get("excluded_models") or [])
     if model in excluded:
         raise TriageError(f"role {role!r} routes to excluded model {model!r}")
 
-    endpoint = config["endpoint"]
-    # DSPy speaks to OpenAI-compatible endpoints through litellm, which needs the
-    # "openai/" provider prefix to use the OpenAI wire format against a custom
-    # base URL rather than trying to infer a provider from the model name.
-    lm = dspy.LM(
-        f"openai/{model}",
-        api_base=endpoint["base_url"],
-        api_key=_read_api_key(config, repo_root),
-        model_type="chat",
-        temperature=role_config.get("temperature", 0.0),
-        max_tokens=role_config.get("max_tokens", 16384),
-        num_retries=int(endpoint.get("max_retries", 3)),
-    )
+    kwargs: dict[str, Any] = {
+        "api_key": resolved.api_key,
+        "model_type": "chat",
+        "max_tokens": role_config.get("max_tokens", 16384),
+        "num_retries": int(resolved.config.get("max_retries", 3)),
+    }
+    if resolved.kind == "anthropic":
+        target = f"anthropic/{model}"
+        # temperature deliberately absent -- see the docstring.
+        if resolved.config.get("base_url"):
+            kwargs["api_base"] = resolved.config["base_url"]
+    else:
+        target = f"openai/{model}"
+        kwargs["api_base"] = resolved.config["base_url"]
+        kwargs["temperature"] = role_config.get("temperature", 0.0)
+
+    lm = dspy.LM(target, **kwargs)
     dspy.configure(lm=lm)
     return lm
 

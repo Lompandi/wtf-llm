@@ -28,7 +28,7 @@ py -3.11 -m venv .venv
   [  ok   ] JDK                java 21 at C:\Program Files\Eclipse Adoptium\jdk-21...
   [  ok   ] Ghidra             D:\tools\ghidra_12.1.2_PUBLIC
   [  ok   ] wtf                D:\wtf-llm\src\build\wtf.exe
-  [  ok   ] LLM API key        SNAPFUZZ_LLM_API_KEY in .env
+  [  ok   ] LLM provider       nchc (SNAPFUZZ_LLM_API_KEY) -- active
   [  ok   ] symbolizer-rs      D:\tools\symbolizer-rs\symbolizer-rs.exe
   [  ok   ] kd.exe             C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\kd.exe
   [  ok   ] 0vercl0k/snapshot  D:\tools\snapshot\snapshot.dll
@@ -36,14 +36,19 @@ py -3.11 -m venv .venv
                                -> run as administrator, or join 'Hyper-V Administrators'
 ```
 
-LLM key 放 `.env`：
+LLM key 放 `.env`。**你設哪家的 key 就用哪家** —— Claude、OpenAI，或任何
+OpenAI-compatible 的 endpoint：
 
 ```
-SNAPFUZZ_LLM_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...      # Claude，走官方 SDK
+OPENAI_API_KEY=sk-...             # OpenAI
+SNAPFUZZ_LLM_API_KEY=sk-...       # 任何 OpenAI-compatible endpoint
 ```
 
-需要 Python 3.11+、JDK 21+、C++ 工具鏈、Ghidra，以及一個 OpenAI-compatible 的 LLM
-endpoint。要自己擷取快照還需要 Hyper-V、Windows SDK 的 `kd.exe`、
+設了多個的話由 `config/llm.yaml` 的順序決定，要蓋掉就設
+`SNAPFUZZ_LLM_PROVIDER=anthropic`。每個角色在那邊各自對應每家的模型。
+
+需要 Python 3.11+、JDK 21+、C++ 工具鏈、Ghidra，以及一家 provider 的 key。要自己擷取快照還需要 Hyper-V、Windows SDK 的 `kd.exe`、
 [0vercl0k/snapshot](https://github.com/0vercl0k/snapshot) 和一台客體 VM
 （[docs/GUEST-VM.md](docs/GUEST-VM.md)）。
 
@@ -138,21 +143,34 @@ PIPELINE SUMMARY
 
 ## Linux binary
 
-ELF 目標可以跑。快照改用 wtf 自己的 `linux_mode/` 腳本抓（QEMU + GDB，user-mode ELF
-快照），不是上面的 KD 那條路。
-
-客體裡，抓快照前先做：
+ELF 目標可以跑。快照來自 wtf 自己的 `linux_mode/` 腳本（QEMU + GDB，user-mode ELF
+快照），不是上面的 KD 那條路，需要一台有 KVM 的 Linux 主機。客體建一次就好：
 
 ```bash
-sysctl -w kernel.randomize_va_space=0
+cd linux_mode/qemu_snapshot && ./setup.sh     # 建 QEMU、kernel 和磁碟映像
 ```
 
-照 [`linux_mode/README.md`](linux_mode/README.md) 抓：`setup.sh` 建目標 VM，`scp`
-把你的 binary 傳進去，寫一個 `bkpt.py` 指定要斷的符號，然後 `gdb_server.sh` 和
-`gdb_client.sh`。`state/symbol-store.json` 要從 Windows 的執行搬過來 —— wtf 在
-Linux 主機上產不出來。
+然後檢查主機、做準備：
 
-然後 ingest，剩下的照跑：
+```bash
+python -m prep.snapshot_linux check-host
+
+python -m prep.snapshot_linux prepare \
+    --target-name mytarget --binary ./mytarget --break-at parse_packet \
+    --stimulus '/root/mytarget &'
+```
+
+`prepare` 做掉機械性的部分 —— 寫出 gdb 要 source 的 `bkpt.py`、把 ELF 放到 `nm` 和
+`readelf` 找得到的位置、清掉會被合併進去的舊檔、拒絕覆蓋已存在的快照 —— 然後照順序印出
+剩下的步驟，包含**沒辦法自動化**的那一步：快照做到一半 gdb 會要你在 QEMU 那個 tab 按
+Ctrl+C 然後下 `cpu`，而只有它會寫出 `regs.json`。`--dry-run` 會印出計畫但不動任何東西。
+
+跟 Windows 那條路不同，這一步再怎麼寫腳本都繞不掉：`cpu` 註冊在 server 那邊的 gdb，
+而且沒有東西會讓它自己停下來。三個 artifact 都出現後：
+
+```bash
+python -m prep.snapshot_linux verify --target-name mytarget
+```
 
 ```bash
 python -m prep.snapshot_linux ingest --state targets/mytarget/state \
@@ -160,12 +178,15 @@ python -m prep.snapshot_linux ingest --state targets/mytarget/state \
     --entry-runtime-addr 0x5555555551a9 --randomize-va-space 0 \
     --out artifacts/a1_snapshot.json
 
-python -m orchestrator.pipeline --binary mytarget \
+python -m orchestrator.pipeline --binary ./mytarget \
     --state-dir targets/mytarget/state --target-name mytarget \
     --from 08 --workers 2 --minutes 15
 ```
 
-`python -m prep.snapshot_linux notes` 會印出流程。
+兩件要知道的事。ASLR 沒關的話 ingest 會拒絕 —— 開著的話 `module_base` 只是一個會動的
+值的某次取樣，建立在它上面的位址轉換全都安靜地錯掉，所以客體裡要設
+`kernel.randomize_va_space=0`。還有 pipeline 的 stage 07 只支援 Windows，所以 Linux 上
+自己跑 ingest，其他用 `--from 08`。`python -m prep.snapshot_linux notes` 會印出手動流程。
 
 ## 運作方式
 

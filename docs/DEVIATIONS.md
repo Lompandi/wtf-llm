@@ -2264,3 +2264,99 @@ It surfaced only when `tools/bootstrap.py` started telling people to run
 became load-bearing for a fresh machine and would have produced a venv that fails on
 the first import. **A stale file becomes a bug the moment something starts trusting
 it.**
+
+## D-062 — wtf's own error message contradicted its own code, and we believed the message
+
+`prep/snapshot_linux.py` stated, and `README.md` repeated, that
+`state/symbol-store.json` "cannot be produced on Linux -- generate it from Windows
+first". Both cited `src/wtf/wtf.cc:195-201`, which is real:
+
+```cpp
+#ifdef LINUX
+        if (!fs::exists(Opts.SymbolFilePath)) {
+          throw CLI::ParseError(
+              fmt::format("Expected to find a state/symbol-store.json file in "
+                          "'{}'. You need to generate it from Windows.",
+```
+
+The message is wtf's, the quote is accurate, and the conclusion drawn from it was
+wrong. That branch fires when the file is **absent**. wtf's Linux snapshotter
+*writes* it: `FuzzBkpt.__init__` builds a symbol dict by shelling out to `nm` on
+the target binary and calls `gdb_utils.write_to_store`, and
+`gdb_fuzzbkpt.py:377-380` moves it into `state/` beside `mem.dmp`:
+
+```python
+files = (REGS_JSON_FILENAME, SYMSTORE_FILENAME)
+for f in files:
+    dst = self.target_dir / "state" / f
+    f.replace(dst)
+```
+
+So a snapshot taken the supported way already has one, and the Windows detour is
+needed only for a `state/` someone assembled by hand — which is presumably the
+case the message was written for.
+
+**The lesson is narrower than "read the source", which RULE 2 already says.** The
+source *was* read: the citation is precise and the line numbers are right. What
+was read was the error message, and an error message is a statement about the case
+where it fires, not about the world. Two places in this project now cite
+`nm`-and-`write_to_store` rather than the message, and a test pins the corrected
+wording so it cannot regress to the quotable-but-wrong version.
+
+## D-063 — every role in this project sets a temperature, and Claude rejects it
+
+Adding the Anthropic provider looked like a base-URL-and-header change. It is not,
+and the first thing that breaks is not subtle: `temperature`, `top_p` and `top_k`
+are **HTTP 400** on Claude Opus 5, Fable 5, Opus 4.8 and 4.7. All seven roles in
+`config/llm.yaml` set `temperature`, so a naive port fails on the first call of
+every role.
+
+Dropping the parameter compiles and is also wrong, because the values carry
+meaning that the config documents at length:
+
+* `input_struct` and `harness_derive` are at **0.0** because "there is exactly ONE
+  correct answer to what shape this parser's input is".
+* `seed_gen` is at **0.9** because "diversity matters more than precision here".
+
+Silently dropping both would make the second role behave like the first. So the
+provider **translates** rather than drops: temperature maps to
+`output_config.effort`, with 0.0 becoming `xhigh` and 0.9 becoming `medium`.
+Diversity itself is not lost either — it comes from the seed-gen sidecar's `N`
+independent samples, which is a mechanism that already existed and does not depend
+on a sampling knob.
+
+Three more differences in the same family, each of which breaks a port on its own:
+`system` is a top-level field rather than a message; the response is a list of
+blocks so `content[0].text` is wrong whenever the first block is a `thinking` one
+(the default on Opus 5); and a policy decline is a **successful HTTP 200 with an
+empty content list**, so `stop_reason` has to be read before `content` is touched.
+
+That last one is not hypothetical for this project. Triage sends fault addresses,
+register dumps and memory-corruption analysis — the exact material Claude's cyber
+classifiers screen. The provider therefore requests server-side fallbacks by
+default, and a decline surfaces as a distinct `Refused` error rather than as an
+empty verdict: "no verdict could be obtained" and "the crash is benign" must not
+collapse into one outcome, because that silently discards findings.
+
+## D-064 — one config key, five readers, three of them broken by changing it
+
+Replacing `config/llm.yaml`'s single `endpoint` block with a `providers` map broke
+three modules at once, because five separate places each reached into the config
+themselves: `llm/client.py`, `analysis/triage.py`, `orchestrator/pipeline.py`,
+`tools/bootstrap.py`, and the gate tests. Two of them had independently
+reimplemented the same `.env` reader, including the `utf-8-sig` BOM handling that
+D-030's neighbour needed — a duplicate that stays correct exactly until one copy
+is fixed.
+
+The fix is one resolver (`llm.client.resolve_provider`) that everything else asks.
+**With one deliberate exception:** `orchestrator/pipeline.py` still duplicates the
+key check rather than importing it, because its docstring claims it "holds no
+client, sends no prompt, reads no key" and a CP12 gate test enforces that claim
+against its *imports*, not only its calls. That test caught the same mistake once
+before. So the duplication there is a considered cost of RULE 1, and it is
+commented as such rather than left looking like an oversight.
+
+The check it duplicates also had to change in kind, not just in shape: it used to
+verify one hardcoded variable, and any provider's key is now sufficient. A machine
+with an Anthropic key and no NCHC key would otherwise be told it has no LLM
+access — the same working-thing-reported-missing shape as D-050 and D-060.
