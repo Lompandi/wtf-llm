@@ -212,11 +212,16 @@ def _result(key: str, status: str, detail: str = "") -> StageResult:
 # --- ordering: derived from the stage list, not pinned --------------------
 
 
-def test_the_stage_list_is_the_thirteen_stage_pipeline() -> None:
+def test_the_stage_list_is_the_fourteen_stage_pipeline() -> None:
     """A canary on the count only. The ORDER is derived by the tests below, so a
-    reorder must fail for a reason that names the constraint it broke."""
+    reorder must fail for a reason that names the constraint it broke.
+
+    Fourteen since `08b-harness`, which derives the HarnessSpec. `prep/harness_derive.py`
+    existed from CP11 and no stage ran it, so the harness spec could only be produced
+    by hand -- which is why the generated module in the tree was built once for
+    tlv_server and never again (D-073)."""
     stages = _stages()
-    assert len(stages) == 13
+    assert len(stages) == 14
     keys = [s.key for s in stages]
     assert len(set(keys)) == len(keys), f"duplicate stage keys: {keys}"
 
@@ -224,8 +229,26 @@ def test_the_stage_list_is_the_thirteen_stage_pipeline() -> None:
 def test_stage_keys_are_numbered_in_execution_order() -> None:
     """``--from`` and ``--only`` select by key PREFIX, so a key whose number
     disagrees with its position makes ``--from 09`` start somewhere else."""
-    numbers = [int(s.key.split("-", 1)[0]) for s in _stages()]
-    assert numbers == sorted(numbers) == list(range(1, len(numbers) + 1))
+    # A key may carry a LETTER suffix -- `07a-acquire`, `08b-harness` -- for a stage
+    # inserted between two existing ones. `int()` on "08b" raises, and it already
+    # would have for `07a` on any `--kd-pipe` run; the test simply never built that
+    # stage list. Sorting on (number, suffix) keeps the property that matters, which
+    # is that key order and execution order agree.
+    def sort_key(key: str) -> tuple[int, str]:
+        head = key.split("-", 1)[0]
+        digits = "".join(c for c in head if c.isdigit())
+        suffix = head[len(digits):]
+        return int(digits), suffix
+
+    keys = [s.key for s in _stages()]
+    positions = [sort_key(k) for k in keys]
+    assert positions == sorted(positions), (
+        f"key order disagrees with execution order, so --from selects the wrong "
+        f"stage: {keys}"
+    )
+    # And the numbers still start at 1 and never skip, letters aside.
+    numbers = sorted({n for n, _ in positions})
+    assert numbers == list(range(1, len(numbers) + 1)), numbers
 
 
 def test_a2_is_built_before_the_entry_is_chosen() -> None:
@@ -345,7 +368,7 @@ def test_a_stage_with_no_artifact_can_never_look_up_to_date() -> None:
     from orchestrator.pipeline import Stage
 
     empty = Stage(key="99-nothing", title="produces nothing", argv=[], produces=[])
-    assert _up_to_date(empty) is False
+    assert _up_to_date(empty)[0] is False
 
 
 def test_up_to_date_needs_every_named_artifact_not_just_one(tmp_path: Path) -> None:
@@ -354,9 +377,12 @@ def test_up_to_date_needs_every_named_artifact_not_just_one(tmp_path: Path) -> N
     present, absent = tmp_path / "a.json", tmp_path / "b.json"
     present.write_text("{}", encoding="utf-8")
     partial = Stage(key="99", title="two artifacts", argv=[], produces=[present, absent])
-    assert _up_to_date(partial) is False
+    assert _up_to_date(partial)[0] is False
     complete = Stage(key="99", title="one artifact", argv=[], produces=[present])
-    assert _up_to_date(complete) is True
+    # Presence only -- no identity passed, so this is the "does the output exist"
+    # question. Reusing it for THIS target additionally needs provenance; see
+    # test_provenance.py.
+    assert _up_to_date(complete)[0] is True
 
 
 def test_no_two_stages_claim_the_same_artifact() -> None:
@@ -591,13 +617,22 @@ def test_prerequisites_report_a_missing_binary(tmp_path: Path, satisfied_env) ->
 def test_prerequisites_report_every_missing_per_target_directory(
     tmp_path: Path, satisfied_env
 ) -> None:
-    """Section 13.1 requires all five. wtf creates none of them, and a missing
-    crashes/ is not noticed until a crash has been found and dropped."""
+    """Section 13.1 requires all five, and wtf creates none of them.
+
+    These four are now CREATED rather than reported: they are this tool's own layout
+    inside `targets/<name>/`, they are empty, and making a first-time user mkdir four
+    directories is friction with nothing behind it. What must not regress is that they
+    END UP THERE -- a missing crashes/ is otherwise not noticed until a crash has been
+    found and dropped on the floor.
+    """
     config = _fake_target(tmp_path, dirs=())
     problems = check_prerequisites(config, build_stages(config))
     for sub in ("inputs", "outputs", "coverage", "crashes"):
-        assert any(f"{sub} is missing" in p for p in problems), (
-            f"{sub}/ absent but unreported: {problems}"
+        assert (config.target_dir / sub).is_dir(), (
+            f"{sub}/ was neither created nor reported: {problems}"
+        )
+        assert not any(f"{sub} is missing" in p for p in problems), (
+            f"{sub}/ was created, so it must not also be reported as a problem"
         )
 
 
@@ -623,6 +658,14 @@ def test_prerequisites_report_a_missing_state_directory_as_not_ours_to_make(
     assert matching, problems
     assert any("NOT produced by this pipeline" in p for p in matching)
     assert any("1/6/7" in p for p in matching), "the pending edges must be named"
+    # And it must not read as an offer. An intermediate version of this message said
+    # "Pass --kd-pipe to acquire one from a running guest VM", which presents a path
+    # that has never been executed end to end as the easy option.
+    for text in matching:
+        if "--kd-pipe" in text:
+            assert "never been executed" in text or "untested" in text, (
+                f"the message offers acquisition without saying it is unproven: {text}"
+            )
 
 
 def test_prerequisites_report_missing_ghidra_and_name_the_stages_that_need_it(
@@ -743,15 +786,46 @@ def test_the_snapshot_stage_ingests_and_refuses_to_invent_a_snapshot() -> None:
     assert {p.name for p in stage.needs} == {"mem.dmp", "regs.json"}
 
 
-def test_the_codegen_stage_says_the_shipped_module_does_not_include_the_header() -> None:
-    """Edge 14 is pending: adopting the generated header would rename the JSON
-    keys and invalidate the corpus, the crash files and the eval cases (D-055).
-    The header is generated and NOT used, and a reader must be told so."""
-    stage = _stage_running(_stages(), "fuzzer.codegen")
-    assert stage.produces[0].name == "generated_input.h"
-    assert "does NOT include this yet" in stage.note
-    assert "edge 14" in stage.note and "pending" in stage.note
-    assert "D-055" in stage.note
+def test_codegen_is_wired_for_a_new_target_and_not_for_the_development_one() -> None:
+    """EDGE 14, and the reason it resolves differently per target.
+
+    For the development target the generated header is still produced and NOT
+    compiled: adopting it renames the test-case JSON keys and invalidates the recorded
+    corpus, the crash files and the eval cases (D-055). That is a real cost paid for
+    nothing, since the hand-written module already parses that program correctly.
+
+    For any OTHER binary the hand-written module is simply wrong -- it parses
+    tlv_server's TLV format -- so leaving edge 14 unwired means the campaign delivers
+    a structure the target does not accept, runs, reports coverage and finds nothing.
+    "It ran and found nothing" is the worst available outcome because it looks like a
+    result. So the generated module is the default there, and the note has to say
+    which of the two is in force (D-073).
+    """
+    # The development target: header only, and the reader is told it is not compiled.
+    dev = _stage_running(_stages(), "fuzzer.codegen")
+    assert [p.name for p in dev.produces] == ["generated_input.h"]
+    assert "NOT compiled" in dev.note
+    assert "D-055" in dev.note
+    assert "--generated-harness" in dev.note, "the override must be discoverable"
+
+    # A different binary: the generated MODULE, which stage 10 compiles.
+    other = _stage_running(_stages(generated_harness=True), "fuzzer.codegen")
+    produced = {p.name for p in other.produces}
+    assert produced == {"generated_input.h", "fuzzer_gen.cc"}, produced
+    assert "--module-out" in other.argv and "--harness" in other.argv
+    assert "EDGE 14" in other.note
+
+    # And the module that gets built and run is the generated one, not the hand-written
+    # one. This is the link that was missing: fuzzer_gen.cc is already in wtf.exe's
+    # link line, so the only thing absent was ever selecting it.
+    stages = _stages(generated_harness=True)
+    build = _stage_running(stages, "fuzzer.build")
+    campaign = _stage_running(stages, "orchestrator.scheduler")
+    expected = build.argv[build.argv.index("--expect-target") + 1]
+    assert expected.endswith("_gen"), expected
+    assert campaign.argv[campaign.argv.index("--module") + 1] == expected, (
+        "stage 10 builds one module and stage 11 runs another"
+    )
 
 
 def test_the_coverage_file_stage_admits_bochscpu_ignores_it() -> None:
@@ -860,6 +934,7 @@ def test_exactly_the_expected_stages_call_the_model() -> None:
     assert llm_modules == {
         "prep.entry_select",      # once per target: choose the fuzz entry
         "prep.input_struct",      # once per target: derive the input structure
+        "prep.harness_derive",    # once per target: breakpoints and input register
         "orchestrator.scheduler",  # starts the sidecar; the LLM is in that process
         "analysis.triage_run",    # after the campaign, on deduped buckets only
     }

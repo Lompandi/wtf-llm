@@ -57,6 +57,10 @@ class CacheStats:
     max_static: int
 
 
+class AmbiguousFunction(LookupError):
+    """One function name, rows in more than one module, and no module given."""
+
+
 class PseudoCCache:
     """Read/write access to A2."""
 
@@ -153,12 +157,42 @@ class PseudoCCache:
     def get_by_function(
         self, name: str, *, module: str | None = None
     ) -> PseudoCEntry | None:
-        sql = "SELECT * FROM pseudoc WHERE function = ?" + (
-            " AND module = ?" if module else ""
-        )
-        params: tuple = (name, module) if module else (name,)
-        row = self._conn.execute(sql, params).fetchone()
-        return self._to_entry(row) if row else None
+        """Pseudo-C for a function by name, within ``module`` when given.
+
+        **Pass ``module`` whenever you know it.** This cache is one SQLite file for
+        every target ever analysed -- `build` uses INSERT OR REPLACE and removes
+        nothing -- so an unqualified name can match rows belonging to different
+        programs. `main`, `printf` and the `__scrt_*` family are present in any
+        statically linked MSVC binary, so the collision is routine, not exotic.
+
+        Three call sites omitted it and fed another program's body to the model. One
+        of them chose the harness's input register from what it read (D-073). Rather
+        than trusting future callers to remember, an unqualified lookup that is
+        genuinely ambiguous now raises: an arbitrary `fetchone()` among several
+        programs is never the right answer, and it is invisible when wrong.
+        """
+        if module:
+            row = self._conn.execute(
+                "SELECT * FROM pseudoc WHERE function = ? AND module = ?",
+                (name, module),
+            ).fetchone()
+            return self._to_entry(row) if row else None
+
+        rows = self._conn.execute(
+            "SELECT * FROM pseudoc WHERE function = ?", (name,)
+        ).fetchall()
+        if not rows:
+            return None
+        modules = {row["module"] for row in rows}
+        if len(modules) > 1:
+            raise AmbiguousFunction(
+                f"{name!r} exists in {sorted(modules)} and no module was given. This "
+                f"cache holds every target ever analysed, so returning either one "
+                f"would hand a caller another program's code -- which is how a harness "
+                f"came to pick its input register by reading the wrong binary (D-073). "
+                f"Pass module="
+            )
+        return self._to_entry(rows[0])
 
     def functions(self, module: str | None = None) -> list[str]:
         sql = "SELECT function FROM pseudoc" + (" WHERE module = ?" if module else "")

@@ -101,12 +101,26 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--evidence", type=Path, default=REPO_ROOT / "artifacts/runs/gate8")
     ap.add_argument("--label", default="gate9")
     ap.add_argument("--target-dir", type=Path, default=REPO_ROOT / "targets/snapfuzz-gate7")
-    ap.add_argument("--module", default="snapfuzz")
+    ap.add_argument(
+        "--module",
+        default="snapfuzz",
+        help="wtf's --name, i.e. the FUZZER module -- not the target's module name",
+    )
+    # WHAT THE ADVISORY IS ABOUT. Without these the header came from
+    # config/target.yaml, so an advisory for any other target was titled
+    # "tlv_server.exe" -- the wrong program's name on the deliverable a human reads
+    # (D-073). And `entry` read `target.entry_symbol`/`target.symbol`, neither of
+    # which exists in that file, so it was always the literal "unknown".
+    ap.add_argument("--target-binary", type=Path, default=None)
+    ap.add_argument("--entry-symbol", default=None)
     args = ap.parse_args(argv)
 
-    target_config = yaml.safe_load(
+    parsed_target = yaml.safe_load(
         (REPO_ROOT / "config" / "target.yaml").read_text(encoding="utf-8")
-    )["target"]
+    )
+    target_config = parsed_target["target"]
+    # The fuzz entry lives under `entry:`, not under `target:`.
+    entry_config = parsed_target.get("entry") or {}
 
     evidence = load_evidence(args.evidence)
     print(f"triaging {len(evidence['order'])} bucket(s) from {args.evidence}")
@@ -131,11 +145,17 @@ def main(argv: list[str] | None = None) -> int:
         traces=evidence["traces"],
         contexts=evidence["contexts"],
         out_dir=out_dir,
-        target=Path(target_config.get("binary", "target")).name,
+        target=(
+            args.target_binary.name
+            if args.target_binary
+            else Path(target_config.get("binary", "target")).name
+        ),
         module=args.module,
-        entry=target_config.get("entry_symbol")
-        or target_config.get("symbol")
-        or "unknown",
+        entry=(
+            args.entry_symbol
+            or entry_config.get("symbol")
+            or "unknown"
+        ),
         crashes=evidence["summary"]["crashes"],
     )
 

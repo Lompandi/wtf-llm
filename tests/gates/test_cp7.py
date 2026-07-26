@@ -920,7 +920,13 @@ def test_build_config_populates_the_symbol_path_from_shared_code() -> None:
         "the sidecar computes symbol paths itself instead of sharing the resolver"
     )
 
-    cfg = build_config(target_dir=CP7_TARGET, module="snapfuzz", a1=A1)
+    cfg = build_config(
+        target_dir=CP7_TARGET, module="snapfuzz", a1=A1,
+        # CP7_TARGET is targets/snapfuzz-gate7, a tlv_server snapshot whose A1
+        # predates SnapshotRef.module -- so target.yaml does describe it, and
+        # the directory name is NOT the module name (D-073).
+        allow_config_fallback=True,
+    )
     assert cfg.symbol_paths, "no symbol paths; the sidecar would measure no coverage"
     assert any("symbols" in p or Path(p).is_dir() for p in cfg.symbol_paths)
     # And the plateau parameters come from config, not from defaults in code.

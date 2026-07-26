@@ -13,7 +13,7 @@ the easiest place in a project to hide a failure:
 
 * **A skipped stage is reported, never silent.** ``--from``/``--only`` and the
   up-to-date check all print what they skipped and why. A run that quietly did
-  three of thirteen stages and printed "done" is worse than a crash.
+  three of fourteen stages and printed "done" is worse than a crash.
 * **A stage that cannot run stops the pipeline.** The snapshot stage is the
   case that motivated the rule: acquisition is not performed here, so the driver
   *ingests* an existing ``state/`` and refuses to invent one, and stage 07 simply
@@ -53,6 +53,17 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
+
+# Stdlib-only, like the rest of this module's imports: provenance is a
+# filesystem question. RULE 1 forbids `llm.*` here (test_cp12), not local
+# helpers.
+from orchestrator.provenance import (
+    ArtifactStamp,
+    TargetIdentity,
+    load_stamps,
+    record as record_provenance,
+    stale_reason,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYTHON = REPO_ROOT / ".venv" / "Scripts" / "python.exe"
@@ -129,6 +140,16 @@ class PipelineConfig:
     kd_stimulus: str | None = None
     kd_timeout_s: int = 900
     wow64: bool = False
+    # WHICH HARNESS DELIVERS THE BYTES. None resolves per target: generated for a
+    # binary `config/target.yaml` does not describe, hand-written for the one it does.
+    #
+    # The default has to be per-target because neither answer is right for both. The
+    # hand-written module parses tlv_server's TLV format, so for any other program it
+    # delivers a structure the target does not accept -- the campaign runs, reports
+    # coverage and finds nothing. And adopting the generated module for the
+    # development target renames the test-case JSON keys, invalidating the recorded
+    # corpus and crash files, which is why edge 14 sat unwired (D-055, D-073).
+    generated_harness: bool | None = None
     repo_root: Path = REPO_ROOT
 
     def __post_init__(self) -> None:
@@ -141,6 +162,28 @@ class PipelineConfig:
         self.state_dir = Path(self.state_dir).resolve()
 
     @property
+    def use_generated_harness(self) -> bool:
+        """Resolve `generated_harness`, defaulting per target.
+
+        The predicate is the same one every other `config/target.yaml` fallback now
+        uses: is that file describing the binary we are about to fuzz. If it is not,
+        the hand-written harness is known-wrong for this program, so generating is the
+        only defensible default -- "it ran and found nothing" is the worst outcome
+        available, because it looks like a result.
+        """
+        if self.generated_harness is not None:
+            return self.generated_harness
+        import yaml
+
+        try:
+            target_cfg = yaml.safe_load(
+                (self.repo_root / "config" / "target.yaml").read_text(encoding="utf-8")
+            )["target"]
+        except (OSError, KeyError, TypeError):
+            return True
+        return not _config_describes(target_cfg, self.binary)
+
+    @property
     def target_dir(self) -> Path:
         return self.repo_root / "targets" / self.target_name
 
@@ -150,7 +193,7 @@ class PipelineConfig:
 
 
 def build_stages(config: PipelineConfig) -> list[Stage]:
-    """The thirteen stages, in the only order that resolves for a NEW target.
+    """The fourteen stages, in the only order that resolves for a NEW target.
 
     The ordering is the part of this module worth reading, because the obvious
     order does not work and the failure is quiet.
@@ -185,6 +228,18 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
     spec_json = art / "input_spec.json"
     a1_json = art / "a1_snapshot.json"
     generated = config.repo_root / "fuzzer" / "module" / "generated_input.h"
+    harness_json = art / "harness_spec.json"
+    # The GENERATED MODULE. `fuzzer/build.py` copies `fuzzer/module/*.cc` into
+    # `src/wtf/`, where CMake's glob compiles it, so writing this file is all it takes
+    # to get it into wtf.exe -- it is already linked (build.ninja:174).
+    generated_module = config.repo_root / "fuzzer" / "module" / "fuzzer_gen.cc"
+    # wtf's --name for the generated module, matching what fuzzer_gen.cc registers.
+    generated_target_name = f"{config.module}_gen"
+    use_generated_harness = config.use_generated_harness
+    # The module stage 10 builds and stage 11 runs. These were `config.module`
+    # unconditionally, so the generated module was compiled into wtf.exe (it is in the
+    # link line) and never selected at run time.
+    fuzzer_module = generated_target_name if use_generated_harness else config.module
     wtf_exe = config.repo_root / "src" / "build" / "wtf.exe"
     gate8 = art / "runs" / f"{config.label}-analysis"
     gate9 = art / "runs" / f"{config.label}-triage"
@@ -325,6 +380,15 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
                 "prep.bb_to_wtf", "--export", str(a3_json),
                 "--coverage-dir", str(config.target_dir / "coverage"),
                 "--bp-list", str(art / "a3_bp_list.json"),
+                # The module this run is for. `produces` below expects
+                # `<binary stem>.cov`, and bb_to_wtf used to name the file from the
+                # export's own field instead -- so a stale export produced
+                # `tlv_server.cov` and the stage failed complaining that
+                # `fuzzing-base-test.cov` was absent, which described the symptom and
+                # not the cause (D-073). Passing it makes the two agree by
+                # construction and turns a disagreement into a message about the
+                # wrong program.
+                "--module", Path(config.binary).stem,
             ),
             needs=[a3_json],
             # BOTH: the .cov in the target's coverage/ directory is the actual
@@ -450,23 +514,64 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
             ),
         ),
         Stage(
+            key="08b-harness",
+            title="LLM: derive the harness spec (breakpoints, input register)",
+            argv=py(
+                "prep.harness_derive",
+                "--entry", str(entry_json),
+                "--input-spec", str(spec_json),
+                "--cache", str(a2_db),
+                "--target-name", generated_target_name,
+                "--out", str(harness_json),
+            ),
+            needs=[entry_json, spec_json, a2_db],
+            produces=[harness_json],
+            calls_llm=True,
+            note=(
+                "prep/harness_derive.py existed from CP11 and NO STAGE RAN IT, so the "
+                "harness spec could only be produced by hand -- which is why the "
+                "generated module in the tree was built once for tlv_server and never "
+                "again (D-073)"
+            ),
+        ),
+        Stage(
             key="09-codegen",
-            title="InputSpec -> C++ header (no LLM)",
+            title=(
+                "InputSpec + HarnessSpec -> generated module (no LLM)"
+                if use_generated_harness
+                else "InputSpec -> C++ header (no LLM)"
+            ),
             argv=py(
                 "fuzzer.codegen", "--spec", str(spec_json), "--out", str(generated),
+                *(
+                    ["--harness", str(harness_json),
+                     "--module-out", str(generated_module)]
+                    if use_generated_harness
+                    else []
+                ),
             ),
-            needs=[spec_json],
-            produces=[generated],
+            needs=[spec_json] + ([harness_json] if use_generated_harness else []),
+            produces=(
+                [generated, generated_module] if use_generated_harness else [generated]
+            ),
             note=(
-                "the shipped tlv_server module does NOT include this yet -- edge 14 "
-                "is pending because adopting it would rename the JSON keys and "
-                "invalidate the existing corpus and crash files (D-055)"
+                "EDGE 14: the generated module is compiled by stage 10 and run by "
+                "stage 11, so the derived structure is what reaches the guest. The "
+                "hand-written module parses tlv_server's TLV format, which is simply "
+                "wrong for any other program -- so for a target config/target.yaml "
+                "does not describe, generating is the only correct default (D-073)"
+                if use_generated_harness
+                else "the hand-written tlv_server module is in use, so this header is "
+                     "generated but NOT compiled -- adopting it for the development "
+                     "target would rename the test-case JSON keys and invalidate the "
+                     "recorded corpus and crash files (D-055). Pass "
+                     "--generated-harness to use the derived one anyway"
             ),
         ),
         Stage(
             key="10-build",
             title="Build wtf + our module",
-            argv=py("fuzzer.build", "--expect-target", config.module),
+            argv=py("fuzzer.build", "--expect-target", fuzzer_module),
             produces=[wtf_exe],
             # Existence is not freshness. build.py's own guard exists for exactly
             # this case and the driver was bypassing it (D-057).
@@ -489,6 +594,10 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
                 "--target-dir", str(config.target_dir), "--a1", str(a1_json),
                 "--plateau-execs", str(config.plateau_execs),
                 "--seeds", str(config.seeds), "--samples", str(config.samples),
+                # Otherwise the scheduler falls back to config/target.yaml's
+                # `target.module` and runs the hand-written tlv_server harness whatever
+                # this run generated and built (D-073).
+                "--module", fuzzer_module,
             ),
             needs=[wtf_exe, a1_json],
             produces=[art / "runs" / config.label / "scheduler_result.json"],
@@ -510,6 +619,16 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
                 "analysis.pipeline", "--target-dir", str(config.target_dir),
                 "--module", config.module, "--label", f"{config.label}-analysis",
                 "--replays", str(config.replays),
+                # THIS run's target, not config/target.yaml's. Absent these, analysis
+                # symbolized with the dev target's module prefix, disassembled the dev
+                # target's PE at the fault address, and handed the dev target's
+                # pseudo-C to triage -- four wrong answers, no error (D-073).
+                "--module-prefix", Path(config.binary).stem,
+                "--target-binary", str(config.binary),
+                "--entry-symbol", entry_for_scoping,
+                "--a1", str(a1_json),
+                "--a2-cache", str(a2_db),
+                "--data-symbols", str(a6_json),
             ),
             needs=[a1_json, a2_db],
             produces=[gate8 / "buckets.json", gate8 / "summary.json"],
@@ -524,6 +643,9 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
                 "analysis.triage_run", "--evidence", str(gate8),
                 "--label", f"{config.label}-triage",
                 "--target-dir", str(config.target_dir), "--module", config.module,
+                # So the advisory names the program it is about (D-073).
+                "--target-binary", str(config.binary),
+                "--entry-symbol", entry_for_scoping,
             ),
             needs=[gate8 / "buckets.json"],
             produces=[gate9 / "advisory.md", gate9 / "verdicts.json"],
@@ -556,6 +678,45 @@ def _read_dotenv_value(dotenv: Path, name: str) -> str | None:
     return None
 
 
+def _config_describes(target_cfg: dict, binary: Path) -> bool:
+    """Whether ``config/target.yaml`` is describing the binary about to be fuzzed.
+
+    The gate on every fallback that reads that file. It describes the development
+    target, so any value taken from it is that target's value -- correct when they are
+    the same program and a hardcoded default dressed as configuration when they are
+    not (D-073).
+
+    Compared by filename stem rather than by full path: the same executable is
+    legitimately reached through `targets/tlv_server/target/` and through an absolute
+    path on another machine, and a mismatch there is not a different program.
+    """
+    configured = target_cfg.get("binary")
+    if not configured:
+        return False
+    return Path(configured).stem.lower() == Path(binary).stem.lower()
+
+
+def registered_fuzzer_modules(repo_root: Path = REPO_ROOT) -> set[str]:
+    """The names our module source passes to wtf's ``Target_t`` constructor.
+
+    Parsed from the source rather than listed here, so adding a second harness cannot
+    leave this rejecting a module that now exists. Returns an empty set when nothing
+    can be parsed, which the caller treats as "cannot check" rather than as "no
+    modules" -- a regex that stops matching must not start failing every run.
+    """
+    import re
+
+    names: set[str] = set()
+    module_dir = repo_root / "fuzzer" / "module"
+    for source in sorted(module_dir.glob("*.cc")):
+        try:
+            text = source.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        names.update(re.findall(r'Target_t\s+\w+\s*\(\s*"([^"]+)"', text))
+    return names
+
+
 def check_prerequisites(config: PipelineConfig, stages: list[Stage]) -> list[str]:
     """Everything that would fail mid-run, checked up front.
 
@@ -569,6 +730,31 @@ def check_prerequisites(config: PipelineConfig, stages: list[Stage]) -> list[str
         problems.append(f"no interpreter at {PYTHON}; create the venv first")
     if not config.binary.exists():
         problems.append(f"target binary {config.binary} does not exist")
+
+    # `--module` is wtf's --name: the fuzzer module compiled into wtf.exe, not the
+    # target's module name. The two are easy to confuse -- config/target.yaml calls
+    # the fuzzer module `module` under `target:` and the TARGET's module `module`
+    # under `entry:` -- and a wrong value here got as far as stage 10 before
+    # `fuzzer.build --expect-target` rejected it, after Ghidra and entry selection had
+    # already run. Checked against what the module source actually registers.
+    # Only meaningful for the HAND-WRITTEN harness. With the generated one the module
+    # stage 10 builds is `<module>_gen`, written by stage 09 from this run's specs, so
+    # its registration is an output rather than a precondition -- and any `--module`
+    # value is then a legitimate name for it.
+    #
+    # An earlier version of this added `<module>_gen` to the set before the emptiness
+    # guard below, which turned "no .cc could be parsed, so this cannot be checked"
+    # into a set of exactly one name and rejected every run. Caught by
+    # test_a_complete_target_tree_has_no_prerequisite_problems.
+    registered = registered_fuzzer_modules(config.repo_root)
+    if registered and not config.use_generated_harness and config.module not in registered:
+        problems.append(
+            f"--module {config.module!r} is not a fuzzer module this repo builds "
+            f"(it registers {sorted(registered)}). --module is wtf's --name, the "
+            f"harness compiled into wtf.exe -- NOT the target's module name, which "
+            f"is derived from --binary as {config.binary.stem!r}, and not the target "
+            f"directory, which is --target-name"
+        )
 
     # Derived from the stage list rather than hardcoded, so a reorder cannot leave
     # this naming stages that no longer exist -- which it already did once.
@@ -688,20 +874,51 @@ def check_prerequisites(config: PipelineConfig, stages: list[Stage]) -> list[str
             "unable to resolve its breakpoints"
         )
 
+    # CREATED, not demanded. These four are this tool's own layout inside
+    # `targets/<name>/`, they are empty, and wtf needs them to exist -- so telling a
+    # user to mkdir four directories before their first run on a new target is
+    # friction with nothing on the other side of it. Reported when created, because a
+    # prerequisites section that silently changes the tree is worse than one that asks.
+    #
+    # `state/` is deliberately NOT created: it must contain a snapshot somebody
+    # produced, and conjuring an empty one would turn "no snapshot" into a stage-07
+    # failure about a missing mem.dmp inside a directory this code invented.
+    created: list[str] = []
     for sub in ("inputs", "outputs", "coverage", "crashes"):
-        if not (config.target_dir / sub).is_dir():
+        path = config.target_dir / sub
+        if path.is_dir():
+            continue
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            created.append(sub)
+        except OSError as exc:
             problems.append(
-                f"{config.target_dir / sub} is missing; section 13.1 requires all "
-                f"five per-target directories"
+                f"{path} is missing and could not be created ({exc}); section 13.1 "
+                f"requires all five per-target directories"
             )
+    if created:
+        print(
+            f"created {', '.join(created)} under "
+            f"{_display(config.target_dir, config.repo_root)}"
+        )
+
     if not config.state_dir.is_dir():
         problems.append(
-            f"{config.state_dir} is missing. The snapshot is NOT produced by this "
-            f"pipeline (edges 1/6/7 pending) -- it has to be supplied."
+            f"{config.state_dir} is missing, and unlike the four directories above "
+            f"it is NOT produced by this pipeline -- it has to be supplied. It needs "
+            f"mem.dmp, regs.json and symbol-store.json from a snapshot of your target "
+            f"taken at its parser. Point --state-dir at one you already have. "
+            f"`--kd-pipe` runs the acquisition wrapper against a guest VM, but edges "
+            f"1/6/7 are still pending: that path has never been executed end to end, "
+            f"so treat it as untested rather than as the easy option "
+            f"(docs/GUEST-VM.md)."
         )
     if not any((config.target_dir / "inputs").glob("*")):
         problems.append(
-            f"{config.target_dir / 'inputs'} holds no seeds; the master starts from "
+            f"{config.target_dir / 'inputs'} holds no seeds. Put at least one file "
+            f"there: a single input your target accepts, byte for byte, as it would "
+            f"arrive at the parser -- one captured packet or message is enough, and "
+            f"the mutator and the slow clock build from it. The master starts from "
             f"inputs/ and an empty corpus gives the mutator nothing to work from"
         )
     return problems
@@ -736,14 +953,39 @@ def _artifact_problem(path: Path) -> str | None:
     return None
 
 
-def _up_to_date(stage: Stage) -> bool:
-    """Whether the stage's artifacts are all present and non-empty.
+def _up_to_date(
+    stage: Stage,
+    identity: TargetIdentity | None = None,
+    stamps: dict[str, ArtifactStamp] | None = None,
+    artifacts_dir: Path | None = None,
+) -> tuple[bool, str | None]:
+    """Whether the stage's artifacts can be reused, and if not, why not.
 
-    Never true for a non-idempotent stage: see :class:`Stage`.
+    "Present and non-empty" was the whole check, and presence is a fact about the
+    filesystem rather than about this run. Running a second target therefore skipped
+    the first four stages and inherited another program's pseudo-C, fuzz entry and
+    basic blocks -- see orchestrator/provenance.py for the transcript (D-073).
+
+    Returns the reason as well as the verdict because the reason has to be printed:
+    "SKIPPED, already produced" in front of a target the user has never analysed
+    before is the message that hid the bug.
+
+    Never reusable for a non-idempotent stage: see :class:`Stage`.
     """
     if not stage.produces or not stage.idempotent:
-        return False
-    return all(_artifact_problem(p) is None for p in stage.produces)
+        return False, None
+    if any(_artifact_problem(p) is not None for p in stage.produces):
+        return False, None
+    if identity is None or stamps is None or artifacts_dir is None:
+        # No identity to check against. Callers inside the pipeline always pass one;
+        # this branch keeps the "does the output exist" question answerable on its
+        # own, which is what the `blocked` path below actually wants to know.
+        return True, None
+    for path in stage.produces:
+        reason = stale_reason(path, identity, stamps, artifacts_dir)
+        if reason is not None:
+            return False, f"{_display(path, REPO_ROOT)} {reason}"
+    return True, None
 
 
 def _fingerprint(paths: list[Path]) -> dict[Path, tuple[int, int] | None]:
@@ -850,7 +1092,7 @@ def run_pipeline(
             o for o in only if not any(k.startswith(o) for k in keys)
         )
         if unmatched:
-            # Unvalidated, a one-character typo skipped all thirteen stages and
+            # Unvalidated, a one-character typo skipped all fourteen stages and
             # reported "all stages accounted for" with exit 0. `--from` already
             # guarded against the same typo; `--only` did not (D-057).
             raise SystemExit(
@@ -860,6 +1102,14 @@ def run_pipeline(
     env = dict(os.environ)
     parts = (p.strip().strip('"') for p in env.get("PATH", "").split(os.pathsep))
     env["PATH"] = os.pathsep.join(p for p in parts if p)
+
+    # WHICH TARGET THIS RUN IS FOR. Hashing the binary once here, not per stage:
+    # every stage compares against the same identity, and a target rebuilt midway
+    # through a run should not have half its artifacts stamped against each version.
+    identity = TargetIdentity.of(
+        target_name=config.target_name, binary=config.binary, scope=config.scope
+    )
+    stamps = load_stamps(config.artifacts)
 
     for index, stage in enumerate(stages, start=1):
         marker = " [LLM]" if stage.calls_llm else ""
@@ -875,7 +1125,7 @@ def run_pipeline(
             continue
 
         if stage.blocked:
-            if _up_to_date(stage):
+            if _up_to_date(stage)[0]:
                 print(f"  BLOCKED but its output exists, continuing: {stage.blocked}")
                 results.append(
                     StageResult(stage.key, stage.title, "skipped-uptodate",
@@ -887,12 +1137,21 @@ def run_pipeline(
                                        detail=stage.blocked))
             break
 
-        if not force and _up_to_date(stage):
-            produced = ", ".join(_display(p, config.repo_root) for p in stage.produces)
-            print(f"  SKIPPED, already produced: {produced}")
-            print("  (pass --force to re-run)")
-            results.append(StageResult(stage.key, stage.title, "skipped-uptodate"))
-            continue
+        if not force:
+            reusable, why_not = _up_to_date(stage, identity, stamps, config.artifacts)
+            if reusable:
+                produced = ", ".join(
+                    _display(p, config.repo_root) for p in stage.produces
+                )
+                print(f"  SKIPPED, already produced: {produced}")
+                print("  (pass --force to re-run)")
+                results.append(StageResult(stage.key, stage.title, "skipped-uptodate"))
+                continue
+            if why_not:
+                # The output is there and is NOT ours. Saying so is the difference
+                # between this run and the one in D-073, which printed "SKIPPED,
+                # already produced" for a target it had never seen.
+                print(f"  RE-RUNNING: {why_not}")
 
         missing = [p for p in stage.needs if not p.exists()]
         if missing and dry_run:
@@ -962,7 +1221,7 @@ def run_pipeline(
         # afterwards made the rule vacuous: a previous run's file satisfies it, so a
         # stage that exits 0 having written nothing -- which is exactly D-026's
         # documented analyzeHeadless behaviour, the reason the rule exists -- was
-        # reported OK. With --force, all thirteen stages reported "ran" and the
+        # reported OK. With --force, all fourteen stages reported "ran" and the
         # summary printed success while not one artifact had been touched (D-057).
         before = _fingerprint(stage.produces)
 
@@ -1010,6 +1269,13 @@ def run_pipeline(
                     StageResult(stage.key, stage.title, "failed", elapsed, problem)
                 )
                 break
+
+        # Stamp only now -- after exit 0, after the artifact checks, after `verify`.
+        # Stamping earlier would record provenance for output that the checks above
+        # went on to reject, and a stamp on a rejected artifact is worse than none:
+        # the next run would reuse it.
+        record_provenance(config.artifacts, identity, stage.key, stage.produces)
+        stamps = load_stamps(config.artifacts)
 
         print(f"  OK in {elapsed:.0f}s")
         results.append(StageResult(stage.key, stage.title, "ran", elapsed))
@@ -1067,7 +1333,33 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--binary", type=Path, default=None)
     ap.add_argument("--entry-symbol", default=None)
     ap.add_argument("--state-dir", type=Path, default=None)
-    ap.add_argument("--module", default=None)
+    ap.add_argument(
+        "--module",
+        default=None,
+        help="wtf's --name: the FUZZER harness compiled into wtf.exe "
+             "(default from config/target.yaml). This is not the target's "
+             "module name -- that comes from --binary -- and not the target "
+             "directory, which is --target-name",
+    )
+    harness = ap.add_mutually_exclusive_group()
+    harness.add_argument(
+        "--generated-harness",
+        dest="generated_harness",
+        action="store_true",
+        default=None,
+        help="derive the harness from this binary's pseudo-C and compile it "
+             "(edge 14). Default for any target config/target.yaml does not "
+             "describe, because the hand-written harness parses tlv_server's "
+             "format and would deliver nothing meaningful to another program",
+    )
+    harness.add_argument(
+        "--handwritten-harness",
+        dest="generated_harness",
+        action="store_false",
+        help="use the checked-in fuzzer_snapfuzz.cc. Default for the "
+             "development target, whose recorded corpus and crash files are "
+             "keyed to its test-case JSON",
+    )
     ap.add_argument("--scope", choices=("module", "function-closure"), default="module")
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--minutes", type=float, default=15.0)
@@ -1075,7 +1367,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--seeds", type=int, default=6)
     ap.add_argument("--samples", type=int, default=2)
     ap.add_argument("--replays", type=int, default=3)
-    ap.add_argument("--label", default="pipeline")
+    # Defaults to the target name, not "pipeline". Campaign, analysis and triage
+    # outputs all live in artifacts/runs/<label>/, so a constant default put two
+    # different targets' results in one directory -- and stage 08 is
+    # idempotent=False, so a failure there left the PREVIOUS target's
+    # buckets.json in place for anything reading that path (D-073).
+    ap.add_argument("--label", default=None)
     ap.add_argument(
         "--kd-pipe",
         default=None,
@@ -1111,19 +1408,29 @@ def main(argv: list[str] | None = None) -> int:
         target_name=args.target_name
         or target_cfg.get("target_dir", "targets/snapfuzz").split("/")[-1],
         binary=binary,
-        # Precedence: the flag, then the entry config/target.yaml ALREADY RECORDS,
-        # then late-binding from stage 03.
+        # Precedence: the flag, then the entry config/target.yaml records IF THAT FILE
+        # IS ABOUT THIS BINARY, then late-binding from stage 03.
         #
-        # An earlier comment here claimed the config records no entry. It does --
-        # under a TOP-LEVEL `entry:` key, with symbol, input_param and size_param --
-        # and this read `target.entry_symbol`, which does not exist. So the driver
-        # ignored a fact the repo already had, and the comment justifying late
-        # binding rested on a misread config (D-057). Late binding is still right
-        # for a genuinely new target, which is why it remains the fallback.
+        # The middle clause used to be unconditional. D-057 added it because the
+        # driver was ignoring an entry the repo already recorded -- correct for the
+        # development target and wrong for every other one, because `entry.symbol` is
+        # tlv_server's `ProcessPacket`. The consequence was that `entry_for_scoping`
+        # was NEVER the placeholder, so late binding from stage 03 became dead code
+        # and every new target was scoped to a function it may not contain. The
+        # reported run shows it: `entry : ProcessPacket` printed for
+        # `fuzzing-base-test.exe`, before stage 03 had chosen anything (D-073).
+        #
+        # Fixing one hardcoded default by reading a config file only moves the
+        # hardcoding, unless the read is conditional on the file being about the thing
+        # you are doing.
         entry_symbol=(
             args.entry_symbol
-            or (full_config.get("entry") or {}).get("symbol")
-            or target_cfg.get("entry_symbol")
+            or (
+                (full_config.get("entry") or {}).get("symbol")
+                or target_cfg.get("entry_symbol")
+                if _config_describes(target_cfg, binary)
+                else None
+            )
         ),
         state_dir=args.state_dir or (REPO_ROOT / target_cfg.get("target_dir", "targets/snapfuzz") / "state"),
         module=args.module or target_cfg.get("module") or "snapfuzz",
@@ -1134,7 +1441,8 @@ def main(argv: list[str] | None = None) -> int:
         seeds=args.seeds,
         samples=args.samples,
         replays=args.replays,
-        label=args.label,
+        label=args.label or args.target_name or "pipeline",
+        generated_harness=args.generated_harness,
         kd_pipe=args.kd_pipe,
         kd_stimulus=args.kd_stimulus,
         kd_timeout_s=args.kd_timeout_s,
@@ -1156,8 +1464,21 @@ def main(argv: list[str] | None = None) -> int:
     print(f"target    : {config.target_name} ({config.target_dir})")
     print(f"binary    : {config.binary}")
     print(f"entry     : {config.entry_symbol or '(late-bound from stage 03)'}")
-    print(f"module    : {config.module}   scope: {config.scope}")
+    # THREE different module-ish names, printed as three lines. One line reading
+    # "module : demo" is what a user saw immediately before the run wrote
+    # `tlv_server.cov`, and neither string was wrong -- they were answers to
+    # different questions (D-073).
+    print(f"target mod: {config.binary.stem}   (what symbols and .cov are named for)")
+    if config.use_generated_harness:
+        print(f"fuzzer mod: {config.module}_gen   (GENERATED from this binary's "
+              f"pseudo-C, compiled by stage 10)")
+    else:
+        print(f"fuzzer mod: {config.module}   (hand-written fuzzer_snapfuzz.cc, "
+              f"parses tlv_server's TLV format)")
+    print(f"scope     : {config.scope}")
     print(f"campaign  : {config.workers} worker(s), {config.minutes:.0f} min")
+    print(f"artifacts : {_display(config.artifacts, config.repo_root)}  "
+          f"runs/{config.label}")
 
     problems = check_prerequisites(config, stages)
     if problems:

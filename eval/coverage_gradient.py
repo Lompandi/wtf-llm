@@ -85,7 +85,12 @@ def measure_gradient(
     unions the coverage of everything in it -- which would report the maximum and
     hide the shape, and the shape is the whole point.
     """
-    cfg = build_config(target_dir=target_dir, module=module, a1=a1)
+    # allow_config_fallback: this gradient is measured on the development
+    # target, whose A1 predates SnapshotRef.module, so target.yaml really is
+    # describing this snapshot. Explicit because the default cannot know that.
+    cfg = build_config(
+        target_dir=target_dir, module=module, a1=a1, allow_config_fallback=True
+    )
     graph = BlockGraph.from_export(cfg.a3_export)
     known = set(graph.blocks)
 

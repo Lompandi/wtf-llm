@@ -60,6 +60,36 @@ python -m orchestrator.pipeline `
 
 `--entry-symbol` 可以不給，entry 由 stage 03 的 LLM 選。
 
+## 跑自己的 binary
+
+需要 binary，以及一份停在它 parser 的快照。在 `inputs/` 放一個 seed——你的目標會接受的
+單一輸入，原封不動的 bytes——其餘四個 per-target 目錄會自動建立。
+
+```powershell
+mkdir targets\mytarget\inputs
+copy <一份範例輸入> targets\mytarget\inputs\seed.bin
+
+python -m orchestrator.pipeline `
+    --binary C:\path\to\mytarget.exe `
+    --state-dir targets\mytarget\state `
+    --target-name mytarget `
+    --workers 2 --minutes 15
+```
+
+有三件事會自動發生，值得知道：
+
+- **harness 由你的 binary 產生。** Ghidra 的 pseudo-C 給模型，模型導出輸入結構與 harness
+  spec，`fuzzer/codegen.py` 產生 C++，stage 10 編譯。倉庫裡那份手寫 harness parse 的是開發
+  目標的格式，所以換成別的 binary 時預設改用產生的那份。要強制指定用
+  `--generated-harness` / `--handwritten-harness`。
+- **fuzz entry 由 stage 03 選**，不是從 `config/target.yaml` 讀。
+- **artifact 會蓋上 target 與 binary hash 的印記。** 換 target 時分析階段會重跑，而不是沿用
+  上一個 target 的，並且會印出重跑哪個 artifact、為什麼。
+
+`--module` 是 wtf 的 `--name`，也就是編進 `wtf.exe` 的 harness。它不是你目標的 module
+名稱（那個由 `--binary` 決定），也不是 target 目錄（那個是 `--target-name`）。執行時的標頭
+會把三個都印出來。
+
 ## 從 binary 開始 —— Windows
 
 需要 Hyper-V、Windows SDK 的 `kd.exe`、
@@ -129,7 +159,8 @@ python -m orchestrator.pipeline --binary ./mytarget \
 07a-acquire   驅動 KD 擷取快照                  （只在給 --kd-pipe 時出現）
 07-snapshot   匯入 state/                       -> A1
 08-inputspec  LLM 推導輸入結構                  -> InputSpec
-09-codegen    InputSpec -> C++（無 LLM）
+08b-harness   LLM 推導中斷點與輸入暫存器        -> HarnessSpec
+09-codegen    InputSpec + HarnessSpec -> C++（無 LLM）
 10-build      建置 wtf + 模組
 11-fuzz       活動：master + workers + 慢時鐘
 12-analysis   去重、分類、重放、trace（無 LLM）
@@ -148,8 +179,11 @@ python -m orchestrator.pipeline --binary ./mytarget \
 | `--from 10` | 從這裡開始 |
 | `--force` | 重跑已經是最新的階段 |
 | `--scope function-closure` | 分析範圍縮到 entry 的呼叫閉包 |
+| `--generated-harness` | 從這個 binary 的 pseudo-C 導出並編譯 harness |
+| `--handwritten-harness` | 改用倉庫裡的 `fuzzer_snapfuzz.cc` |
 | `--workers N` | worker 數量 |
 | `--minutes N` | 活動時間 |
+| `--label NAME` | `artifacts/runs/` 下的輸出目錄，預設是 target 名稱 |
 | `--kd-pipe`、`--kd-stimulus`、`--wow64` | Windows 快照擷取 |
 
 ## 產出

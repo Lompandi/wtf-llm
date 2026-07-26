@@ -245,9 +245,11 @@ def derive_harness(
             "wtf resolves breakpoints by name through dbgeng."
         )
 
-    record = cache.get_by_function(entry.symbol) or cache.get_by_addr(
-        entry.static_addr, module=entry.module
-    )
+    # module=entry.module -- A2 is shared across targets; see prep/input_struct.py
+    # for why an unqualified lookup returns another program's body (D-073).
+    record = cache.get_by_function(
+        entry.symbol, module=entry.module
+    ) or cache.get_by_addr(entry.static_addr, module=entry.module)
     if record is None:
         raise HarnessDeriveError(
             f"A2 has no pseudo-C for {entry.symbol!r}. Deriving how to drive a "

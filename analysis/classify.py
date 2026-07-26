@@ -28,7 +28,20 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
-import capstone
+# OPTIONAL. capstone is in requirements.txt and is genuinely needed to disassemble
+# around a fault address -- but a hard import here made `pytest -q` fail at COLLECTION
+# for the entire suite when it was absent, so an environment missing one optional
+# dependency reported nothing about the twelve checkpoints that do not use it. A
+# reviewer hit exactly that and could not run the suite at all.
+#
+# Absent, disassembly is skipped and says so. That is the same choice
+# `read_module_bytes` already makes for a binary it cannot vouch for: report less
+# rather than invent.
+try:
+    import capstone
+except ModuleNotFoundError:  # pragma: no cover -- exercised by its absence
+    capstone = None
+
 from pydantic import BaseModel, Field
 
 from arch.addr import AddressSpace
@@ -273,8 +286,21 @@ def classify(
             )
         else:
             code, low_rva = window
-            md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
-            for insn in md.disasm(code, space.ghidra_image_base + low_rva):
+            if capstone is None:
+                # `notes`, like the branch above: the same mechanism already carries
+                # "why there is no disassembly", and `disasm_source` stays
+                # "unavailable", which is exactly what happened.
+                notes.append(
+                    "capstone is not installed, so the faulting instruction was not "
+                    "disassembled: pip install -r requirements.txt"
+                )
+                code = b""
+            md = (
+                capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+                if capstone is not None
+                else None
+            )
+            for insn in md.disasm(code, space.ghidra_image_base + low_rva) if md else ():
                 if insn.address == record.fault_static_addr:
                     result.faulting_instruction = f"{insn.mnemonic} {insn.op_str}".strip()
                     result.disasm_source = "target_pe"

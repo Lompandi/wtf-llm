@@ -159,7 +159,15 @@ def _gather_code(
             "name. Re-run entry selection, or look the address up in A2 first."
         )
 
-    primary = cache.get_by_function(entry.symbol)
+    # module=entry.module, because A2 is ONE SQLite file shared by every target ever
+    # built: `build` uses INSERT OR REPLACE and deletes nothing, so after a second
+    # target's stage 02 the cache holds both programs' rows. Unqualified, this returned
+    # whichever `main`/`printf`/`__scrt_*` row came first -- and those names collide
+    # for any two statically linked MSVC binaries, so it is a certainty rather than a
+    # coincidence. `_find_callers` below was already module-qualified, which made the
+    # prompt a MIXTURE of two programs: this program's callers around another
+    # program's body (D-073).
+    primary = cache.get_by_function(entry.symbol, module=entry.module)
     if primary is None:
         primary = cache.get_by_addr(entry.static_addr, module=entry.module)
     if primary is None:

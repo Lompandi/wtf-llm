@@ -184,10 +184,24 @@ def _resolve_name(reported: str, known: dict[str, Candidate]) -> str | None:
     return lowered.get(bare.lower())
 
 
-def _choose_prompt(cache: PseudoCCache, shortlist: list[Candidate]) -> str:
+def _choose_prompt(
+    cache: PseudoCCache, shortlist: list[Candidate], module: str | None = None
+) -> str:
+    """The final prompt: each shortlisted function's full body.
+
+    ``module`` is not optional in spirit. The shortlist in stage 1 is built by
+    ``candidates(module=...)`` and is therefore correct; this lookup was unqualified,
+    so on a shared A2 the model read ANOTHER binary's function under the right name.
+    It then chose ``input_param`` and ``size_param`` from that body, and those two
+    fields are copied into the FuzzEntry, carried into the HarnessSpec, and compiled
+    into the harness's register writes -- so the harness would write fuzz bytes into a
+    register chosen by reading a different program, execute millions of cases, report
+    coverage, and never actually inject a test-case. The printed shortlist looks
+    right, because the shortlist WAS right (D-073).
+    """
     blocks = []
     for c in shortlist:
-        entry = cache.get_by_function(c.function)
+        entry = cache.get_by_function(c.function, module=module)
         code = entry.code if entry else "<unavailable>"
         # No address in the header: the model must not supply one, and including
         # it only invites the name being echoed back with it attached.
@@ -254,7 +268,7 @@ def select_entry(
     # Stage 2 -- choose, with full pseudo-C.
     choice = client.complete_json(
         "entry_select",
-        _choose_prompt(cache, shortlist),
+        _choose_prompt(cache, shortlist, module),
         _Choice,
         system=_SYSTEM,
     )

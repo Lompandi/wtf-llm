@@ -80,6 +80,35 @@ class SnapshotRef(BaseModel):
     entry_runtime_addr: int
     aslr_disabled: bool  # must be True for linux
 
+    # WHICH PROGRAM THIS SNAPSHOT IS OF. Added after the fact, and the reason is
+    # worth keeping: A1 recorded two absolute addresses and no way to tell which
+    # module they belonged to. Every consumer that needed the module name therefore
+    # read it from `config/target.yaml`, which describes the development target and
+    # nothing else -- so analysing any other target symbolized with the wrong
+    # prefix, disassembled the wrong PE, and read the wrong pseudo-C, all without
+    # erroring (D-073). The ingest stage was already being handed all three of these
+    # on its command line and discarding them.
+    #
+    # Optional because artifacts recorded before this existed must still validate --
+    # the recorded evidence for the dev target is one of them, and invalidating a
+    # hash to add a field nobody had yet written would be a worse trade. Consumers
+    # treat absent as "unknown, ask the caller", never as a licence to guess.
+    module: str | None = None  # debugger module name, e.g. "tlv_server" (no .exe)
+    binary: str | None = None  # the PE/ELF on disk, for disassembling a fault site
+    entry_symbol: str | None = None  # bare or "module!Function"
+
+    @property
+    def module_prefix(self) -> str | None:
+        """What symbolizer-rs prints before ``!``, i.e. the module minus any suffix.
+
+        `module` should already be extensionless -- wtf's `GetModuleBase` requires
+        that -- but a caller passing "foo.exe" would otherwise silently produce a
+        prefix that matches no frame at all.
+        """
+        if not self.module:
+            return None
+        return self.module[:-4] if self.module.lower().endswith(".exe") else self.module
+
     @model_validator(mode="after")
     def _linux_requirements(self) -> SnapshotRef:
         if self.os != "linux":

@@ -187,6 +187,12 @@ def ingest_state_dir(
         module_base=module_base,
         ghidra_image_base=ghidra_image_base,
         entry_runtime_addr=entry_runtime_addr,
+        # WHICH PROGRAM. This function already had all three and recorded none of
+        # them, so every downstream consumer fell back to config/target.yaml and got
+        # the development target's identity no matter what was being fuzzed (D-073).
+        module=module,
+        binary=str(binary) if binary else None,
+        entry_symbol=entry_symbol,
         # The guest had ASLR on -- module_base differs from the image base. That
         # is fine on Windows: the snapshot pins one layout for every iteration.
         # Only Linux requires it off (section 6).

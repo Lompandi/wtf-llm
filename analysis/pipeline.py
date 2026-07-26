@@ -297,6 +297,15 @@ def _write(out_dir: Path, result: AnalysisResult) -> None:
     )
 
 
+class TargetMismatch(RuntimeError):
+    """`config/target.yaml` describes a different target than the one being analysed.
+
+    Its own class because the alternative is what this function used to do, and what
+    it used to do was the worst defect in the project: continue, quietly, on the
+    wrong program (D-073).
+    """
+
+
 def build_config(
     *,
     target_dir: Path,
@@ -306,25 +315,145 @@ def build_config(
     replays: int = 3,
     max_buckets: int | None = None,
     repo_root: Path = REPO_ROOT,
+    # THE TARGET'S IDENTITY. Supplied by the caller for any target other than the
+    # one `config/target.yaml` describes; see the docstring for why these exist.
+    binary: Path | None = None,
+    entry_symbol: str | None = None,
+    module_prefix: str | None = None,
+    a2_cache: Path | None = None,
+    data_symbols: Path | None = None,
+    artifacts_dir: Path | None = None,
+    # Opt in to reading the target's identity from `config/target.yaml` when A1 does
+    # not record it. Deliberately not the default: this was the default, and it is
+    # D-073. A caller that sets it is asserting "the snapshot I am pointing at really
+    # is the target that file describes", which only the caller can know.
+    allow_config_fallback: bool = False,
 ) -> AnalysisConfig:
-    """AnalysisConfig from the committed config files, nothing hardcoded."""
+    """AnalysisConfig for **the target named by the arguments**, not for whichever
+    target `config/target.yaml` happens to describe.
+
+    This function's docstring used to read "from the committed config files, nothing
+    hardcoded", which was true and beside the point. Nothing was hardcoded *here*;
+    the target's identity was read from `config/target.yaml`, which describes
+    `tlv_server` specifically, and no caller could override it. Analysing any other
+    target therefore produced four confident, wrong outputs and no error (D-073):
+
+    * `module_prefix` stayed `tlv_server`, so symbolizer-rs frames reading
+      `othertarget.exe!Func` matched nothing and **every crash classified as outside
+      our module** -- the one signal triage leans on hardest;
+    * `target_binary` pointed at `targets/tlv_server/target/tlv_server.exe`, so the
+      disassembly at the fault address came from **a different PE**, producing
+      plausible instructions belonging to another program;
+    * `a2_cache` was tlv_server's pseudo-C, handed to the triage model as the source
+      of the crash site;
+    * `entry_symbol` was tlv_server's `ProcessPacket`, so "reached the fuzz entry"
+      answered a question about a function the target may not even have.
+
+    Nothing raised. The advisory came out looking exactly like a real one. That is
+    why the identity is now parameters, and why disagreeing with `target.yaml` is a
+    :class:`TargetMismatch` rather than a preference.
+    """
     import yaml
 
     campaign = CampaignConfig.from_yaml(
         repo_root / "config" / "fuzz.yaml", repo_root / "config" / "target.yaml"
     )
-    a1 = a1 or repo_root / "artifacts" / "a1_snapshot.json"
+    artifacts = artifacts_dir or (repo_root / "artifacts")
+    a1 = a1 or artifacts / "a1_snapshot.json"
     ref = SnapshotRef.model_validate_json(a1.read_text(encoding="utf-8"))
 
-    target_yaml = yaml.safe_load(
+    # IDENTITY RESOLUTION, in strict order of authority:
+    #   1. what the caller passed -- it knows what it is analysing;
+    #   2. what A1 recorded -- this run's own snapshot, written by the ingest stage;
+    #   3. config/target.yaml -- ONLY when it is describing this same snapshot.
+    #
+    # Step 3 used to be step 1, unconditionally, which is the whole of D-073. Note
+    # that `target_dir.name` is deliberately NOT the discriminator: the CP7 evidence
+    # lives in `targets/snapfuzz-gate7/` and is genuinely a tlv_server snapshot, so
+    # comparing directory names would reject a correct configuration. The module the
+    # snapshot records is the fact that matters.
+    #
+    # READING config/target.yaml CORRECTLY, which is harder than it looks and which
+    # the previous version of this function got wrong twice:
+    #
+    #   target.name    = the subject under test        -> "tlv_server"
+    #   target.module  = wtf's --name, OUR Target_t    -> "snapfuzz"
+    #   entry.module   = the subject under test again  -> "tlv_server"
+    #   entry.symbol   = the fuzz entry                -> "ProcessPacket"
+    #
+    # So `module` means the FUZZER module under `target:` and the TARGET module under
+    # `entry:` -- the same overload the pipeline's own `--module` flag carries. Taking
+    # `target.module` as the symbolization prefix yields "snapfuzz", which matches no
+    # frame symbolizer-rs will ever print.
+    #
+    # And the old code read `target.entry_symbol` / `target.symbol`, NEITHER of which
+    # exists in this file -- both lookups missed and it fell through to the literal
+    # `"ProcessPacket"` every time. It read like configuration and behaved like a
+    # constant, while the `entry:` block holding the real answer went untouched.
+    parsed = yaml.safe_load(
         (repo_root / "config" / "target.yaml").read_text(encoding="utf-8")
-    )["target"]
-    binary = target_yaml.get("binary")
-    entry = target_yaml.get("entry_symbol") or target_yaml.get("symbol") or "ProcessPacket"
+    )
+    target_yaml = parsed["target"]
+    entry_yaml = parsed.get("entry") or {}
+    configured_binary = target_yaml.get("binary")
+    # The TARGET's module, from the binary's own filename -- the string symbolizer-rs
+    # prints. Never `target.module`.
+    configured_module = entry_yaml.get("module") or (
+        Path(configured_binary).stem if configured_binary else None
+    )
 
-    # symbolizer-rs prints "tlv_server.exe!Func"; the module prefix is the binary's
-    # own filename, not wtf's --name.
-    prefix = Path(binary).stem if binary else module
+    a1_module = ref.module_prefix
+    prefix = module_prefix or a1_module
+    if prefix is None:
+        # A1 predates the module field. target.yaml is the only source left, and
+        # using it is safe only if nothing contradicts it -- which, with no recorded
+        # module and no explicit argument, we cannot check. So this is allowed but
+        # must be a deliberate act by the caller, not a default.
+        if configured_module and allow_config_fallback:
+            prefix = configured_module
+        else:
+            raise TargetMismatch(
+                f"cannot tell which module {a1.name} describes: it records no "
+                f"`module` (it predates that field), and no module_prefix was "
+                f"passed. Guessing from config/target.yaml would silently analyse "
+                f"{configured_module!r} -- wrong symbolization prefix, wrong PE "
+                f"disassembled, wrong pseudo-C handed to triage, no error (D-073). "
+                f"Re-run the ingest stage to record it, pass "
+                f"module_prefix=/--module-prefix, or pass "
+                f"allow_config_fallback=True to accept target.yaml explicitly."
+            )
+    elif a1_module and configured_module and a1_module != configured_module:
+        # Both sources spoke and disagreed. Whatever else is true, one of them is
+        # about a different program, so nothing downstream should proceed on a guess.
+        if module_prefix is None:
+            raise TargetMismatch(
+                f"{a1.name} is a snapshot of {a1_module!r} but config/target.yaml "
+                f"describes {configured_module!r}. These are different programs; "
+                f"analysing one with the other's binary and pseudo-C is D-073. Pass "
+                f"module_prefix= explicitly to say which you mean."
+            )
+
+    a1_binary = Path(ref.binary) if ref.binary else None
+    if a1_binary is not None and not a1_binary.is_absolute():
+        a1_binary = repo_root / a1_binary
+    resolved_binary = Path(binary) if binary else a1_binary
+    if resolved_binary is None and configured_module == prefix and configured_binary:
+        # Only when target.yaml is demonstrably describing THIS module.
+        resolved_binary = repo_root / configured_binary
+
+    entry = entry_symbol or ref.entry_symbol
+    if entry is None and configured_module == prefix:
+        entry = entry_yaml.get("symbol")
+    if entry is None:
+        raise TargetMismatch(
+            f"no fuzz entry symbol for module {prefix!r}: A1 does not record one and "
+            f"config/target.yaml's `entry:` block describes "
+            f"{configured_module!r}. The previous version defaulted to the literal "
+            f"'ProcessPacket' here, which silently answered "
+            f"'did the crash reach the fuzz entry?' about a function this target may "
+            f"not have (D-073). Pass entry_symbol=/--entry-symbol."
+        )
+    entry = entry.split("!", 1)[-1]
 
     return AnalysisConfig(
         target_dir=target_dir,
@@ -333,12 +462,12 @@ def build_config(
         space=AddressSpace(prefix, ref.module_base, ref.ghidra_image_base),
         out_dir=repo_root / "artifacts" / "runs" / label,
         workdir=repo_root / "artifacts" / "analysis" / label,
-        a2_cache=repo_root / "artifacts" / "a2_pseudoc_module.sqlite",
-        data_symbols=repo_root / "artifacts" / "a6_data_symbols.json",
+        a2_cache=a2_cache or (artifacts / "a2_pseudoc_module.sqlite"),
+        data_symbols=data_symbols or (artifacts / "a6_data_symbols.json"),
         replays=replays,
         entry_symbol=entry,
         max_buckets=max_buckets,
-        target_binary=(repo_root / binary) if binary else None,
+        target_binary=resolved_binary,
         module_prefix=prefix,
     )
 
@@ -348,7 +477,31 @@ def main(argv: list[str] | None = None) -> int:
 
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--target-dir", type=Path, required=True)
-    ap.add_argument("--module", default="snapfuzz")
+    ap.add_argument(
+        "--module",
+        default="snapfuzz",
+        help="wtf's --name, i.e. the FUZZER module compiled into wtf.exe. NOT the "
+             "target's debugger module name -- that is --module-prefix",
+    )
+    # The target's identity. Absent, it comes from A1; A1 not recording it is an
+    # error rather than a licence to read config/target.yaml (D-073).
+    ap.add_argument(
+        "--module-prefix",
+        default=None,
+        help="the TARGET's debugger module name, e.g. 'tlv_server' for frames "
+             "printed as 'tlv_server.exe!Func'. Defaults to what A1 recorded",
+    )
+    ap.add_argument("--target-binary", type=Path, default=None)
+    ap.add_argument("--entry-symbol", default=None)
+    ap.add_argument("--a1", type=Path, default=None)
+    ap.add_argument("--a2-cache", type=Path, default=None)
+    ap.add_argument("--data-symbols", type=Path, default=None)
+    ap.add_argument(
+        "--allow-config-fallback",
+        action="store_true",
+        help="permit reading the target's identity from config/target.yaml when A1 "
+             "does not record it. Only correct if that file describes this snapshot",
+    )
     ap.add_argument("--label", default="gate8")
     ap.add_argument("--replays", type=int, default=3)
     ap.add_argument(
@@ -364,6 +517,13 @@ def main(argv: list[str] | None = None) -> int:
         label=args.label,
         replays=args.replays,
         max_buckets=args.max_buckets,
+        a1=args.a1,
+        binary=args.target_binary,
+        entry_symbol=args.entry_symbol,
+        module_prefix=args.module_prefix,
+        a2_cache=args.a2_cache,
+        data_symbols=args.data_symbols,
+        allow_config_fallback=args.allow_config_fallback,
     )
     result = analyse(config)
 

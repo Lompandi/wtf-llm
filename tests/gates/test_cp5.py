@@ -53,8 +53,41 @@ class _Probe(BaseModel):
 
 @pytest.fixture(scope="module")
 def client() -> LlmClient:
+    """A client built from the real config. NEEDS A KEY -- live tests only.
+
+    `from_config` selects the provider by which key is present, so with none it
+    raises "no LLM API key" during SETUP, and a setup error is reported as an ERROR
+    rather than a skip. That took two purely offline tests -- role resolution and
+    unknown-role rejection, both pure config parsing -- down with it in any
+    environment without a key, which is every reviewer's (D-073).
+    """
     with LlmClient.from_config(CONFIG) as c:
         yield c
+
+
+@pytest.fixture(scope="module")
+def offline_client(tmp_path_factory) -> LlmClient:
+    """The same construction path, with a placeholder key and no network.
+
+    Deliberately still `from_config` against the real `config/llm.yaml`: the thing
+    under test is that file's role table and the client's routing over it, so a hand
+    built fake would stop testing the part that can actually drift. Only the
+    credential is substituted, and nothing here issues a request.
+    """
+    monkeypatch = pytest.MonkeyPatch()
+    providers = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))["providers"]
+    for provider in providers.values():
+        env = (provider or {}).get("api_key_env")
+        if env:
+            monkeypatch.delenv(env, raising=False)
+    first = next(iter(providers.values()))
+    monkeypatch.setenv(first["api_key_env"], "offline-placeholder-not-a-key")
+    # `_read_dotenv` would otherwise find the real key and pick whichever provider
+    # that file names, making which provider gets tested depend on the machine.
+    monkeypatch.setenv("SNAPFUZZ_LLM_PROVIDER", next(iter(providers)))
+    with LlmClient.from_config(CONFIG) as c:
+        yield c
+    monkeypatch.undo()
 
 
 # --- config hygiene -------------------------------------------------------
@@ -261,19 +294,19 @@ def test_response_handling_declares_the_null_content_case() -> None:
 # --- routing --------------------------------------------------------------
 
 
-def test_roles_resolve_to_models(client: LlmClient) -> None:
+def test_roles_resolve_to_models(offline_client: LlmClient) -> None:
     """Resolution is per PROVIDER, so the expected prefix is too.
 
     This used to assert `startswith("ais3/")` unconditionally, which would have
     failed on a machine whose only key is an Anthropic one -- an assertion that
     encodes one deployment as the only valid one.
     """
-    for role in client.roles:
-        model = client.model_for(role)
+    for role in offline_client.roles:
+        model = offline_client.model_for(role)
         assert model
-        if client.provider_name == "nchc":
+        if offline_client.provider_name == "nchc":
             assert model.startswith("ais3/")
-        elif client.provider_name == "anthropic":
+        elif offline_client.provider_name == "anthropic":
             assert model.startswith("claude-")
 
 
@@ -293,9 +326,9 @@ def test_a_role_with_no_model_for_the_active_provider_is_an_error(
             c.model_for("triage")
 
 
-def test_unknown_role_is_rejected(client: LlmClient) -> None:
+def test_unknown_role_is_rejected(offline_client: LlmClient) -> None:
     with pytest.raises(LlmError, match="unknown role"):
-        client.model_for("does_not_exist")
+        offline_client.model_for("does_not_exist")
 
 
 def test_excluded_model_cannot_be_routed_to(tmp_path: Path) -> None:

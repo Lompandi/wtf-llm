@@ -203,15 +203,45 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="the target's coverage/ directory -- wtf scans it for *.cov",
     )
+    ap.add_argument(
+        "--module",
+        default=None,
+        help="the module the caller BELIEVES this export describes. Compared against "
+             "the export's own `module` field; a disagreement is an error, because it "
+             "means the export is for a different program",
+    )
     args = ap.parse_args(argv)
 
     export = json.loads(args.export.read_text(encoding="utf-8"))
-    records = blocks_to_records(export)
+
+    # ONE source for the module name. This file names the .cov from the export's own
+    # `module` field, while orchestrator/pipeline.py expects `<binary stem>.cov` --
+    # two derivations of one fact, which is a bug even when they agree. When they
+    # disagreed, they disagreed because the export was a STALE ARTIFACT FOR ANOTHER
+    # TARGET, and the user saw "cov file: tlv_server.cov" followed by
+    # "FAILED: fuzzing-base-test.cov absent" -- a filename complaint for what was
+    # really the wrong program's basic blocks (D-073).
+    #
+    # Reconciled here rather than in the caller: this is the only place that reads the
+    # export, so it is the only place that can compare.
+    exported_module = export.get("module")
+    if args.module and exported_module and args.module != exported_module:
+        raise SystemExit(
+            f"{args.export} describes module {exported_module!r}, but this run is for "
+            f"{args.module!r}. These are different programs -- writing "
+            f"{args.module}.cov from {exported_module}'s basic blocks would place "
+            f"every breakpoint at an address that means nothing in your target, and "
+            f"wtf would report coverage for it. Re-run the block enumeration for "
+            f"{args.module!r} (stage 04), or delete {args.export.name}."
+        )
+    module = args.module or exported_module
+
+    records = blocks_to_records(export, module)
 
     bp_list = write_bp_list(records, args.bp_list)
-    cov = write_cov_file(records, export["image_base"], args.coverage_dir)
+    cov = write_cov_file(records, export["image_base"], args.coverage_dir, module=module)
 
-    parsed = validate_cov_file(cov, expect_name=export["module"])
+    parsed = validate_cov_file(cov, expect_name=module)
     print(f"A3: {len(records)} blocks")
     print(f"  bp list : {bp_list}")
     print(f"  cov file: {cov}  ({len(parsed)} RVAs, name={parsed.name!r})")
