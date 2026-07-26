@@ -93,6 +93,18 @@ class Stage:
     # scheduler writes scheduler_result.json and returns 0 even when it printed
     # "all workers dead" with peak_executions=0.
     verify: Callable[[], str | None] | None = None
+    # Whether an UNCHANGED artifact is legitimate. Default False, because for a
+    # generator -- a Ghidra export, codegen -- byte-identical output means the tool
+    # did not run, which is the false success D-057 exists to catch.
+    #
+    # An INCREMENTAL BUILD is the exception, and getting this wrong broke the
+    # pipeline for real: stage 10 is deliberately never skipped as up-to-date, so
+    # it always invokes the build, and Ninja then correctly relinks nothing when no
+    # source changed. Byte-identical there means "had nothing to do", not "did not
+    # run" -- so the two rules together made stage 10 impossible to pass twice in a
+    # row (D-065). Stages that set this must carry a `verify` hook that checks the
+    # property the comparison was standing in for.
+    output_may_be_unchanged: bool = False
 
 
 @dataclass
@@ -459,6 +471,13 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
             # Existence is not freshness. build.py's own guard exists for exactly
             # this case and the driver was bypassing it (D-057).
             idempotent=False,
+            # Ninja is incremental: with no source change it relinks nothing and
+            # wtf.exe is legitimately byte-identical. Comparing bytes here fought
+            # `idempotent=False` and made this stage unpassable on any second run
+            # (D-065). `build_is_fresh` below is the check that actually matters --
+            # wtf.exe newer than every module source -- and it catches the real
+            # danger, a stale binary running the OLD module while looking healthy.
+            output_may_be_unchanged=True,
             verify=build_is_fresh,
         ),
         Stage(
@@ -966,7 +985,11 @@ def run_pipeline(
             problem = _artifact_problem(path)
             if problem:
                 complaints.append(f"{path.name} {problem}")
-            elif before[path] is not None and after[path] == before[path]:
+            elif (
+                not stage.output_may_be_unchanged
+                and before[path] is not None
+                and after[path] == before[path]
+            ):
                 complaints.append(
                     f"{path.name} is byte-for-byte the file that was already there "
                     f"-- this stage exited 0 without writing it"

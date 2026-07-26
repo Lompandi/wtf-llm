@@ -964,3 +964,31 @@ def test_acquire_stage_calls_no_llm():
 
     stage = {s.key: s for s in build_stages(_config(kd_pipe="p"))}["07a-acquire"]
     assert stage.calls_llm is False
+
+
+def test_an_unchanged_artifact_is_only_forgiven_where_a_verify_hook_replaces_it():
+    """The byte-identical check is what catches a generator that did not run.
+
+    Exempting a stage from it removes that protection, so an exempt stage must
+    carry a `verify` hook checking the property the comparison stood in for.
+    Without that rule the exemption is just a way to switch the check off.
+    """
+    for stage in _stages():
+        if stage.output_may_be_unchanged:
+            assert stage.verify is not None, (
+                f"{stage.key} is exempt from the byte-identical check but has no "
+                f"verify hook, so nothing checks its artifact at all"
+            )
+
+
+def test_only_the_incremental_build_is_exempt():
+    """Pinned narrowly on purpose. The exemption exists for ONE reason -- Ninja
+    relinks nothing when no source changed -- and every other stage here produces
+    generated data, where identical output really does mean the tool did not run.
+
+    This is the bug the flag was added for (D-065): stage 10 is deliberately never
+    skipped as up-to-date, so it always invokes the build, and the byte comparison
+    then failed it on every second run. Two anti-false-success rules cancelling out.
+    """
+    exempt = {s.key for s in _stages() if s.output_may_be_unchanged}
+    assert exempt == {"10-build"}, exempt

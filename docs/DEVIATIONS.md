@@ -2360,3 +2360,43 @@ The check it duplicates also had to change in kind, not just in shape: it used t
 verify one hardcoded variable, and any provider's key is now sufficient. A machine
 with an Anthropic key and no NCHC key would otherwise be told it has no LLM
 access — the same working-thing-reported-missing shape as D-050 and D-060.
+
+## D-065 — two anti-false-success rules cancelled each other out and the build could never pass twice
+
+Reported from a real run:
+
+```
+failed                  2s  10-build: Build wtf + our module
+                            wtf.exe is byte-for-byte the file that was already
+                            there -- this stage exited 0 without writing it
+```
+
+Both halves of that were checks added in D-057, and together they made stage 10
+impossible to pass on any run where no source had changed:
+
+* **`idempotent=False`** on stage 10, so the driver never skips it as up-to-date.
+  Correct: existence is not freshness, and skipping meant the header stage 09 had
+  just regenerated was never compiled.
+* **The byte-identical rule**, applied to every stage: an artifact unchanged after
+  the stage ran means the stage exited 0 without writing it.
+
+`fuzzer.build` runs Ninja, which is incremental. With nothing to do it relinks
+nothing and exits 0 in about two seconds. So the artifact *is* byte-identical, and
+the second rule calls a correct outcome a failure.
+
+**The distinction the rule was missing is generator vs compiler.** For a Ghidra
+export or a codegen step, identical output really does mean the tool did not run --
+that is the false success being hunted. For an incremental build it means "had
+nothing to do", which is the desired behaviour. One rule cannot serve both.
+
+`output_may_be_unchanged` now marks the exception, and a test requires any stage
+carrying it to have a `verify` hook -- otherwise the flag is just a way to disable
+the check. Stage 10 already had the right one: `build_is_fresh` asserts `wtf.exe`
+is newer than every module source, which catches the danger the byte comparison
+was standing in for (a stale binary running the OLD module while looking healthy).
+
+Worth noting where this came from. D-057 was itself the result of hunting
+false successes, and this is the cost of that hunt: a check strict enough to catch
+a lying stage is strict enough to fail an honest one. The fix is not to relax it
+generally but to name the one case where "unchanged" is the correct answer -- and
+to require a real check in its place, so the exemption cannot become a loophole.
