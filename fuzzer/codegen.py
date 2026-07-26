@@ -146,6 +146,24 @@ def _from_json_line(field: InputField) -> str:
     return f"  {conditions}Value.{field.name} = {empty};"
 
 
+def _indent(text: str, prefix: str) -> str:
+    """Re-indent a generated block so it reads correctly in its new nesting."""
+    return "\n".join(prefix + line if line.strip() else line for line in text.splitlines())
+
+
+def _size_register_line(harness: HarnessSpec) -> str:
+    """Set the length register, when the target has one.
+
+    Verbatim from the test-case, never recomputed: the harness must be able to report a
+    size that disagrees with the bytes written, because that disagreement IS the bug
+    class a length-handling parser gets wrong.
+    """
+    if not harness.size_param:
+        return "    // No size register: this target takes only a pointer."
+    register = _register(harness.size_param)
+    return f"    g_Backend->{register}(Bytes);"
+
+
 def _cpp_field(field: InputField) -> str:
     if field.kind == "bytes":
         return f"  std::vector<uint8_t> {field.name};"
@@ -572,8 +590,10 @@ def generate_module(
     # zero executions (D-075). `kFuzzEntry` stays as the string used in the log lines.
     if entry_bp.rva is not None:
         entry_module = entry_bp.symbol.split("!", 1)[0]
+        # Through the resolver, not GetModuleBase directly: a name that does not
+        # resolve returns 0 and puts the breakpoint at 0 + rva, which never fires.
         fuzz_entry_target = (
-            f'Gva_t(g_Dbg->GetModuleBase("{entry_module}") + {entry_bp.rva:#x})'
+            f'Gva_t(ResolveModuleBase("{entry_module}") + {entry_bp.rva:#x})'
         )
     else:
         fuzz_entry_target = "kFuzzEntry"
@@ -595,7 +615,7 @@ def generate_module(
         # does for the same reason (utils.cc:366).
         if bp.rva is not None:
             module = bp.symbol.split("!", 1)[0]
-            target = f'Gva_t(g_Dbg->GetModuleBase("{module}") + {bp.rva:#x})'
+            target = f'Gva_t(ResolveModuleBase("{module}") + {bp.rva:#x})'
         else:
             target = name
         simulated.append(
@@ -612,7 +632,101 @@ def generate_module(
             f"  }}\n"
         )
 
+    # WHERE THE TEST-CASE GOES. Two placements, and which one is correct depends on a
+    # fact only the target's code knows -- see HarnessSpec.input_buffer_bytes.
+    page = 0x1000
+    input_reg_getter = _register(harness.input_param)
+    input_reg_setter = _register(harness.input_param)
+    buffer_bytes = harness.input_buffer_bytes
+    if buffer_bytes is not None and buffer_bytes < page:
+        placement = "\n".join(
+            [
+                f"        // The target provides {buffer_bytes} bytes at "
+                f"{harness.input_param}, which is smaller than a page, so the",
+                "        // test-case is written AT the pointer. The page-end placement",
+                "        // below is only valid for a page-sized scratch area: against a",
+                f"        // {buffer_bytes}-byte buffer it would write ~{page} bytes past",
+                "        // it and the parser would read untouched memory (D-075).",
+                f"        uint64_t Address = Backend->{input_reg_getter}();",
+                f"        if (Bytes > {buffer_bytes}) {{",
+                f"          // More than the target can hold. Truncating silently would",
+                "          // make an over-long case indistinguishable from a valid one,",
+                "          // so the case is skipped and the next one delivered.",
+                "          GlobalState.Inputs.pop_front();",
+                "          return Backend->Stop(Ok_t());",
+                "        }",
+            ]
+        )
+    else:
+        placement = "\n".join(
+            [
+                "        // Flush against the end of the page, so the guard page sits",
+                "        // immediately behind the data and an over-read faults rather",
+                "        // than silently reading our own bytes. Valid because the target",
+                "        // provides a page-sized scratch area at this pointer.",
+                f"        const uint64_t PageBase = Backend->{input_reg_getter}();",
+                "        uint64_t Address = PageBase + (kPageSize - Bytes);",
+            ]
+        )
+    placement += f"\n        Backend->{input_reg_setter}(Address);"
+
+    entry_module_name = entry_bp.symbol.split("!", 1)[0]
+
+    # WHEN THE SNAPSHOT ALREADY SITS AT THE ENTRY, THE BREAKPOINT NEVER FIRES.
+    #
+    # A breakpoint is hit by ARRIVING at an address. `rip` in these snapshots IS the fuzz
+    # entry -- that is what "break at the parser, then snapshot" means -- so execution
+    # begins there and a breakpoint on it is never reached. The development target
+    # survives this by accident: it delivers a SEQUENCE, and its return-address
+    # breakpoint loops back into the entry, so the second and later passes do fire.
+    #
+    # A single-structure target gets one pass. Nothing fires, nothing is written, the
+    # parser reads whatever the snapshot happened to contain, and the campaign reports
+    # coverage while never delivering an input. Measured: byte-identical coverage and
+    # instruction counts for a correct and a deliberately corrupted magic value, which is
+    # what distinguished "not delivered" from "delivered and rejected" (D-075).
+    #
+    # `InsertTestcase` runs after the snapshot is restored and before execution resumes,
+    # which is exactly the moment to write. The SAME field-by-field writes are emitted,
+    # against `g_Backend` rather than the handler's `Backend`.
+    # DELIVERY WHEN THE SNAPSHOT ALREADY SITS AT THE ENTRY -- an open problem, and the
+    # generated code says so rather than pretending otherwise.
+    #
+    # A breakpoint is hit by ARRIVING at an address. `rip` in these snapshots IS the fuzz
+    # entry, so execution begins there and a breakpoint on it is never reached. The
+    # development target survives by accident: it delivers a SEQUENCE, and its
+    # return-address breakpoint loops back into the entry, so later passes do fire.
+    #
+    # A single-structure target gets one pass, so nothing fires and nothing is delivered.
+    # Measured: byte-identical coverage (8343) and instruction counts for a correct and a
+    # deliberately corrupted magic value, which is what distinguishes "not delivered"
+    # from "delivered and rejected".
+    #
+    # WHAT WAS TRIED AND DOES NOT WORK: writing guest memory inside `InsertTestcase`.
+    # The call order permits it -- wtf calls InsertTestcase and only then
+    # `g_Backend->Run()` (client.cc:102-111) -- but the backend is not ready for writes
+    # that early: coverage collapsed from 8343 to 1 with `cr3: 0`, both when reading the
+    # input pointer from `g_Backend` (whose registers are not live yet, so it wrote to
+    # address 0) and when reading it from the CpuState stored in Init. So the ordering is
+    # necessary but not sufficient, and the fix is not here.
+    #
+    # UNTRIED, in the order worth trying: a breakpoint one instruction PAST the entry,
+    # which execution does reach; the entry's caller; or whatever wtf itself offers for
+    # "deliver before the first instruction" -- RULE 2 says read the source before
+    # guessing again, and that reading has not been done (D-075).
+    immediate_delivery = "\n".join(
+        [
+            "  // Delivery happens at the entry breakpoint below. NOTE: when the",
+            "  // snapshot's rip IS the entry, that breakpoint never fires -- see the",
+            "  // comment in fuzzer/codegen.py. A single-structure target is affected;",
+            "  // a sequence is not.",
+        ]
+    )
+
     return MODULE_TEMPLATE.format(
+        immediate_delivery=immediate_delivery,
+        entry_module_name=entry_module_name,
+        placement=placement,
         fuzz_entry_target=fuzz_entry_target,
         spec_path=spec_path,
         harness_path=harness_path,

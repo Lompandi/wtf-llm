@@ -502,3 +502,70 @@ def test_the_generated_header_compiles(tmp_path: Path) -> None:
         encoding="utf-8", errors="replace", timeout=900,
     )
     assert result.returncode == 0, result.stdout[-3000:]
+
+
+def test_a_reversed_magic_constant_is_caught() -> None:
+    """Measured on a real target: the model got the byte order backwards (D-075).
+
+    Its own rationale said the magic is 0x74736574 and it filled `magic_value` with
+    0x74657374 -- the same four characters in the opposite order. That writes `tset`, so
+    every test-case failed the target's first comparison and no mutation could recover:
+    the constant is checked before anything else runs.
+
+    Nothing caught it. A schema cannot -- both are valid uint32_t -- and the campaign
+    could not, because "coverage stopped growing" is indistinguishable from "this target
+    is small". Converting the value back to bytes and comparing against the characters
+    the code compares against does catch it.
+    """
+    from prep.input_struct import check_against_pseudoc
+
+    # The shape Ghidra emits for an unrolled byte-wise compare, index 0 written as
+    # `*param_1` rather than `param_1[0]` -- which the first version of the check missed,
+    # on the exact case it was written for.
+    code = (
+        "void fuzzme(char *param_1) {\n"
+        "  if (*param_1 == 't' && param_1[1] == 'e' && param_1[2] == 's' "
+        "&& param_1[3] == 't') {\n"
+        "    process(param_1 + 5, (ulonglong)(byte)param_1[4]);\n"
+        "  }\n"
+        "}\n"
+    )
+
+    def spec_with(magic: int) -> InputSpec:
+        return InputSpec(
+            module="fuzzing-base-test",
+            entry_symbol="fuzzme",
+            fields=[
+                InputField(name="magic", kind="magic", ctype="uint32_t", magic_value=magic),
+                InputField(
+                    name="payload_len", kind="length", ctype="uint8_t",
+                    counts_field="payload", unit="bytes",
+                ),
+                InputField(name="payload", kind="bytes", max_length=65),
+            ],
+        )
+
+    reversed_warnings = check_against_pseudoc(spec_with(0x74657374), code)
+    assert any("byte order is reversed" in w for w in reversed_warnings), reversed_warnings
+    # And it says what the value should be, since a warning that only says "wrong" leaves
+    # the reader to redo the arithmetic that produced the mistake.
+    assert any(f"{int.from_bytes(b'test', 'little'):#x}" in w for w in reversed_warnings)
+
+    # Silent when the spec agrees with the code -- otherwise the check is noise and gets
+    # ignored, which is worse than not having it.
+    assert not [
+        w
+        for w in check_against_pseudoc(spec_with(int.from_bytes(b"test", "little")), code)
+        if "byte order" in w
+    ]
+
+
+def test_the_magic_check_reads_a_string_literal_too() -> None:
+    """`strncmp(param_1, "test", 4)` is the other shape, when the compiler did not
+    unroll the comparison. Both are read because which one appears depends on the
+    compiler, and neither is more authoritative."""
+    from prep.input_struct import _ascii_literals
+
+    assert b"test" in _ascii_literals('strncmp(param_1, "test", 4);', 4)
+    # Width-filtered: a longer literal is not a 4-byte magic.
+    assert _ascii_literals('strcmp(param_1, "abcdefgh");', 4) == set()

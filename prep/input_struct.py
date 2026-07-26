@@ -236,6 +236,8 @@ def check_against_pseudoc(spec: InputSpec, code: str) -> list[str]:
     warnings: list[str] = []
     header = spec.header_bytes
 
+    warnings.extend(_magic_byte_order_warnings(spec, code))
+
     # A size guard is the most common way a parser states its header length, and
     # it is a strong cross-check on the field layout.
     import re
@@ -273,6 +275,107 @@ def check_against_pseudoc(spec: InputSpec, code: str) -> list[str]:
             "never the length -- confirm the parser really has no tail"
         )
     return warnings
+
+
+def _ascii_literals(code: str, width: int) -> set[bytes]:
+    """Character sequences the code compares against, as `width`-byte strings.
+
+    Two shapes cover what decompilers emit for a magic check:
+
+    * per-character comparisons -- `param_1[0] == 't'`, which Ghidra produces for a
+      byte-wise memcmp the compiler unrolled;
+    * a string literal -- `strncmp(param_1, "test", 4)`.
+
+    Both are read, because which one appears depends on how the compiler inlined the
+    comparison and neither is more authoritative.
+    """
+    import re
+
+    found: set[bytes] = set()
+
+    # `param_1[0] == 't'` ... in index order, however the lines are interleaved.
+    by_index: dict[int, str] = {}
+    for match in re.finditer(r"\[\s*(\d+)\s*\]\s*==\s*'(.)'", code):
+        by_index[int(match.group(1))] = match.group(2)
+    # Index 0 is usually written `*param_1 == 't'`, not `param_1[0] == 't'`. Missing it
+    # broke the run at the first element and the check found nothing at all -- on the
+    # exact case it was written for.
+    for match in re.finditer(r"\*\s*\w+\s*==\s*'(.)'", code):
+        by_index.setdefault(0, match.group(1))
+    if by_index:
+        run = []
+        for index in range(max(by_index) + 1):
+            if index not in by_index:
+                break
+            run.append(by_index[index])
+        if len(run) >= width:
+            found.add("".join(run[:width]).encode("ascii", "ignore"))
+
+    for match in re.finditer(r'"((?:[ -~]){2,32})"', code):
+        literal = match.group(1).encode("ascii", "ignore")
+        if len(literal) == width:
+            found.add(literal)
+
+    return {f for f in found if len(f) == width}
+
+
+def _magic_byte_order_warnings(spec: InputSpec, code: str) -> list[str]:
+    """Catch a magic constant whose BYTE ORDER is reversed.
+
+    Measured on a real target (D-075). The model read `fuzzme` correctly -- its own
+    rationale said the magic is `0x74736574` -- and then filled `magic_value` with
+    `0x74657374`, which is the same four characters in the opposite order. On the wire
+    that writes `tset`, so every single test-case failed the target's first check and no
+    amount of mutation could recover: the constant is compared before anything else runs.
+
+    Nothing caught it. A schema cannot -- both values are valid integers of the right
+    width -- and the campaign could not, because "coverage stopped growing" looks
+    identical to "this target is small". But it IS mechanically checkable: convert the
+    value back to bytes and see whether the characters the code compares against appear
+    in that order or the reverse.
+
+    A warning, not a correction. The evidence is strong but it is still an inference from
+    decompiler output, and silently rewriting a derived constant would hide the one case
+    where the reversal is what the target actually wants.
+    """
+    out: list[str] = []
+    widths = {"uint8_t": 1, "uint16_t": 2, "uint32_t": 4, "uint64_t": 8}
+    for field in spec.fields:
+        if field.kind != "magic" or field.magic_value is None or not field.ctype:
+            continue
+        width = widths.get(field.ctype)
+        if not width or width < 2:
+            continue
+
+        literals = _ascii_literals(code, width)
+        if not literals:
+            continue
+
+        value = int(field.magic_value)
+        try:
+            as_written = value.to_bytes(width, "little" if field.little_endian else "big")
+        except OverflowError:
+            continue
+        reversed_bytes = as_written[::-1]
+
+        if as_written in literals:
+            continue  # agrees with the code
+        if reversed_bytes in literals:
+            # `reversed_bytes` already IS the literal the code compares against, so
+            # the value wanted is that read back in the field's own byte order.
+            # Reversing again returned the original wrong value -- the check reported
+            # the defect and then told the reader to keep it.
+            corrected = int.from_bytes(
+                reversed_bytes, "little" if field.little_endian else "big"
+            )
+            out.append(
+                f"magic field {field.name!r} is {value:#x}, which puts "
+                f"{as_written!r} on the wire, but the code compares against "
+                f"{reversed_bytes!r} -- the byte order is reversed. It should be "
+                f"{corrected:#x}. Every test-case fails the target's first check with "
+                f"the current value, and no mutation can recover from it (D-075)"
+            )
+    return out
 
 
 def derive_input_spec(

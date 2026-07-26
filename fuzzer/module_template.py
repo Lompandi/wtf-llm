@@ -172,13 +172,67 @@ bool InsertTestcase(const uint8_t *Buffer, const size_t BufferSize) {{
     return true;
   }}
 
+{immediate_delivery}
   return true;
 }}
 
 //
 // Init -- runs on the WORKER, once.
 //
+
+
+//
+// WHERE THE TARGET MODULE IS MAPPED.
+//
+// `g_Dbg->GetModuleBase(name)` is the obvious answer, and on a real target it returned
+// **0**: that snapshot's `symbol-store.json` had been written by an earlier run against
+// a different program and carried no entry for this one. The breakpoint then went to
+// `0 + rva`, which is not mapped, so it never fired -- and Init returned true anyway.
+// The campaign ran to completion, reported coverage, delivered nothing, found nothing
+// (D-075).
+//
+// So: the name first, then SNAPFUZZ_MODULE_BASE, which the runner sets from A1 -- where
+// the base came from walking the dump's own page tables and matching the PE header, and
+// so does not depend on any name resolving. If neither works this returns 0 and Init
+// REFUSES, because a harness that cannot place its breakpoint must not report success.
+//
+static uint64_t ResolveModuleBase(const char *Name) {{
+  const uint64_t FromDebugger = g_Dbg->GetModuleBase(Name);
+  if (FromDebugger != 0) {{
+    return FromDebugger;
+  }}
+
+  const char *Env = std::getenv("SNAPFUZZ_MODULE_BASE");
+  if (Env != nullptr && Env[0] != 0) {{
+    const uint64_t FromEnv = std::strtoull(Env, nullptr, 0);
+    if (FromEnv != 0) {{
+      fmt::print("{namespace_name}: GetModuleBase returned 0 for {{}}; using "
+                 "SNAPFUZZ_MODULE_BASE={{:#x}}\\n",
+                 Name, FromEnv);
+      return FromEnv;
+    }}
+  }}
+
+  fmt::print("{namespace_name}: cannot locate module {{}} in this snapshot.\\n"
+             "  GetModuleBase returned 0 and SNAPFUZZ_MODULE_BASE is unset or zero.\\n"
+             "  A breakpoint at 0 + rva never fires, so nothing would be delivered\\n"
+             "  and the campaign would report coverage while finding nothing.\\n"
+             "  Check state/symbol-store.json describes THIS program: wtf merges into\\n"
+             "  that file, so a previous target's entries can survive.\\n",
+             Name);
+  return 0;
+}}
+
 bool Init(const Options_t &Opts, const CpuState_t &State) {{
+  //
+  // Resolve the module BEFORE installing anything. Failing here is the difference
+  // between an error and a campaign that reports coverage while delivering nothing.
+  //
+  if (ResolveModuleBase("{entry_module_name}") == 0) {{
+    return false;
+  }}
+
+
   GlobalState.Context = State;
 
   const Gva_t Rsp = Gva_t(g_Backend->Rsp());
@@ -215,9 +269,7 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {{
         // guard page must sit behind the real data, or an over-reported size would
         // read our own bytes instead of faulting.
         //
-        const uint64_t PageBase = Backend->{input_reg_getter}();
-        uint64_t Address = PageBase + (kPageSize - Bytes);
-        Backend->{input_reg_setter}(Address);
+{placement}
 
 {write_body}
         GlobalState.Inputs.pop_front();

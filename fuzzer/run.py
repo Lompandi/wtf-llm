@@ -76,7 +76,10 @@ def resolve_symbol_paths(
 
 
 def build_env(
-    *, symbol_paths: list[str] | None = None, seed_spool: Path | None = None
+    *,
+    symbol_paths: list[str] | None = None,
+    seed_spool: Path | None = None,
+    module_base: int | None = None,
 ) -> dict[str, str]:
     """The environment every wtf child needs."""
     env = dict(os.environ)
@@ -93,6 +96,15 @@ def build_env(
         # Read by CustomMutator_t on the master (section 12.1). Harmless on a
         # worker, which never looks at it.
         env["SNAPFUZZ_SEED_SPOOL"] = str(seed_spool)
+
+    if module_base:
+        # Where the target module is mapped, from A1 -- derived by walking the dump's own
+        # page tables and matching the PE header, so it does not depend on a name
+        # resolving. The generated harness prefers GetModuleBase and falls back to this,
+        # because on a real target GetModuleBase returned 0: that snapshot's
+        # symbol-store.json had been written by an earlier run against a different
+        # program and had no entry for this one (D-075).
+        env["SNAPFUZZ_MODULE_BASE"] = hex(module_base)
 
     return env
 
@@ -247,7 +259,13 @@ class Campaign:
 
     def start(self) -> None:
         cfg = self.config
-        env = build_env(symbol_paths=cfg.symbol_paths, seed_spool=cfg.seed_spool)
+        env = build_env(
+            symbol_paths=cfg.symbol_paths,
+            seed_spool=cfg.seed_spool,
+            # From A1, so the harness can place its breakpoint even when the
+            # snapshot's symbol-store.json does not name this module (D-075).
+            module_base=self.space.module_base,
+        )
         SeedSpool(cfg.seed_spool).ensure()
 
         corpus = Corpus(cfg.target_dir)

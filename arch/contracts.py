@@ -635,6 +635,27 @@ class HarnessSpec(BaseModel):
 
     # A structure larger than this is dropped rather than delivered. Bounded
     # because the delivery buffer is page-backed.
+    # HOW MUCH ROOM THE TARGET PROVIDES at the input pointer, when the code says.
+    #
+    # The generated harness placed every test-case at `Rcx + (0x1000 - size)` -- the end
+    # of a 4 KB page. That is a deliberate technique and it is right for the development
+    # target, whose snapshot points Rcx at a page-aligned scratch area: putting the
+    # packet flush against the page boundary turns an over-read, which section 2 lists as
+    # undetectable, into an access violation.
+    #
+    # It is wrong whenever the buffer is NOT a page. This target's caller "prepares a
+    # 32-byte stack buffer, initializes it to zeros, and passes it to fuzzme" -- the
+    # model's own words -- so writing at Rcx + 0x1000 - size lands roughly four kilobytes
+    # past it, in unrelated stack memory. The parser then read the untouched zeros,
+    # failed its magic check and returned, for every test-case of every run. Coverage was
+    # identical whether the magic constant was right or wrong, which is what finally gave
+    # it away (D-075).
+    #
+    # None means "not stated", and the generator keeps the page-end placement -- the
+    # development target's recorded behaviour is unchanged. A value smaller than a page
+    # means write AT the pointer instead.
+    input_buffer_bytes: int | None = None
+
     max_input_bytes: int = 4096
 
     rationale: str = ""
