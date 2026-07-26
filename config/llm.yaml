@@ -180,6 +180,40 @@ roles:
       judgment matters", and choosing what to silence and when a test-case has
       ended is judgement over lossy pseudo-C, not lookup. Runs once per target, so
       the cost is irrelevant next to a human doing it.
+  codegen:
+    models:
+      # The 550B writes the wtf module C++ directly, rather than filling a schema for
+      # fuzzer/codegen.py to render.
+      #
+      # This is a deliberate reversal of the split fuzzer/codegen.py argues for, made
+      # on the project owner's instruction after seeing both outputs. The argument
+      # against it is real and stays true: a compile error from model-written C++
+      # surfaces in the toolchain far from the mistake, and free-form C++ cannot be
+      # schema-checked the way an InputSpec can. What makes it acceptable here is that
+      # the check does not have to be a schema -- it can be the COMPILER, plus a
+      # campaign that has to produce coverage. Both run in the pipeline, both are
+      # objective, and `--codegen template` is one flag away if a generation is bad.
+      #
+      # 550B rather than the 30B: writing a correct InsertTestcase means reasoning about
+      # guest memory, register conventions and when an iteration ends, which is the same
+      # class of judgement harness_derive is routed here for.
+      nchc: ais3/nemotron-3-ultra-550b
+      anthropic: claude-opus-5
+      openai: null
+    # 0.0: there is one correct way to serialise a given structure into guest memory,
+    # and sampling diversity in generated C++ buys nothing but compile errors.
+    temperature: 0.0
+    # 16384, matching harness_derive, which is the same model on the same endpoint and
+    # is known to work there. 32768 was tried first and the endpoint answered HTTP 500 --
+    # so the larger budget the answer arguably wants is not available, and a request that
+    # fails outright is worth less than a smaller one that returns.
+    max_tokens: 16384
+    why: >-
+      Build time, once per target, never in the fast loop -- so RULE 1 is unaffected,
+      the same way stages 03, 08 and 08b are. Verified by compiling the result and
+      requiring the campaign to produce coverage, which is a stronger check than a
+      schema: a schema-valid spec can still render a harness that never delivers input,
+      and a module that compiles and produces coverage demonstrably does.
   crash_prefilter:
     models:
       nchc: ais3/gemma-4-26b

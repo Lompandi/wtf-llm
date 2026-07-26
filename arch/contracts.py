@@ -361,6 +361,25 @@ class InputField(BaseModel):
 
     name: str
     kind: FieldKind
+    # OTHER NAMES THIS FIELD HAS BEEN CALLED, accepted when reading a test-case.
+    #
+    # Edge 14 -- compiling the derived structure into the shipped module -- was left
+    # unwired for one concrete reason: the model names fields from pseudo-C, so it calls
+    # the development target's four fields Cmd/HeaderInfo/PayloadSize/Payload while the
+    # hand-written module calls them Command/Id/BodySize/Body. Adopting the generated
+    # struct would therefore stop 149 recorded corpus files and 52 crash files from
+    # parsing, and re-deriving them is not possible -- they are the record of campaigns
+    # that already happened (D-055).
+    #
+    # Renaming a field is not what invalidates a corpus. Renaming a field WITHOUT
+    # keeping the old key readable is. So the generated `from_json` tries the canonical
+    # name and then each of these, and the recorded corpus keeps parsing with no file
+    # rewritten and no campaign re-run (D-075).
+    #
+    # Filled by OFFSET AND WIDTH, never by name -- see `fuzzer/aliases.py`. Matching on
+    # names would be matching the model's word choice against a human's, which is
+    # exactly the comparison CP11's gate forbids.
+    legacy_names: list[str] = Field(default_factory=list)
     ctype: CIntType | None = None  # None only for `bytes`, which is variable-length
     little_endian: bool = True
 

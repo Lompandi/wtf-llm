@@ -150,6 +150,19 @@ class PipelineConfig:
     # development target renames the test-case JSON keys, invalidating the recorded
     # corpus and crash files, which is why edge 14 sat unwired (D-055, D-073).
     generated_harness: bool | None = None
+    # WHO WRITES THE MODULE C++. "template" renders it from the InputSpec with
+    # deterministic code; "llm" asks the 550B for the translation unit directly.
+    #
+    # fuzzer/codegen.py argues for the template split and the argument is real -- a
+    # compile error from model-written C++ lands far from the mistake, and free-form C++
+    # cannot be schema-checked. What makes "llm" defensible is that the check here is not
+    # a schema: the result must COMPILE under /WX and the campaign built from it must
+    # produce coverage, both of which this pipeline already enforces. Those are stronger
+    # conditions than schema-validity, which a harness that never delivers input can
+    # satisfy.
+    #
+    # Default stays "template" because it is the path with measured results behind it.
+    codegen: str = "template"
     repo_root: Path = REPO_ROOT
 
     def __post_init__(self) -> None:
@@ -328,7 +341,11 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
         if not wanted:
             return f"{spec_json.name} names no struct and no fields"
 
-        targets = [generated] + ([generated_module] if use_generated_harness else [])
+        if config.codegen == "llm" and use_generated_harness:
+            # The model writes the module and no header, so that is what to check.
+            targets = [generated_module]
+        else:
+            targets = [generated] + ([generated_module] if use_generated_harness else [])
         for path in targets:
             if not path.exists():
                 return f"{path.name} was not written"
@@ -668,22 +685,37 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
         Stage(
             key="09-codegen",
             title=(
-                "InputSpec + HarnessSpec -> generated module (no LLM)"
+                "InputSpec + HarnessSpec -> generated module [the model writes the C++]"
+                if config.codegen == "llm" and use_generated_harness
+                else "InputSpec + HarnessSpec -> generated module (no LLM)"
                 if use_generated_harness
                 else "InputSpec -> C++ header (no LLM)"
             ),
-            argv=py(
-                "fuzzer.codegen", "--spec", str(spec_json), "--out", str(generated),
-                *(
-                    ["--harness", str(harness_json),
-                     "--module-out", str(generated_module)]
-                    if use_generated_harness
-                    else []
-                ),
+            argv=(
+                py(
+                    "fuzzer.codegen_llm",
+                    "--spec", str(spec_json),
+                    "--harness", str(harness_json),
+                    "--module-out", str(generated_module),
+                )
+                if config.codegen == "llm" and use_generated_harness
+                else py(
+                    "fuzzer.codegen", "--spec", str(spec_json), "--out", str(generated),
+                    *(
+                        ["--harness", str(harness_json),
+                         "--module-out", str(generated_module)]
+                        if use_generated_harness
+                        else []
+                    ),
+                )
             ),
             needs=[spec_json] + ([harness_json] if use_generated_harness else []),
             produces=(
-                [generated, generated_module] if use_generated_harness else [generated]
+                [generated_module]
+                if config.codegen == "llm" and use_generated_harness
+                else [generated, generated_module]
+                if use_generated_harness
+                else [generated]
             ),
             # A deterministic renderer given the same spec writes the same bytes. That
             # is agreement, not a no-op, and treating it as failure made a second run on
@@ -691,6 +723,7 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
             # the byte comparison stood in for.
             output_may_be_unchanged=True,
             verify=generated_code_matches_the_spec,
+            calls_llm=(config.codegen == "llm" and use_generated_harness),
             note=(
                 "EDGE 14: the generated module is compiled by stage 10 and run by "
                 "stage 11, so the derived structure is what reaches the guest. The "
@@ -1628,6 +1661,14 @@ def main(argv: list[str] | None = None) -> int:
              "development target, whose recorded corpus and crash files are "
              "keyed to its test-case JSON",
     )
+    ap.add_argument(
+        "--codegen",
+        choices=("template", "llm"),
+        default="template",
+        help="who writes the module C++: the deterministic renderer, or the "
+             "550B directly. `llm` is checked by the compiler and by the "
+             "campaign having to produce coverage, not by a schema",
+    )
     ap.add_argument("--scope", choices=("module", "function-closure"), default="module")
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--minutes", type=float, default=15.0)
@@ -1711,6 +1752,7 @@ def main(argv: list[str] | None = None) -> int:
         replays=args.replays,
         label=args.label or args.target_name or "pipeline",
         generated_harness=args.generated_harness,
+        codegen=args.codegen,
         kd_pipe=args.kd_pipe,
         kd_stimulus=args.kd_stimulus,
         kd_timeout_s=args.kd_timeout_s,

@@ -94,6 +94,36 @@ def ascii_comment(text: str) -> str:
     return "".join(out).replace("*/", "* /")
 
 
+def _from_json_line(field: InputField) -> str:
+    """One field's `from_json` read, accepting its legacy names as fallbacks.
+
+    Emitted as nested `Json.contains` checks rather than a chain of `Json.value`
+    defaults, because a default cannot distinguish "absent" from "present and zero" --
+    and `0` is a perfectly ordinary value for a command byte. Getting that wrong would
+    silently read 0 for every field whose canonical name is absent, which is the whole
+    recorded corpus.
+    """
+    if field.kind == "bytes":
+        cpp_type = "std::vector<uint8_t>"
+        empty = "std::vector<uint8_t>{}"
+    else:
+        cpp_type = field.ctype
+        empty = f"{field.ctype}(0)"
+
+    names = [field.name, *field.legacy_names]
+    if len(names) == 1:
+        return f'  Value.{field.name} = Json.value("{field.name}", {empty});'
+
+    # `Command` (hand-written) and `command` (derived) are the same field to a reader
+    # and different keys to nlohmann::json, so every name is tried in order.
+    conditions = " ".join(
+        f'if (Json.contains("{name}")) Value.{field.name} = '
+        f'Json.at("{name}").get<{cpp_type}>();\n  else '
+        for name in names
+    )
+    return f"  {conditions}Value.{field.name} = {empty};"
+
+
 def _cpp_field(field: InputField) -> str:
     if field.kind == "bytes":
         return f"  std::vector<uint8_t> {field.name};"
@@ -378,9 +408,16 @@ def generate_module(
     to_json = ",\n".join(
         f'      {{"{n}", Value.{n}}}' for n in names
     )
+    # Each field reads its canonical name and then its legacy ones, so a corpus written
+    # against an older set of names keeps parsing (edge 14, D-075). `WireSize` is not a
+    # spec field -- it is the generated override -- so it keeps the simple form.
     from_json = "\n".join(
-        f'  Value.{n} = Json.value("{n}", {_json_default_by_name(spec, n)});'
-        for n in names
+        [_from_json_line(f) for f in spec.fields]
+        + (
+            [f'  Value.WireSize = Json.value("WireSize", {_json_default_by_name(spec, "WireSize")});']
+            if spec.wire_size_override
+            else []
+        )
     )
 
     # --- sequence handling ------------------------------------------------

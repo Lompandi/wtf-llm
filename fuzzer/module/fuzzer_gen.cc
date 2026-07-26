@@ -6,7 +6,7 @@
 //
 // Both were derived from Ghidra pseudo-C by an LLM. Regenerate with:
 //
-//     python -m fuzzer.codegen --spec artifacts\input_spec.json --harness artifacts\harness_spec.json \
+//     python -m fuzzer.codegen --spec C:\Users\Caspe\AppData\Local\Temp\spec_aliased.json --harness artifacts\harness_spec.json \
 //         --module-out <this file>
 //
 // Target : tlv_server!ProcessPacket
@@ -44,7 +44,7 @@
 #include <system_error>
 #include <vector>
 
-namespace GenTlv {
+namespace GenTlvServer {
 
 namespace sfs = std::filesystem;
 namespace json = nlohmann;
@@ -54,7 +54,7 @@ constexpr bool LoggingOn = false;
 template <typename... Args_t>
 void DebugPrint(const char *Format, const Args_t &...args) {
   if constexpr (LoggingOn) {
-    fmt::print("GenTlv: ");
+    fmt::print("GenTlvServer: ");
     fmt::print(Format, args...);
   }
 }
@@ -127,10 +127,18 @@ inline void to_json(json::json &Json, const Packet_t &Value) {
 // entry written before a field was added.
 //
 inline void from_json(const json::json &Json, Packet_t &Value) {
-  Value.Cmd = Json.value("Cmd", uint32_t(0));
-  Value.HeaderInfo = Json.value("HeaderInfo", uint16_t(0));
-  Value.PayloadSize = Json.value("PayloadSize", uint16_t(0));
-  Value.Payload = Json.value("Payload", std::vector<uint8_t>{});
+  if (Json.contains("Cmd")) Value.Cmd = Json.at("Cmd").get<uint32_t>();
+  else  if (Json.contains("Command")) Value.Cmd = Json.at("Command").get<uint32_t>();
+  else Value.Cmd = uint32_t(0);
+  if (Json.contains("HeaderInfo")) Value.HeaderInfo = Json.at("HeaderInfo").get<uint16_t>();
+  else  if (Json.contains("Id")) Value.HeaderInfo = Json.at("Id").get<uint16_t>();
+  else Value.HeaderInfo = uint16_t(0);
+  if (Json.contains("PayloadSize")) Value.PayloadSize = Json.at("PayloadSize").get<uint16_t>();
+  else  if (Json.contains("BodySize")) Value.PayloadSize = Json.at("BodySize").get<uint16_t>();
+  else Value.PayloadSize = uint16_t(0);
+  if (Json.contains("Payload")) Value.Payload = Json.at("Payload").get<std::vector<uint8_t>>();
+  else  if (Json.contains("Body")) Value.Payload = Json.at("Body").get<std::vector<uint8_t>>();
+  else Value.Payload = std::vector<uint8_t>{};
   Value.WireSize = Json.value("WireSize", uint32_t(0));
 }
 
@@ -283,14 +291,14 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
 
         if (!Backend->VirtWriteStructDirty(Gva_t(Address),
                                            &Input.Cmd)) {
-          fmt::print("GenTlv: failed to write Cmd\n");
+          fmt::print("GenTlvServer: failed to write Cmd\n");
           std::abort();
         }
         Address += sizeof(Input.Cmd);
 
         if (!Backend->VirtWriteStructDirty(Gva_t(Address),
                                            &Input.HeaderInfo)) {
-          fmt::print("GenTlv: failed to write HeaderInfo\n");
+          fmt::print("GenTlvServer: failed to write HeaderInfo\n");
           std::abort();
         }
         Address += sizeof(Input.HeaderInfo);
@@ -302,7 +310,7 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
         //
         if (!Backend->VirtWriteStructDirty(Gva_t(Address),
                                            &Input.PayloadSize)) {
-          fmt::print("GenTlv: failed to write PayloadSize\n");
+          fmt::print("GenTlvServer: failed to write PayloadSize\n");
           std::abort();
         }
         Address += sizeof(Input.PayloadSize);
@@ -311,12 +319,12 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
             !Backend->VirtWriteDirty(Gva_t(Address),
                                      Input.Payload.data(),
                                      Input.Payload.size())) {
-          fmt::print("GenTlv: failed to write Payload\n");
+          fmt::print("GenTlvServer: failed to write Payload\n");
           std::abort();
         }
         GlobalState.Inputs.pop_front();
       })) {
-    fmt::print("GenTlv: failed to SetBreakpoint on {}\n", kFuzzEntry);
+    fmt::print("GenTlvServer: failed to SetBreakpoint on {}\n", kFuzzEntry);
     return false;
   }
 
@@ -332,7 +340,7 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
         GlobalState.RestoreGprs(Backend);
         DebugPrint("back at the entry point, ready for the next input\n");
       })) {
-    fmt::print("GenTlv: failed to SetBreakpoint on the return address\n");
+    fmt::print("GenTlvServer: failed to SetBreakpoint on the return address\n");
     return false;
   }
 
@@ -343,7 +351,7 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
   if (!g_Backend->SetBreakpoint(kSkip01, [](Backend_t *Backend) {
         Backend->SimulateReturnFromFunction(0);
       })) {
-    fmt::print("GenTlv: failed to SetBreakpoint on {}\n", kSkip01);
+    fmt::print("GenTlvServer: failed to SetBreakpoint on {}\n", kSkip01);
     return false;
   }
 
@@ -358,7 +366,7 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
   // every Windows target.
   //
   if (!SetupUsermodeCrashDetectionHooks()) {
-    fmt::print("GenTlv: failed to SetupUsermodeCrashDetectionHooks\n");
+    fmt::print("GenTlvServer: failed to SetupUsermodeCrashDetectionHooks\n");
     return false;
   }
 
@@ -395,15 +403,15 @@ public:
     if (const char *Env = std::getenv("SNAPFUZZ_MUTATOR"); Env && *Env) {
       const std::string Which(Env);
       if (Which == "libfuzzer") {
-        fmt::print("GenTlv: BASELINE arm -- libfuzzer mutator\n");
+        fmt::print("GenTlvServer: BASELINE arm -- libfuzzer mutator\n");
         return LibfuzzerMutator_t::Create(Rng, TestcaseMaxSize);
       }
       if (Which == "honggfuzz") {
-        fmt::print("GenTlv: BASELINE arm -- honggfuzz mutator\n");
+        fmt::print("GenTlvServer: BASELINE arm -- honggfuzz mutator\n");
         return HonggfuzzMutator_t::Create(Rng, TestcaseMaxSize);
       }
       if (Which != "custom") {
-        fmt::print("GenTlv: SNAPFUZZ_MUTATOR={} is not "
+        fmt::print("GenTlvServer: SNAPFUZZ_MUTATOR={} is not "
                    "libfuzzer/honggfuzz/custom; refusing to guess the arm\n",
                    Which);
         std::fflush(stdout);
@@ -615,13 +623,13 @@ private:
   }
 };
 
-} // namespace GenTlv
+} // namespace GenTlvServer
 
 //
 // The registration. ONE artifact, loaded by the master (which uses
 // CustomMutator_t) and every worker (which uses Init / InsertTestcase / Restore).
 // Both roles, one module (edges 21a and 21b).
 //
-Target_t GenTlvTarget("snapfuzz_gen", GenTlv::Init,
-                      GenTlv::InsertTestcase, GenTlv::Restore,
-                      GenTlv::CustomMutator_t::Create);
+Target_t GenTlvServerTarget("snapfuzz_gen", GenTlvServer::Init,
+                      GenTlvServer::InsertTestcase, GenTlvServer::Restore,
+                      GenTlvServer::CustomMutator_t::Create);

@@ -4,7 +4,7 @@
 // prep/input_struct.py derived from Ghidra pseudo-C (CLAUDE.md edges 12 and 14).
 // Regenerate with:
 //
-//     python -m fuzzer.codegen --spec D:\wtf-llm\artifacts\input_spec.json --out <this file>
+//     python -m fuzzer.codegen --spec C:\Users\Caspe\AppData\Local\Temp\spec_aliased.json --out <this file>
 //
 // Target : tlv_server!ProcessPacket
 // Source : ProcessPacket, main

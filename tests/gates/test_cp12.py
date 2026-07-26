@@ -1005,6 +1005,32 @@ def test_exactly_the_expected_stages_call_the_model() -> None:
     }
 
 
+def test_llm_codegen_is_declared_as_spending_when_it_is_selected() -> None:
+    """`--codegen llm` adds a sixth model call, and it has to say so.
+
+    `calls_llm` drives the `[LLM]` marker and the module docstring's account of what one
+    invocation spends, which section 7.3 makes a governed resource. A stage that calls a
+    550B while reporting no LLM use understates the spend in exactly the place a reader
+    looks it up -- and it was False here at first, because the flag was added to the argv
+    and not to the declaration.
+    """
+    default = _stage_running(_stages(), "fuzzer.codegen")
+    assert not default.calls_llm, "the deterministic renderer must not claim to spend"
+    assert "no LLM" in default.title
+
+    stages = _stages(codegen="llm", generated_harness=True)
+    llm_stage = _stage_running(stages, "fuzzer.codegen_llm")
+    assert llm_stage.calls_llm, (
+        "stage 09 calls the model in this mode and does not declare it, so the [LLM] "
+        "marker is absent and the spend is invisible"
+    )
+    assert "no LLM" not in llm_stage.title
+
+    # And the deterministic renderer is not also run: two generators writing the same
+    # file is a race, not a fallback.
+    assert not any(_module_of(s) == "fuzzer.codegen" for s in stages)
+
+
 # --- stage 07a: acquisition is opt-in ------------------------------------
 #
 # The stage needs a guest VM. Adding it unconditionally would fail every run that
