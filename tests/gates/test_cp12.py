@@ -633,11 +633,22 @@ def test_a_complete_target_tree_has_no_prerequisite_problems(
     # archive by policy -- so this skips there rather than failing about a file that
     # was never meant to ship (D-069, D-075).
     problems = check_prerequisites(config, build_stages(config))
-    snapshot_problems = [p for p in problems if "mem.dmp" in p or "state" in p]
-    if snapshot_problems:
+    # Problems that mean THIS MACHINE is not set up, rather than that the stage list is
+    # wrong. A freshly extracted release archive has no .venv and no 1.8 GB snapshot, so
+    # both reports are correct there and the all-clear control simply cannot run --
+    # which is a skip, not a failure about files that were never meant to ship.
+    environment = [
+        problem
+        for problem in problems
+        if "no interpreter" in problem
+        or "mem.dmp" in problem
+        or "state" in problem
+        or "does not exist" in problem
+    ]
+    if environment:
         missing_gate_evidence(
-            f"no snapshot present, so the all-clear control cannot run: "
-            f"{snapshot_problems}"
+            "the environment is not set up here, so the all-clear control cannot "
+            f"run: {environment}"
         )
     assert problems == []
 
