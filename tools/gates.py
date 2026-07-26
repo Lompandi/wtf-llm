@@ -220,11 +220,13 @@ GATES: tuple[GateSpec, ...] = (
             Condition(
                 "killing one worker does not stop the campaign and it is restarted",
                 ("test_killing_a_worker_does_not_stop_the_campaign",),
+                needs="the multi-minute campaign (SNAPFUZZ_LIVE_CP4B=1)",
             ),
             Condition(
                 "the corpus ingest path is resolved and documented, with a test that "
                 "injects a known seed and proves a worker executed it",
                 ("test_injected_seed_reaches_a_worker",),
+                needs="the multi-minute campaign (SNAPFUZZ_LIVE_CP4B=1)",
             ),
             Condition("crash records carry worker_id", ("test_worker_id_is_absent_and_that_is_recorded",)),
         ),
@@ -292,6 +294,9 @@ GATES: tuple[GateSpec, ...] = (
             Condition(
                 "coverage increases after injection on >= 1 target",
                 ("test_llm_seeds_increased_coverage",),
+                needs="a recorded round whose seeds add blocks -- the measured round "
+                "added none (48 covered before, union 48), and tlv_server saturates "
+                "in ~100s, so this needs a target with headroom",
             ),
             Condition(
                 "timing log shows the fast loop never stalled on the LLM",

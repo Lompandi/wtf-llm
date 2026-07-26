@@ -2540,3 +2540,43 @@ driver and on the provider work, and both found real defects. I never ran one on
 own status reporting, and that is where every entry here lives. Auditing the code
 and not the scorecard leaves the scorecard flattering, and the fix is not more
 diligence but a runner that computes the scorecard from the conditions.
+
+## D-071 — I hand-copied the scorecard out of the tool built to compute it
+
+`tools/gates.py` exists so the gate table is derived from CLAUDE.md section 8's
+conditions rather than written by hand (D-070). I then ran it, read its output, and
+**typed the statuses into `docs/PROGRESS.md` by hand** -- recreating the two-sources-
+of-truth problem the runner was built to remove, one commit after removing it.
+
+The same shape in three other places from the same batch:
+
+* `tools/gates.py` and `tools/evidence.py` shipped with **no tests**. The thing that
+  now decides whether every checkpoint passed was itself ungated, which is the
+  substitution RULE 3 forbids one level up.
+* CLAUDE.md section 6 and `arch/contracts.py` were hand-synced after the D-068
+  rename. A rename in one and not the other is precisely how `total_edges: int  #
+  BPs hit` came to disagree with itself inside a single line.
+* The condition-to-test mapping in `GATES` was typed from the test files, and six
+  entries were wrong on the first run. The runner reported them honestly as "no
+  test matched" -- it caught my typos -- but nothing would have caught them if I had
+  not run it.
+
+Four checks now hold the pairs together, two in each direction:
+
+| Check | Catches |
+|---|---|
+| every gate in `GATES` has a PROGRESS row, and vice versa | a gate added to one list only |
+| a gate with a `needs` condition is never PASS | the table sliding back to green without the work |
+| a PARTIAL gate has at least one `needs` condition | a row PARTIAL for a reason the runner cannot see |
+| every condition names a test that exists | a rename silently ending a proof |
+| section 6's field names all exist on the model | spec/code drift after a rename |
+
+**Both drift checks were then negative-controlled** -- CP3 flipped back to PASS and a
+field renamed in the spec only, each confirmed to fail, each restored. A drift check
+that passes on the first run is exactly the one worth proving can fail, because
+"passes immediately" and "cannot fail" look identical from the outside.
+
+The lesson is narrow and worth stating: **building the tool is not the fix. Wiring
+its output to the artifact it is supposed to govern is the fix.** A generator whose
+result gets copied by hand is a linting suggestion, not a source of truth.
+
