@@ -689,39 +689,53 @@ def generate_module(
     # `InsertTestcase` runs after the snapshot is restored and before execution resumes,
     # which is exactly the moment to write. The SAME field-by-field writes are emitted,
     # against `g_Backend` rather than the handler's `Backend`.
-    # DELIVERY WHEN THE SNAPSHOT ALREADY SITS AT THE ENTRY -- an open problem, and the
-    # generated code says so rather than pretending otherwise.
+    # DELIVERY WHEN THE SNAPSHOT ALREADY SITS AT THE ENTRY.
     #
-    # A breakpoint is hit by ARRIVING at an address. `rip` in these snapshots IS the fuzz
-    # entry, so execution begins there and a breakpoint on it is never reached. The
-    # development target survives by accident: it delivers a SEQUENCE, and its
-    # return-address breakpoint loops back into the entry, so later passes do fire.
+    # A breakpoint is hit by ARRIVING at an address, and `rip` in these snapshots IS the
+    # fuzz entry -- so a breakpoint on it never fires. The development target survives by
+    # accident: it delivers a SEQUENCE and its return-address breakpoint loops back into
+    # the entry, so the second and later passes do fire. A single-structure target gets
+    # one pass, and nothing is ever written.
     #
-    # A single-structure target gets one pass, so nothing fires and nothing is delivered.
-    # Measured: byte-identical coverage (8343) and instruction counts for a correct and a
-    # deliberately corrupted magic value, which is what distinguishes "not delivered"
-    # from "delivered and rejected".
+    # The fix is wtf's own pattern, from src/wtf/fuzzer_linux_crash_test.cc:
     #
-    # WHAT WAS TRIED AND DOES NOT WORK: writing guest memory inside `InsertTestcase`.
-    # The call order permits it -- wtf calls InsertTestcase and only then
-    # `g_Backend->Run()` (client.cc:102-111) -- but the backend is not ready for writes
-    # that early: coverage collapsed from 8343 to 1 with `cr3: 0`, both when reading the
-    # input pointer from `g_Backend` (whose registers are not live yet, so it wrote to
-    # address 0) and when reading it from the CpuState stored in Init. So the ordering is
-    # necessary but not sufficient, and the fix is not here.
+    #     if (!g_Backend->VirtWriteDirty(Gva_t(g_Backend->Rdi()), Buffer, BufferSize))
     #
-    # UNTRIED, in the order worth trying: a breakpoint one instruction PAST the entry,
-    # which execution does reach; the entry's caller; or whatever wtf itself offers for
-    # "deliver before the first instruction" -- RULE 2 says read the source before
-    # guessing again, and that reading has not been done (D-075).
-    immediate_delivery = "\n".join(
-        [
-            "  // Delivery happens at the entry breakpoint below. NOTE: when the",
-            "  // snapshot's rip IS the entry, that breakpoint never fires -- see the",
-            "  // comment in fuzzer/codegen.py. A single-structure target is affected;",
-            "  // a sequence is not.",
+    # written inside `InsertTestcase`, which wtf calls immediately before
+    # `g_Backend->Run()` (client.cc:102-111). An earlier attempt at this collapsed
+    # coverage from 8343 to 1, and the difference is what is deliberately absent here:
+    # it does not reassign the input register, and it does not pop the queue on an
+    # oversized case. Minimal, matching the shipped example (D-075).
+    if harness.deliver_sequence:
+        immediate_delivery = "\n".join(
+            [
+                "  // A sequence is delivered one structure per hit of the entry",
+                "  // breakpoint, which fires on the second and later passes.",
+            ]
+        )
+    else:
+        writes_here = [
+            w.replace("Backend->", "g_Backend->")
+            .replace("std::abort();", "return true;")
+            .replace("        ", "    ")
+            for w in writes
         ]
-    )
+        immediate_delivery = "\n".join(
+            [
+                "  //",
+                "  // ONE structure per test-case. Written NOW, at the input pointer,",
+                "  // because rip is already the entry and a breakpoint there would",
+                "  // never fire. Same shape as wtf's own",
+                "  // src/wtf/fuzzer_linux_crash_test.cc.",
+                "  //",
+                "  if (!GlobalState.Inputs.empty()) {",
+                "    const auto &Input = GlobalState.Inputs.front();",
+                f"    uint64_t Address = g_Backend->{input_reg_getter}();",
+                "",
+                "\n\n".join(writes_here),
+                "  }",
+            ]
+        )
 
     return MODULE_TEMPLATE.format(
         immediate_delivery=immediate_delivery,

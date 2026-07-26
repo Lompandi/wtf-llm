@@ -1,7 +1,7 @@
 {
   "type": "evidence-manifest",
-  "recorded_at": 1785068690.9537573,
-  "commit": "a7f95a452ccca2cedba2ba0fc9b4d7900a0a0aad",
+  "recorded_at": 1785072305.9917836,
+  "commit": "725c582fc902d56c28c367477ec563c10fc58883",
   "branch": "snapfuzz/cp0-cp4",
   "note": "artifacts/ and the large target files are gitignored. This manifest is tracked so a recorded gate result can be tied to specific bytes and regenerated -- see tools/evidence.py.",
   "present": 18,
@@ -60,7 +60,7 @@
       "present": true,
       "sha256": "d50f6022cffca54fe67f5160dba0d18c63d6feb07d646ea268197ab65ba3f8ce",
       "size_bytes": 387,
-      "mtime": 1785068424.9952888
+      "mtime": 1785072136.6196208
     },
     {
       "path": "artifacts/a3_bp_list.json",
@@ -71,7 +71,7 @@
       "present": true,
       "sha256": "aca208d866c81553dcf8756a3a23c0fe0fbbb265e0b4dc5ab7de7e52417de954",
       "size_bytes": 6204,
-      "mtime": 1785068425.1704445
+      "mtime": 1785072136.6412582
     },
     {
       "path": "artifacts/a2_pseudoc_module.sqlite",
@@ -82,7 +82,7 @@
       "present": true,
       "sha256": "d9e3a3c7064a9e07b9aff3bcafff8e49386a16891ef4880db1573824503068d6",
       "size_bytes": 151552,
-      "mtime": 1785068425.9518683
+      "mtime": 1785072136.741126
     },
     {
       "path": "artifacts/fuzz_entry_llm.json",
@@ -93,7 +93,7 @@
       "present": true,
       "sha256": "d7c840c92472d3a160abe4f62bdc37445bf6196623b0efe74644b4289e5b46ca",
       "size_bytes": 404,
-      "mtime": 1785068429.5026126
+      "mtime": 1785072137.1141572
     },
     {
       "path": "artifacts/input_spec.json",
@@ -104,7 +104,7 @@
       "present": true,
       "sha256": "a662ed870a052a83c9949d2f89cdb8771ce3b9c1d49f4a5f8794eaf16caa6a4b",
       "size_bytes": 2125,
-      "mtime": 1785068424.7386787
+      "mtime": 1785072136.579747
     },
     {
       "path": "artifacts/runs/gate4/run_metadata.json",
@@ -115,7 +115,7 @@
       "present": true,
       "sha256": "37ea799edd24968bcfa7b1c6e7974e12bc0a29627fc94118d30bdb91a041dcf7",
       "size_bytes": 976,
-      "mtime": 1785068429.9195306
+      "mtime": 1785072137.1585827
     },
     {
       "path": "artifacts/runs/gate4/coverage_summaries.jsonl",
@@ -126,7 +126,7 @@
       "present": true,
       "sha256": "ad665cdee6a1bffcc96207341c0c925dcb86bd86634e4f86ca695ccd6180869e",
       "size_bytes": 1544,
-      "mtime": 1785068429.9109888
+      "mtime": 1785072137.158079
     },
     {
       "path": "artifacts/runs/gate4b/run_metadata.json",
@@ -137,7 +137,7 @@
       "present": true,
       "sha256": "6298cc811c7a1db1eb3aee34aa8f77c3049d645f9796166d54481a38cc5f0f45",
       "size_bytes": 878,
-      "mtime": 1785068430.0180185
+      "mtime": 1785072137.1716375
     },
     {
       "path": "artifacts/runs/gate8/buckets.json",
@@ -148,7 +148,7 @@
       "present": true,
       "sha256": "29fd235b684092a75c2ac0565bb9551779ba09377b5f5028381ee8f39589ac95",
       "size_bytes": 7618,
-      "mtime": 1785068430.3955953
+      "mtime": 1785072137.217937
     },
     {
       "path": "artifacts/runs/gate9/advisory.md",
@@ -159,7 +159,7 @@
       "present": true,
       "sha256": "bb66f3b9aef422bbbd30fa2f214754e371080e7ae7c8a3460166b2876e42a984",
       "size_bytes": 30354,
-      "mtime": 1785068429.5193684
+      "mtime": 1785072137.1161718
     },
     {
       "path": "artifacts/runs/gate9/discarded.jsonl",
@@ -170,7 +170,7 @@
       "present": true,
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "size_bytes": 0,
-      "mtime": 1785068429.5303993
+      "mtime": 1785072137.1176789
     },
     {
       "path": "artifacts/runs/gate10/comparison.json",
@@ -181,7 +181,7 @@
       "present": true,
       "sha256": "bcb88a07e82b7f1a0872d2b0ba13fe38716d0d78c8a0bd2c7e4a353c0248c9a8",
       "size_bytes": 7945,
-      "mtime": 1785068429.813337
+      "mtime": 1785072137.1479785
     },
     {
       "path": "artifacts/runs/gate7/seed_delta.json",
@@ -192,7 +192,7 @@
       "present": true,
       "sha256": "b2eb838bb849d95889b8e1412789c3eb2e3d7c84cec3edff34e814ebbc15fd0b",
       "size_bytes": 289,
-      "mtime": 1785068430.2420318
+      "mtime": 1785072137.1963356
     },
     {
       "path": "artifacts/gates/gate-results.json",
@@ -201,9 +201,9 @@
       "regenerate": "python -m tools.gates run",
       "large": false,
       "present": true,
-      "sha256": "81c8120b1c47faee3b2e50cccda8366d04aacad45df30348d62a09d9fc9e18c2",
-      "size_bytes": 34477,
-      "mtime": 1785068689.0708709
+      "sha256": "664104a0fa87c85987b79d0c20aa20fe6f81d45f53e2aa761a1cecab0a50da37",
+      "size_bytes": 34476,
+      "mtime": 1785072302.65855
     }
   ]
 }
