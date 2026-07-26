@@ -262,22 +262,82 @@ def test_the_spec_no_longer_names_the_renamed_coverage_fields() -> None:
 # --- the evidence manifest ------------------------------------------------
 
 
-def test_the_manifest_is_tracked_and_the_large_files_are_not() -> None:
-    """The whole point of D-069's fix: hashes in git, 1.8 GB out of git."""
+def _inside_a_git_checkout() -> bool:
+    """Whether `git` can answer questions about this tree at all.
+
+    A release ZIP has no `.git`, and neither does an unpacked source archive. The
+    distinction matters because the test below used `git ls-files` unconditionally: in
+    a ZIP that returns empty, and an empty result was read as "the manifest is not
+    tracked" -- a guaranteed failure for a file that was sitting right there. A
+    packaging test that cannot pass in the package is worse than no test.
+    """
     import subprocess
 
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and proc.stdout.strip() == "true"
+
+
+def test_the_manifest_ships_with_the_hashes_it_promises() -> None:
+    """The whole point of D-069's fix: hashes in git, 1.8 GB out of git.
+
+    Checked TWO ways, because the property is "the hashes travel with the source" and
+    git-tracking is only how that is achieved in a checkout:
+
+    * in a git checkout -- the manifest is tracked and the large artifacts are not;
+    * anywhere else (a release ZIP, an unpacked archive) -- the manifest is present and
+      internally consistent, which is the same guarantee arriving by a different route.
+
+    The previous version ran `git ls-files` unconditionally and therefore could not
+    pass inside the artifact it was written to validate (D-075).
+    """
     from tools.evidence import EVIDENCE, MANIFEST
 
     assert MANIFEST.exists(), "run `python -m tools.evidence record`"
-    tracked = subprocess.run(
-        ["git", "ls-files", str(MANIFEST.relative_to(REPO_ROOT)).replace("\\", "/")],
-        cwd=REPO_ROOT, capture_output=True, text=True,
-    ).stdout.strip()
-    assert tracked, f"{MANIFEST} is not tracked, so the hashes ship with nothing"
 
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     assert manifest["entries"], "the manifest lists no artifacts"
     assert len(manifest["entries"]) == len(EVIDENCE)
+    # Consistency, which holds in a ZIP as well as in a checkout: every entry carries
+    # the hash and size that make it checkable without the file being present.
+    for entry in manifest["entries"]:
+        assert entry.get("path"), f"an entry has no path: {entry}"
+        if entry.get("present"):
+            assert entry.get("sha256"), (
+                f"{entry['path']} is present but has no hash, so nothing can be "
+                f"verified against it"
+            )
+
+    if not _inside_a_git_checkout():
+        # The ZIP case. Everything above already ran; there is no git to ask.
+        return
+
+    import subprocess
+
+    relative = str(MANIFEST.relative_to(REPO_ROOT)).replace("\\", "/")
+    tracked = subprocess.run(
+        ["git", "ls-files", relative],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    ).stdout.strip()
+    assert tracked, f"{MANIFEST} is not tracked, so the hashes ship with nothing"
+
+    # And the large ones stay out. This is the half of D-069 that is easy to lose:
+    # committing a 1.8 GB mem.dmp "just this once" is a one-way door.
+    for item in EVIDENCE:
+        if not getattr(item, "large", False):
+            continue
+        listed = subprocess.run(
+            ["git", "ls-files", item.path.replace("\\", "/")],
+            cwd=REPO_ROOT, capture_output=True, text=True,
+        ).stdout.strip()
+        assert not listed, (
+            f"{item.path} is marked too large for git and is tracked anyway"
+        )
 
 
 def test_every_recorded_artifact_says_how_to_regenerate_it() -> None:

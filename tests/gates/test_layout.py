@@ -249,3 +249,186 @@ def test_rip_is_required() -> None:
     with pytest.raises(LayoutError) as exc:
         read_rip(path)
     assert "where execution stopped" in str(exc.value)
+
+
+# --- the derivation, with NO recorded target at all -----------------------
+#
+# Everything above that touches STATE or BINARY skips on a clone, which meant the
+# premise this project now rests on -- a dump, a register state and an exe -- was
+# proven only on the machine holding the 1.8 GB recording. A skip is not a pass
+# (D-075). These use a PE built in-process, so they run anywhere and cover cases a
+# real binary cannot easily provide.
+
+
+def test_the_image_base_is_read_from_a_constructed_pe(tmp_path) -> None:
+    from prep.snapshot_win import read_pe_image_base
+    from tests.gates.pe_fixture import build_pe
+
+    for base in (0x140000000, 0x180000000, 0x10000):
+        path = tmp_path / f"b{base:x}.exe"
+        path.write_bytes(build_pe(image_base=base))
+        assert read_pe_image_base(path) == base
+
+
+def test_a_32_bit_image_is_refused(tmp_path) -> None:
+    """wtf is x86-64 only, so PE32 has to fail here rather than three stages later."""
+    from prep.snapshot_win import SnapshotError, read_pe_image_base
+    from tests.gates.pe_fixture import build_pe
+
+    path = tmp_path / "x86.exe"
+    path.write_bytes(build_pe(magic=0x10B, image_base=0x400000))
+    with pytest.raises(SnapshotError):
+        read_pe_image_base(path)
+
+
+def test_the_recorded_name_beats_the_filename(tmp_path) -> None:
+    """The bug this exists for: a renamed executable.
+
+    wtf resolves breakpoints and .cov files through `GetModuleBase(name)`. Given the
+    filename of a renamed copy it returns 0, the breakpoint lands at `0 + rva`, and the
+    campaign completes with zero coverage and no error. The CodeView record is written
+    at link time and survives the rename.
+    """
+    from prep.layout import pe_module_name
+    from tests.gates.pe_fixture import build_pe
+
+    path = tmp_path / "renamed-by-somebody.exe"
+    path.write_bytes(build_pe(pdb_path=r"C:\obj\the_real_name.pdb"))
+    assert pe_module_name(path) == "the_real_name"
+
+
+def test_a_stripped_binary_falls_back_to_the_filename(tmp_path) -> None:
+    """No debug directory is the normal case for a release build.
+
+    None here, so the caller uses the filename -- the best available answer, and right
+    whenever nobody renamed anything.
+    """
+    from prep.layout import pe_module_name
+    from tests.gates.pe_fixture import build_pe
+
+    path = tmp_path / "stripped.exe"
+    path.write_bytes(build_pe(pdb_path=None))
+    assert pe_module_name(path) is None
+
+
+def test_a_truncated_or_non_pe_file_returns_none_rather_than_raising(tmp_path) -> None:
+    """These run while the caller is deciding what to fuzz, so they must not explode."""
+    from prep.layout import pe_module_name
+    from tests.gates.pe_fixture import build_pe
+
+    for name, data in (
+        ("truncated.exe", build_pe(pdb_path="x.pdb", truncate_to=0x30)),
+        ("empty.exe", b""),
+        ("text.exe", b"this is not a PE at all"),
+        ("mz-only.exe", b"MZ" + bytes(0x100)),
+    ):
+        path = tmp_path / name
+        path.write_bytes(data)
+        assert pe_module_name(path) is None, name
+
+
+def test_pe_identity_distinguishes_two_builds_of_the_same_program(tmp_path) -> None:
+    """What makes the dump match trustworthy.
+
+    The module base is accepted only when the mapped image's TimeDateStamp,
+    AddressOfEntryPoint and SizeOfImage all match the file's. Three fields because one
+    collides: every binary from one build shares a timestamp, and many share a size.
+    """
+    from prep.layout import _pe_identity
+    from tests.gates.pe_fixture import build_pe
+
+    first = _pe_identity(build_pe(timestamp=0x1111, entry_point=0x1000, size_of_image=0x8000))
+    same = _pe_identity(build_pe(timestamp=0x1111, entry_point=0x1000, size_of_image=0x8000))
+    rebuilt = _pe_identity(build_pe(timestamp=0x2222, entry_point=0x1000, size_of_image=0x8000))
+    moved_entry = _pe_identity(build_pe(timestamp=0x1111, entry_point=0x1400, size_of_image=0x8000))
+    grew = _pe_identity(build_pe(timestamp=0x1111, entry_point=0x1000, size_of_image=0x9000))
+
+    assert first == same
+    assert first != rebuilt, "a rebuild is not detected"
+    assert first != moved_entry, "a moved entry point is not detected"
+    assert first != grew, "a size change is not detected"
+
+
+def test_the_whole_derivation_with_a_constructed_pe_and_no_dump(tmp_path) -> None:
+    """End to end on the fallback path, with nothing recorded.
+
+    Constructs an export whose one function sits at a known static address, picks a
+    module base, computes the rip that base implies, and checks the derivation recovers
+    the base and names the function. This is the arithmetic the premise rests on, run
+    where the recorded snapshot does not exist.
+    """
+    from prep.layout import derive_layout
+    from tests.gates.pe_fixture import build_pe
+
+    image_base = 0x140000000
+    entry_static = image_base + 0x2150
+    module_base = 0x7FF800000000  # 64 KB aligned, as any real mapping is
+    rip = module_base + (entry_static - image_base)
+
+    binary = tmp_path / "synthetic.exe"
+    binary.write_bytes(build_pe(image_base=image_base, pdb_path=r"C:\o\synthetic.pdb"))
+    (tmp_path / "regs.json").write_text(json.dumps({"rip": hex(rip)}), encoding="utf-8")
+    (tmp_path / "a2.json").write_text(
+        json.dumps(
+            {
+                "module": "synthetic",
+                "image_base": image_base,
+                "functions": [
+                    {"function": "ParsePacket", "entry_static": entry_static,
+                     "min_static": entry_static, "max_static": entry_static + 0x80},
+                    # A decoy that cannot produce an aligned base.
+                    {"function": "Decoy", "entry_static": entry_static + 1,
+                     "min_static": entry_static + 1, "max_static": entry_static + 2},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    layout = derive_layout(
+        binary=binary,
+        regs_json=tmp_path / "regs.json",
+        export=tmp_path / "a2.json",
+    )
+    assert layout.module_base == module_base
+    assert layout.image_base == image_base
+    assert layout.entry_symbol == "ParsePacket"
+    assert layout.entry_static_addr == entry_static
+    assert layout.slide == module_base - image_base
+    assert layout.module == "synthetic"
+
+
+def test_a_snapshot_taken_outside_any_known_function_is_refused(tmp_path) -> None:
+    """The honest failure. rip in nothing Ghidra found means there is nothing of yours
+    to fuzz at that point, and the message has to say so rather than pick a function."""
+    from prep.layout import LayoutError, derive_layout
+    from tests.gates.pe_fixture import build_pe
+
+    image_base = 0x140000000
+    binary = tmp_path / "s.exe"
+    binary.write_bytes(build_pe(image_base=image_base))
+    # An rip that no aligned base can reconcile with the single function below.
+    (tmp_path / "regs.json").write_text(
+        json.dumps({"rip": hex(0x7FF800000000 + 0x2151)}), encoding="utf-8"
+    )
+    (tmp_path / "a2.json").write_text(
+        json.dumps(
+            {
+                "module": "s",
+                "image_base": image_base,
+                "functions": [
+                    {"function": "Only", "entry_static": image_base + 0x2150,
+                     "min_static": image_base + 0x2150, "max_static": image_base + 0x2200}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(LayoutError) as exc:
+        derive_layout(
+            binary=binary,
+            regs_json=tmp_path / "regs.json",
+            export=tmp_path / "a2.json",
+        )
+    message = str(exc.value)
+    assert "not taken at a function entry" in message or "no 64 KB-aligned" in message

@@ -33,6 +33,8 @@ import pytest
 from pydantic import ValidationError
 
 from arch.addr import AddressSpace
+# missing_gate_evidence: skip in development, fail under SNAPFUZZ_STRICT_GATE=1.
+from tests.gates.conftest import missing_gate_evidence
 from arch.contracts import SnapshotRef
 from prep.snapshot_linux import (
     AslrEnabledError,
@@ -284,9 +286,23 @@ def test_a1_address_chain_agrees_with_ghidra() -> None:
 
 @requires_a1
 def test_a1_paths_point_at_real_files() -> None:
+    """A1's three paths resolve -- where the snapshot is present.
+
+    `mem.dmp` is 1.8 GB and is deliberately recorded by hash rather than shipped
+    (D-069), so inside a release archive this asserts about a file that was never meant
+    to be there. It skips instead: the claim is "A1 does not reference nonsense", and a
+    file that is absent by policy is not nonsense (D-075).
+    """
     ref = SnapshotRef.model_validate_json(A1.read_text(encoding="utf-8"))
-    for path in (ref.mem_dmp, ref.regs_json, ref.symbol_store_json):
-        assert path and Path(path).exists(), f"A1 references missing {path}"
+    paths = [ref.mem_dmp, ref.regs_json, ref.symbol_store_json]
+    for path in paths:
+        assert path, f"A1 has an empty path among {paths}"
+    absent = [p for p in paths if not Path(p).exists()]
+    if absent:
+        missing_gate_evidence(
+            f"the recorded snapshot is not present here ({absent}); it is large and "
+            f"travels by hash. This checks A1's paths resolve, which needs the files."
+        )
 
 
 # --- edge 11: wtf actually loads it and runs ------------------------------

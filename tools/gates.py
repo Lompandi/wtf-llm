@@ -116,21 +116,49 @@ GATES: tuple[GateSpec, ...] = (
     GateSpec(
         "cp1",
         "Build wtf, run a bundled example unmodified",
-        # RULE 3 says "implement each gate as an executable check under
-        # tests/gates/". There is no test_cp1.py. The 150-second run recorded in
-        # PROGRESS.md happened, but nothing re-checks it, so the claim rests on a
-        # log entry rather than on an assertion -- which is what RULE 3 exists to
-        # prevent. Reported as missing rather than assumed.
-        None,
+        # The gate file this project's release state was blocked on. RULE 3 says
+        # "implement each gate as an executable check under tests/gates/" and for a
+        # long time there was no test_cp1.py: the 150-second run happened and was
+        # written up, so the row said PASS while resting on a log entry rather than on
+        # an assertion (D-070). The conditions below are section 8's, split by what
+        # KIND of claim each one is -- a CLI surface, a recorded measurement, a
+        # write-up -- because they are not checkable the same way.
+        "tests/gates/test_cp1.py",
         (
             Condition(
-                "wtf builds; a bundled example fuzzes >= 60s on bochscpu with "
-                "nonzero coverage; corpus and crash output paths identified",
-                (),
-                needs="an executable gate under tests/gates/ -- none exists",
+                "wtf builds",
+                ("test_wtf_is_built",),
+            ),
+            Condition(
+                "the three verbs CP1 requires exist, and a bundled example is "
+                "registered in the binary",
+                (
+                    "test_wtf_offers_the_three_verbs_cp1_requires",
+                    "test_the_bundled_examples_are_registered_in_the_binary",
+                ),
+            ),
+            Condition(
+                "a bundled example fuzzes >= 60s on bochscpu with nonzero coverage",
+                (
+                    "test_the_recorded_campaign_ran_long_enough",
+                    "test_the_recorded_campaign_produced_nonzero_growing_coverage",
+                    "test_the_recorded_campaign_used_bochscpu",
+                ),
+            ),
+            Condition(
+                "corpus and crash output paths identified, and the BP-file format is "
+                "pinned by a parser rather than described",
+                (
+                    "test_the_output_layout_is_identified_in_code",
+                    "test_the_bp_file_format_is_pinned_by_a_parser",
+                ),
+            ),
+            Condition(
+                "DEVIATIONS.md records the actual CLI, snapshot format, BP-file "
+                "format and output layout",
+                ("test_deviations_records_what_cp1_was_for",),
             ),
         ),
-        note="no gate file: the PASS rests on a PROGRESS.md log entry, not an assertion",
     ),
     GateSpec(
         "cp2",
