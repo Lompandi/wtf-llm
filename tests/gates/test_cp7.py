@@ -643,7 +643,7 @@ def test_prompt_carries_a_summary_not_the_corpus_or_a_bitmap(tmp_path: Path) -> 
     assert byte_fields == ["example_seed"]
 
     # The summary's integers, not the sets behind them.
-    assert str(request.summary.total_edges) in prompt
+    assert str(request.summary.coverage_units) in prompt
     assert str(request.summary.corpus_size) in prompt
 
     # Exactly one seed appears, as a format example.
@@ -1303,13 +1303,18 @@ def test_coverage_was_measured_before_and_after_injection() -> None:
 def test_llm_seeds_increased_coverage() -> None:
     """GATE 7's headline result: coverage increases after injection.
 
-    Skipped rather than asserted-away when the recorded round added nothing: that
-    is a real outcome of a real round, and it is the number the writeup has to
-    report either way. What it is NOT is evidence for the gate.
+    Not asserted-away when the recorded round added nothing: that is a real
+    outcome of a real round, and it is the number the writeup has to report either
+    way. What it is NOT is evidence for the gate -- so this reports differently
+    depending on who is asking. In development it skips with the measurement
+    printed; under SNAPFUZZ_STRICT_GATE=1 it FAILS, because a green suite must not
+    be able to stand in for the one criterion GATE 7 exists to check (D-067).
     """
+    from tests.gates.conftest import missing_gate_evidence
+
     delta = json.loads(SEED_DELTA.read_text(encoding="utf-8"))
     if not delta["new_blocks"]:
-        pytest.skip(
+        missing_gate_evidence(
             f"the recorded round added no new blocks "
             f"({delta['covered_before']} covered before, "
             f"{delta['covered_by_llm_seeds']} by the seeds alone, union "

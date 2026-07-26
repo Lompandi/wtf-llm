@@ -1,0 +1,209 @@
+{
+  "type": "evidence-manifest",
+  "recorded_at": 1785033422.7822492,
+  "commit": "22bb08a11b15da26b2fae39c07f1dbe9e49ad666",
+  "branch": "snapfuzz/cp0-cp4",
+  "note": "artifacts/ and the large target files are gitignored. This manifest is tracked so a recorded gate result can be tied to specific bytes and regenerated -- see tools/evidence.py.",
+  "present": 18,
+  "total": 18,
+  "entries": [
+    {
+      "path": "targets/tlv_server/target/tlv_server.exe",
+      "gate": "cp1",
+      "proves": "the target binary every number in docs/RESULTS.md was measured on",
+      "regenerate": "extract target-tlv_server.7z from wtf's Releases into targets/",
+      "large": false,
+      "present": true,
+      "sha256": "8a0886ac61da03dc2d18d4457c62e74e9b0c7c8f6df86e9c74a5afaf55b9bcbe",
+      "size_bytes": 21504,
+      "mtime": 1644705829.7553926
+    },
+    {
+      "path": "targets/tlv_server/state/mem.dmp",
+      "gate": "cp3",
+      "proves": "the snapshot A1 describes; 1.8 GB, produced by wtf's author on his own Hyper-V VM, NOT by this project's acquisition path",
+      "regenerate": "extract target-tlv_server.7z from wtf's Releases into targets/",
+      "large": true,
+      "present": true,
+      "sha256": "ce8282a623d23709a593c10bd61572351107e4ab5050dca502f8d4fbf9d819a0",
+      "size_bytes": 1807773752,
+      "mtime": 1644709373.045644
+    },
+    {
+      "path": "targets/tlv_server/state/regs.json",
+      "gate": "cp3",
+      "proves": "the register state at the snapshot point",
+      "regenerate": "extract target-tlv_server.7z from wtf's Releases into targets/",
+      "large": false,
+      "present": true,
+      "sha256": "47b369ece17c039f336bbba3a7751b6f4f123dfb54b56dc161fb2c31513c3635",
+      "size_bytes": 1809,
+      "mtime": 1784948761.795276
+    },
+    {
+      "path": "targets/tlv_server/state/symbol-store.json",
+      "gate": "cp3",
+      "proves": "module base and symbol addresses; where module_base comes from",
+      "regenerate": "extract target-tlv_server.7z from wtf's Releases into targets/",
+      "large": false,
+      "present": true,
+      "sha256": "71d17dc3666bd6cca3559b7abdfde0b49801dd27f95a99cc1baa65ff7f161d0e",
+      "size_bytes": 510,
+      "mtime": 1784966413.7758694
+    },
+    {
+      "path": "artifacts/a1_snapshot.json",
+      "gate": "cp3",
+      "proves": "A1: the SnapshotRef wtf loads, with module_base and entry_runtime_addr",
+      "regenerate": "python -m prep.snapshot_win ingest --state targets/tlv_server/state --module tlv_server --binary targets/tlv_server/target/tlv_server.exe --entry-symbol ProcessPacket --out artifacts/a1_snapshot.json",
+      "large": false,
+      "present": true,
+      "sha256": "d50f6022cffca54fe67f5160dba0d18c63d6feb07d646ea268197ab65ba3f8ce",
+      "size_bytes": 387,
+      "mtime": 1784950653.666644
+    },
+    {
+      "path": "artifacts/a3_bp_list.json",
+      "gate": "cp2",
+      "proves": "A3: the basic-block list the .cov breakpoint file is generated from",
+      "regenerate": "python -m prep.ghidra_headless --what blocks --binary targets/tlv_server/target/tlv_server.exe --out artifacts/a3_ghidra_blocks_module.json --scope module --entry ProcessPacket && python -m prep.bb_to_wtf --export artifacts/a3_ghidra_blocks_module.json --coverage-dir targets/snapfuzz/coverage --bp-list artifacts/a3_bp_list.json",
+      "large": false,
+      "present": true,
+      "sha256": "aca208d866c81553dcf8756a3a23c0fe0fbbb265e0b4dc5ab7de7e52417de954",
+      "size_bytes": 6204,
+      "mtime": 1784950155.451854
+    },
+    {
+      "path": "artifacts/a2_pseudoc_module.sqlite",
+      "gate": "cp6",
+      "proves": "A2: the pseudo-C three of the four LLM stages read",
+      "regenerate": "python -m prep.ghidra_headless --what pseudoc --binary targets/tlv_server/target/tlv_server.exe --out artifacts/a2_pseudoc_module.json --scope module --entry ProcessPacket && python -m prep.pseudoc_cache build --export artifacts/a2_pseudoc_module.json --cache artifacts/a2_pseudoc_module.sqlite",
+      "large": true,
+      "present": true,
+      "sha256": "d9e3a3c7064a9e07b9aff3bcafff8e49386a16891ef4880db1573824503068d6",
+      "size_bytes": 151552,
+      "mtime": 1784962937.0668166
+    },
+    {
+      "path": "artifacts/fuzz_entry_llm.json",
+      "gate": "cp6",
+      "proves": "the FuzzEntry the model chose from 84 candidates, matching ground truth",
+      "regenerate": "python -m prep.entry_select --cache artifacts/a2_pseudoc_module.sqlite --module tlv_server --module-base 0x7ff719e50000 --ghidra-image-base 0x140000000 --out artifacts/fuzz_entry_llm.json",
+      "large": false,
+      "present": true,
+      "sha256": "d7c840c92472d3a160abe4f62bdc37445bf6196623b0efe74644b4289e5b46ca",
+      "size_bytes": 404,
+      "mtime": 1784963005.1118762
+    },
+    {
+      "path": "artifacts/input_spec.json",
+      "gate": "cp11",
+      "proves": "the InputSpec derived from pseudo-C; GATE 11's layout comparison reads it",
+      "regenerate": "python -m prep.input_struct --entry artifacts/fuzz_entry_llm.json --cache artifacts/a2_pseudoc_module.sqlite --out artifacts/input_spec.json",
+      "large": false,
+      "present": true,
+      "sha256": "a662ed870a052a83c9949d2f89cdb8771ce3b9c1d49f4a5f8794eaf16caa6a4b",
+      "size_bytes": 2125,
+      "mtime": 1784997127.7020268
+    },
+    {
+      "path": "artifacts/runs/gate4/run_metadata.json",
+      "gate": "cp4",
+      "proves": "which module, backend and worker count the 663-second run used -- the field that caught a campaign running the WRONG module (D-056)",
+      "regenerate": "python -m orchestrator.scheduler --label gate4 --workers 1 --minutes 11 --target-dir targets/snapfuzz --module snapfuzz",
+      "large": false,
+      "present": true,
+      "sha256": "37ea799edd24968bcfa7b1c6e7974e12bc0a29627fc94118d30bdb91a041dcf7",
+      "size_bytes": 976,
+      "mtime": 1784959300.5058882
+    },
+    {
+      "path": "artifacts/runs/gate4/coverage_summaries.jsonl",
+      "gate": "cp4",
+      "proves": "the CoverageSummary ticks GATE 4's growth condition is read from",
+      "regenerate": "same run as run_metadata.json above",
+      "large": false,
+      "present": true,
+      "sha256": "ad665cdee6a1bffcc96207341c0c925dcb86bd86634e4f86ca695ccd6180869e",
+      "size_bytes": 1544,
+      "mtime": 1784959300.42268
+    },
+    {
+      "path": "artifacts/runs/gate4b/run_metadata.json",
+      "gate": "cp4b",
+      "proves": "the 4-worker run: aggregate coverage exceeding any single worker",
+      "regenerate": "SNAPFUZZ_LIVE_CP4B=1 python -m orchestrator.scheduler --label gate4b --workers 4 --minutes 5 --target-dir targets/snapfuzz --module snapfuzz",
+      "large": false,
+      "present": true,
+      "sha256": "6298cc811c7a1db1eb3aee34aa8f77c3049d645f9796166d54481a38cc5f0f45",
+      "size_bytes": 878,
+      "mtime": 1784958626.053057
+    },
+    {
+      "path": "artifacts/runs/gate8/buckets.json",
+      "gate": "cp8",
+      "proves": "53 crash files collapsing to 4 buckets from 52 distinct fault addresses",
+      "regenerate": "python -m analysis.pipeline --target-dir targets/snapfuzz --label gate8 --replays 3",
+      "large": false,
+      "present": true,
+      "sha256": "29fd235b684092a75c2ac0565bb9551779ba09377b5f5028381ee8f39589ac95",
+      "size_bytes": 7618,
+      "mtime": 1784985376.8269155
+    },
+    {
+      "path": "artifacts/runs/gate9/advisory.md",
+      "gate": "cp9",
+      "proves": "the GHSA advisory, confirmed findings only",
+      "regenerate": "python -m analysis.triage_run --evidence artifacts/runs/gate8 --label gate9",
+      "large": false,
+      "present": true,
+      "sha256": "bb66f3b9aef422bbbd30fa2f214754e371080e7ae7c8a3460166b2876e42a984",
+      "size_bytes": 30354,
+      "mtime": 1784986297.8404748
+    },
+    {
+      "path": "artifacts/runs/gate9/discarded.jsonl",
+      "gate": "cp9",
+      "proves": "the false positives, kept for evaluation and NOT shipped",
+      "regenerate": "same run as advisory.md above",
+      "large": false,
+      "present": true,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0,
+      "mtime": 1784986297.8404748
+    },
+    {
+      "path": "artifacts/runs/gate10/comparison.json",
+      "gate": "cp10",
+      "proves": "the five-arm comparison behind every number in the README's results table",
+      "regenerate": "python -m eval.baseline --minutes 5 --workers 2",
+      "large": false,
+      "present": true,
+      "sha256": "bcb88a07e82b7f1a0872d2b0ba13fe38716d0d78c8a0bd2c7e4a353c0248c9a8",
+      "size_bytes": 7945,
+      "mtime": 1784988910.4910488
+    },
+    {
+      "path": "artifacts/runs/gate7/seed_delta.json",
+      "gate": "cp7",
+      "proves": "coverage before and after seed injection -- the measurement GATE 7's unmet criterion is judged on",
+      "regenerate": "python -m orchestrator.scheduler --label gate7 --workers 2 --minutes 15 --target-dir targets/snapfuzz --module snapfuzz --plateau-execs 20000",
+      "large": false,
+      "present": true,
+      "sha256": "b2eb838bb849d95889b8e1412789c3eb2e3d7c84cec3edff34e814ebbc15fd0b",
+      "size_bytes": 289,
+      "mtime": 1784970852.529136
+    },
+    {
+      "path": "artifacts/gates/gate-results.json",
+      "gate": "all",
+      "proves": "which section 8 condition each gate proved, and where it is blocked",
+      "regenerate": "python -m tools.gates run",
+      "large": false,
+      "present": true,
+      "sha256": "1bff680e89a12d3e1ec477017f8f17eb78fefee72fa10684de36d2acd77b3a0c",
+      "size_bytes": 32630,
+      "mtime": 1785033420.8852818
+    }
+  ]
+}

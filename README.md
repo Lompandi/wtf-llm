@@ -254,15 +254,20 @@ tests/gates/   one executable gate per checkpoint
 ## Tests
 
 ```powershell
-python -m pytest tests\gates -q
+pytest -q                        # the whole suite
+python -m tools.gates run        # per CLAUDE.md gate condition, not just pass/fail
+python -m tools.evidence verify  # are the artifacts behind those results still there
 ```
 
 ```
-424 passed, 12 skipped
+493 passed, 12 skipped
 ```
 
-Skips are live-endpoint tests behind `SNAPFUZZ_LIVE_LLM`, `SNAPFUZZ_LIVE_MCP` and
-`SNAPFUZZ_LIVE_CP4B`.
+**A green suite is not a passed gate**, and `tools/gates.py` is what tells them
+apart: it quotes each condition from CLAUDE.md section 8, names the test proving it,
+and reports a condition whose test *skipped* as incomplete rather than as passed.
+Seven gates pass every condition; seven are partial, and `docs/PROGRESS.md` says
+which condition each is missing. Release state is the earliest failing gate.
 
 ## Credits
 

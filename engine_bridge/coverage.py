@@ -32,7 +32,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from arch.contracts import CoverageSummary
+from arch.contracts import CoverageSummary, coverage_kind_for
 
 __all__ = ["MasterStats", "parse_stat_line", "iter_stat_lines", "CoverageTracker"]
 
@@ -150,7 +150,7 @@ def iter_stat_lines(text: str):
 class CoverageTracker:
     """Turn a stream of master stat lines into CoverageSummary ticks.
 
-    ``new_edges`` is computed against the previous tick rather than trusted from
+    ``new_units`` is computed against the previous tick rather than trusted from
     the master's own ``(+n)``: the master reports its delta per stat line, which
     is not the same interval as our tick if lines are missed or batched.
     """
@@ -159,16 +159,20 @@ class CoverageTracker:
     last_coverage: int = 0
     plateau_ticks: int = 0
     crash_bucket_count: int = 0
+    # Which backend produced these numbers. Recorded rather than assumed because
+    # the backends count different events (section 13.5), so a summary without it
+    # cannot be compared with another one -- which is what CP10 does (D-068).
+    backend: str | None = None
     history: list[CoverageSummary] = field(default_factory=list)
 
     def observe(self, stats: MasterStats, *, frontier: list[int] | None = None):
         """Record one sample and return the resulting CoverageSummary."""
-        new_edges = max(0, stats.coverage - self.last_coverage)
+        new_units = max(0, stats.coverage - self.last_coverage)
 
         # A plateau is consecutive ticks with no NEW coverage. Section 12.3 wants
         # the primary threshold expressed in executions, not wall clock; that
         # decision belongs to plateau.py (CP7), which consumes these summaries.
-        if new_edges == 0:
+        if new_units == 0:
             self.plateau_ticks += 1
         else:
             self.plateau_ticks = 0
@@ -178,8 +182,12 @@ class CoverageTracker:
 
         summary = CoverageSummary(
             tick=self.tick,
-            total_edges=stats.coverage,
-            new_edges=new_edges,
+            coverage_units=stats.coverage,
+            new_units=new_units,
+            # What the master's `cov:` field reports, which is the engine's own
+            # unit rather than edges -- see contracts.coverage_kind_for (D-068).
+            coverage_kind=coverage_kind_for(self.backend),
+            backend=self.backend,
             plateau_ticks=self.plateau_ticks,
             corpus_size=stats.corpus_size,
             crash_bucket_count=self.crash_bucket_count,
@@ -205,7 +213,7 @@ class CoverageTracker:
         """
         if not self.history:
             return False
-        totals = [s.total_edges for s in self.history]
+        totals = [s.coverage_units for s in self.history]
         return max(totals) > min(totals) or (
             len(totals) == 1 and totals[0] > 0
         )
@@ -219,7 +227,7 @@ class CoverageTracker:
         Kept separate from :attr:`is_growing` because it is only meaningful when
         sampling resolution is good enough to see the ramp.
         """
-        return any(s.new_edges > 0 for s in self.history[1:])
+        return any(s.new_units > 0 for s in self.history[1:])
 
     def write_jsonl(self, path: Path) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -68,7 +68,9 @@ class Classification(BaseModel):
         default="unknown", description="read | write | execute | unknown"
     )
     fault_runtime_addr: int = 0
-    fault_static_addr: int = 0
+    # None when the address was not attributable to the target module, mirroring
+    # CrashRecord (D-068). Renderers must handle it; `render_signals` does.
+    fault_static_addr: int | None = None
     fault_module: str | None = None
     fault_symbol: str | None = None
 

@@ -8,20 +8,51 @@ table and `arch/graph.yaml` agree, so they cannot drift apart.
 
 ## Gate status
 
+**RULE 3: "Do not start checkpoint N+1 until checkpoint N's gate passes."** This
+project did start them, so the table below reports that rather than hiding it.
+Statuses mean exactly one thing each:
+
+| Status | Meaning |
+|---|---|
+| **PASS** | every condition CLAUDE.md section 8 lists for that gate is proven by an assertion that RAN |
+| **PARTIAL** | some are proven and some are not. The row names which, and what each unproven one needs |
+
+There is no third label. An earlier version of this table used **PASS** with the
+word "Scoped" in the notes for gates whose central condition was unproven -- CP3's
+acquisition never ran, CP7's coverage criterion is unmet -- and "Scoped" is not a
+status RULE 3 defines. The prose was honest and the label was not; the label is
+what gets read (D-070).
+
+**The earliest gate that does not pass is CP1**, so that is this project's release
+state whatever the later rows say about themselves. Later checkpoints are
+implemented and independently validated; the chain is not.
+
+Generated, not asserted by hand:
+
+```
+python -m tools.gates run            # which section 8 condition each gate proved
+python -m tools.gates run --strict   # non-zero exit on any INCOMPLETE gate
+python -m tools.evidence verify      # are the artifacts behind these still there
+```
+
+`tools/gates.py` is the source of truth for this table -- it quotes section 8's
+wording, names the test proving each clause, and reports a clause whose test
+SKIPPED as incomplete rather than as passed.
+
 | Gate | Checkpoint | Status | Date | Notes |
 |---|---|---|---|---|
 | 0 | Scaffold, contracts, config, graph | **PASS** | 2026-07-25 | Re-passed against the revised architecture (v2 graph, 50 edges) |
-| 1 | Build wtf, run a bundled example | **PASS** | 2026-07-25 | tlv_server, 150 s, bochscpu: cov 12,636 and growing, corpus 0→32, 38 crashes, ~360 exec/s |
+| 1 | Build wtf, run a bundled example | **PARTIAL** | 2026-07-25 | **NO GATE FILE.** RULE 3 says "implement each gate as an executable check under `tests/gates/`" and there is no `test_cp1.py`. The 150 s run below happened, but nothing re-checks it, so this rests on a log entry rather than an assertion -- which is the exact substitution RULE 3 forbids. Found by `tools/gates.py`, not by the code review (D-070) |
 | 2 | Ghidra headless BB enumeration -> A3 | **PASS** | 2026-07-25 | 17 tests. Closure 58 blocks / module 613; 97.4% recall vs wtf's own `.cov` |
-| 3 | Snapshot acquisition -> A1 | **PASS** | 2026-07-25 | **Scoped.** 19 tests; all four gate conditions met, but only edge 11 goes live — the *acquisition* path is unexercised, see the log below |
+| 3 | Snapshot acquisition -> A1 | **PARTIAL** | 2026-07-25 | 4 of 5 section 8 conditions proven: A1 exists, wtf loads it and executes, module_base and entry_runtime_addr recorded, Linux ingest asserts ASLR off. **Unproven: the acquisition path itself** -- the gate's own heading. Needs a Hyper-V guest with KD attached, or a Linux/KVM host with linux_mode built. Edges 1/6/6b/7/8 stay pending; **edge 11 is live** because the snapshot loading and executing is what edge 11 claims, and that IS proven |
 | 4 | Fuzzer module + first real run (1 worker) | **PASS** | 2026-07-25 | 33 tests. 663 s run, 32 new-coverage events, harness validation passes. Edge 22 held pending — bochscpu ignores `.cov` (D-004) |
-| 4b | Distributed bring-up (>= 2 workers) | **PASS** | 2026-07-25 | **Scoped.** 13 tests. 4 workers, ~1450 exec/s (4× one worker), injected seed proven executed, kill/restart works. Edge 22 still pending — WHP is not enabled (D-036) |
-| 5 | LLM client | **PASS** | 2026-07-26 | 19 tests including live endpoint calls; **40 after the multi-provider rework**. All roles answer; JSON round-trips into a contract; usage log and budget caps verified. Now three providers chosen by **key presence** -- Anthropic via the official SDK, OpenAI, and any OpenAI-compatible endpoint. The Anthropic path is not a URL swap: temperature is a 400 and is translated to `effort`, `system` is top-level, the response is blocks, and a policy decline is a 200 with empty content (D-063). Live tests still only cover nchc |
-| 6 | GhidraMCP + A2 + LLM entry selection | **PASS** | 2026-07-25 | 20 tests incl. live MCP + live LLM. A2 = 14 functions (closure) / 193 (module). **The LLM picked `ProcessPacket` from 84 candidates, matching ground truth exactly** |
+| 4b | Distributed bring-up (>= 2 workers) | **PARTIAL** | 2026-07-25 | 3 of 5 proven offline. **Unproven without `SNAPFUZZ_LIVE_CP4B=1`:** the injected-seed-reaches-a-worker condition and worker kill/restart -- both need the multi-minute campaign. They DID run when recorded (4 workers, ~1450 exec/s, injected seed proven executed); the point is that a plain `pytest` does not re-prove them, so the row cannot claim they are currently shown. Edge 22 still pending -- WHP is not enabled (D-036) |
+| 5 | LLM client | **PARTIAL** | 2026-07-26 | 1 of 4 proven offline: the budget cap. **Unproven without `SNAPFUZZ_LIVE_LLM=1`:** every role answering, the JSON round-trip, and the usage log -- all three need a key and spend allocation. 40 offline tests cover routing, provider selection, refusal handling and the Anthropic request shape against a fake SDK. Three providers, chosen by **key presence** (D-063) |
+| 6 | GhidraMCP + A2 + LLM entry selection | **PARTIAL** | 2026-07-25 | 4 of 5 proven: A2 populated (14 closure / 193 module), address lookup, **the LLM picked `ProcessPacket` from 84 candidates matching ground truth**, and the snapshot still loads at its chosen entry. **Unproven without `SNAPFUZZ_LIVE_MCP=1`:** the live GhidraMCP decompile. Edges 3/4/9 stay live -- they are about entry selection feeding A2, which is proven; MCP is a separate on-demand capability |
 | 7 | Plateau detection + LLM seed gen | **PARTIAL** | 2026-07-25 | 48 tests. Four of five gate criteria met; the coverage-increase criterion is **not**, and is quantified rather than assumed — see the log below and docs/RESULTS.md. Edges 27/28/28b/29/10b held **pending** under RULE 3 |
 | 8 | Dedup, classification, replay, traces | **PASS** | 2026-07-25 | 46 tests. 53 crashes → **4 buckets** from 52 distinct fault addresses; 4/4 reproduced *and* deterministic on bochscpu with byte-identical traces; 4 traces all reaching the fuzz entry; pseudo-C for every bucket. No LLM in the path (negative control confirms the check fires) |
 | 9 | DSPy triage (5 signals) + report | **PASS** | 2026-07-25 | 30 tests. All 4 real buckets triaged with **all five signals**; reads rated CWE-125/info_leak and writes CWE-122/possible_rce. Held-out split **4/4** (precision 1.00, recall 1.00) — but **n=4** and the negatives are synthetic, so the number is indicative only. GHSA advisory renders confirmed-only; discards logged |
-| 11 | LLM-derived input structure (edges 12, 14) | **PASS** | 2026-07-26 | **Scoped**, like GATE 3. 33 tests. **NOT A GATE IN CLAUDE.md** -- section 8 lists neither edge, which is why this was the last component built (D-055). Edge 12 **live**: the derived spec reproduces the hand-written layout exactly. Edge 14 held **pending** -- and CORRECTED from live: it was never the LLM-derived struct that reached the bus |
+| 11 | LLM-derived input structure (edges 12, 14) | **PARTIAL** | 2026-07-26 | 2 of 4 proven. **NOT A GATE IN CLAUDE.md section 8** -- neither edge 12 nor 14 is listed, which is why this was the last component built (D-055); now specified in section 14.3. Edge 12 **live**: the derived spec reproduces the hand-written layout by OFFSET. **Unproven:** the MSVC compile (`SNAPFUZZ_LIVE_CC=1`), and **edge 14** -- adopting the generated header renames the test-case JSON keys and invalidates the existing corpus and crash files, so it is deliberately not wired |
 | 10 | Evaluation harness | **PASS** | 2026-07-25 | 22 tests. 5 arms (both built-in mutators + system + both ablations), identical budget/seed/workers. **4 distinct bugs vs 2 and 1**, **+3,095 coverage** over the best baseline, at **70×/366× fewer executions per bug** — despite 10–31× lower throughput. **LLM seed gen's contribution is NOT demonstrated** (4 vs 4 buckets against the no-seedgen ablation). Curves plotted; numbers in docs/RESULTS.md |
 | 12 | Pipeline driver, end to end (`orchestrator/pipeline.py`) | **PASS** | 2026-07-26 | 61 tests, almost all **negative**. **NOT A GATE IN CLAUDE.md** -- section 8 defines no checkpoint for a driver, which is why the eleven false-success holes in D-057 existed at all: nothing could go red. Now every stage names the artifact that proves it ran, content is checked (not just existence), stages whose work is *time* are never skipped as up-to-date, `--only`/`--from` typos are errors, and the summary returns non-zero if anything failed, was blocked or was never reached. Stage 07a (KD acquisition) is **written and unexercised** -- edges 1/6/6b/7/8 stay `pending` |
 
@@ -89,6 +120,100 @@ sub-edges), plus 3 derived edges recorded in [DEVIATIONS.md](DEVIATIONS.md).
 | 1000 | ghidra.analyze | ghidra.fuzz_entry_selection *(derived)* | 6 | live |
 
 ## Log
+
+### 2026-07-26 (18) — the gates now judge themselves, and five rows moved
+
+An external code review said the deliverable could not reproduce its own PASSes.
+It was right, and working through it found more than it reported.
+
+**Six things were true.** No pytest config, so a bare `pytest` died collecting
+wtf's vendored kdmp-parser tests (D-066) — invisible for twelve checkpoints because
+every command we wrote said `pytest tests/gates`. `artifacts/` gitignored, so a
+clone had every result and no evidence (D-069). CP3 marked PASS with acquisition
+unexercised, and CP8–CP12 marked PASS with CP7 PARTIAL, against RULE 3's
+sequencing (D-070). `total_edges` naming three different measurements (D-068).
+`fault_static_addr = 0` as a sentinel over a real address (D-068). No
+unit/integration/live/campaign separation.
+
+**One it got backwards.** It reported the four-vs-five-signal contradiction as
+being in the contracts. `arch/contracts.py` and `analysis/triage.py` both said
+five; **CLAUDE.md** said four in two places. The code was right and the spec was
+wrong — which is the harder direction, since §3.2 of the same document already
+said five and so contradicted itself.
+
+**One its suggested wording would have got wrong.** It proposed documenting
+`symbol-store.json` as "Linux: mandatory input". There are three states, not two:
+`linux_mode` **writes** the file while snapshotting, so only a hand-assembled
+`state/` needs the Windows detour (D-062, corrected the previous session).
+
+**And one nobody reported: CP1 has no gate file.** RULE 3 says "implement each gate
+as an executable check under `tests/gates/`" and there is no `test_cp1.py`. The
+150-second run happened; nothing re-checks it, so that PASS rested on a log entry.
+`tools/gates.py` found it on its first run, because it asks each gate for its §8
+conditions instead of asking pytest for an exit code.
+
+**What was built**
+
+`tools/gates.py` — the gate runner. `GATES` quotes §8's wording and names the tests
+proving each clause; a clause whose test **skipped** is `incomplete`, never `pass`;
+a clause whose named test no longer exists is `incomplete` too, so a rename cannot
+silently stop proving something. `--through cpN` stops at the first non-pass, which
+is what RULE 3's sequencing means operationally. Emits
+`artifacts/gates/gate-results.json` with provenance — commit, dirty flag, target
+sha256.
+
+`tools/evidence.py` — a **tracked** manifest of 18 artifacts: sha256, size, and the
+command that regenerates each. The 1.8 GB `mem.dmp` stays out of git; its hash does
+not. `verify` reports drift, which is the case that matters: an artifact that
+changed under a result still claiming to describe it.
+
+`pytest.ini` — `testpaths`, `norecursedirs`, five markers, and `-ra` so a skip is
+never silent.
+
+`tests/gates/conftest.py::missing_gate_evidence` — skips in development, **fails**
+under `SNAPFUZZ_STRICT_GATE=1`. Applied to GATE 7's coverage criterion, which was
+the single most consequential skip in the suite (D-067).
+
+**Contracts.** `total_edges`/`new_edges` → `coverage_units`/`new_units` plus
+`coverage_kind` and `backend`, because §13.5 says the backends count different
+events and CP10 compares the numbers. `fault_static_addr` → `int | None` plus
+`address_normalized`. Old field names are accepted as **input aliases**: renaming a
+field would otherwise invalidate every recorded artifact and destroy the audit
+trail D-069 exists to build.
+
+**CLAUDE.md.** §6 now matches the code. The four/five contradiction is fixed in
+both places. §13.1 states the three symbol-store states. **CP11 and CP12 are
+specified as checkpoints with gates** — they were being enforced by tests while
+absent from the spec, so checkpoint numbering had two sources of truth. And §8
+gained a section on how a gate is judged, including that PROGRESS.md has exactly
+two statuses.
+
+**The honest picture the runner produces**
+
+```
+PASS       cp0 cp2 cp4 cp8 cp9 cp10 cp12
+PARTIAL    cp1  (no gate file)
+           cp3  (acquisition never ran)
+           cp4b (injected-seed + kill/restart need SNAPFUZZ_LIVE_CP4B)
+           cp5  (3 of 4 need a live provider key)
+           cp6  (live GhidraMCP)
+           cp7  (coverage-increase criterion unmet)
+           cp11 (MSVC compile; edge 14 not wired)
+RULE 3: release state is blocked at cp1
+```
+
+Seven PASS, seven PARTIAL, and the release state is the earliest failure rather
+than the best row. That is a worse-looking table and a truer one.
+
+**What I would do differently.** I ran adversarial reviews on the pipeline driver
+(eleven false successes) and on the provider work (the Linux acquire did not work at
+all) — and never on my own status reporting, which is where every entry from D-066
+to D-070 lives. The bias was consistently toward the flattering label. The fix is
+not more care; it is that the scorecard is now computed from the conditions instead
+of written by hand.
+
+Suite: **480 passed, 12 skipped**. `python -m tools.gates run` for the per-condition
+breakdown.
 
 ### 2026-07-26 (17) — three LLM providers chosen by key presence, and Linux acquisition
 

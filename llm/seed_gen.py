@@ -318,7 +318,8 @@ def _prompt(request: SeedGenRequest, context: str) -> str:
 
     return (
         f"The fuzzer has plateaued.\n\n"
-        f"Coverage: {summary.total_edges} blocks covered, corpus "
+        f"Coverage: {summary.coverage_units} {summary.coverage_kind} unit(s) "
+        f"covered, corpus "
         f"{summary.corpus_size} inputs, {len(request.frontier)} frontier blocks "
         f"(covered blocks with an unreached successor).\n\n"
         f"UNREACHED BRANCHES AND THE CODE AROUND THEM\n"

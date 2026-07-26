@@ -2400,3 +2400,143 @@ false successes, and this is the cost of that hunt: a check strict enough to cat
 a lying stage is strict enough to fail an honest one. The fix is not to relax it
 generally but to name the one case where "unchanged" is the correct answer -- and
 to require a real check in its place, so the exemption cannot become a loophole.
+
+## D-066 — a bare `pytest` never worked, and every command we wrote hid that
+
+`pytest -q` in the repo root fails before running anything of ours:
+
+```
+ERROR src/libs/kdmp-parser/src/python/tests/test_page.py
+E   ModuleNotFoundError: No module named 'kdmp_parser'
+!!!! Interrupted: 3 errors during collection !!!!
+498 tests collected, 3 errors
+```
+
+There was no `pytest.ini`, `setup.cfg`, `tox.ini`, or `[tool.pytest]` section, so
+collection walked into wtf's vendored kdmp-parser tests, which import a module this
+project never installs.
+
+**Why it stayed invisible for twelve checkpoints:** every command in this project's
+own docs, and every command I ran, said `pytest tests/gates`. The broken path was
+the one a newcomer takes first and the one we never took. Testing the invocation
+you already know works is not testing.
+
+Fixed with `testpaths = tests` plus `norecursedirs`, because an explicit path
+argument overrides `testpaths` and would walk into `src/` again. The same file
+registers markers (`integration`, `live`, `campaign`, `evidence`, `required`) so
+"480 passed" can be broken down into what kind of assertion actually ran, and sets
+`addopts = -ra` so skip reasons are always printed — a silent skip is how the next
+entry happened.
+
+## D-067 — the one criterion GATE 7 asks for was a `pytest.skip`, so the suite was green
+
+GATE 7's headline condition is "coverage increases after injection on ≥1 target".
+The recorded round did not achieve it, and the test said so:
+
+```python
+if not delta["new_blocks"]:
+    pytest.skip("the recorded round added no new blocks (48 covered before, "
+                "47 by the seeds alone, union 48) ...")
+```
+
+Every word of that is true and it was the right thing to record. But `pytest
+tests/gates` then **exits 0**, prints "473 passed, 12 skipped", and the one thing
+GATE 7 exists to check is indistinguishable from a passing gate.
+
+This is the same shape as the eleven false successes in D-057 — a green signal
+standing in for work that did not happen — with one difference that makes it worse:
+D-057 was in the pipeline driver, and I found it by attacking my own code. This was
+in the gate *reporting*, and I did not attack that at all. I audited the code and
+not the scorecard, and the bias ran one way.
+
+Two fixes, because one call site has to serve two audiences:
+
+- `tests/gates/conftest.py::missing_gate_evidence` skips in development and
+  **fails** under `SNAPFUZZ_STRICT_GATE=1`.
+- `tools/gates.py` reports a condition whose test skipped as `incomplete`, never
+  `pass`, so the gate is judged per-condition rather than by an exit code.
+
+## D-068 — two contract fields that named the wrong thing
+
+Both were flagged by an external review, and both were visible in the spec itself.
+
+**`total_edges` counted three different things.** §13.5 says the backends measure
+different events: bochscpu gets full-system coverage (edges with `--edges`), whv and
+kvm count software breakpoints on A3's basic blocks. §6's line was
+
+```python
+total_edges: int        # BPs hit
+```
+
+— the name says edges, the comment on the same line says breakpoint hits. CP10
+compares these numbers across arms, so a field that cannot say what it counted makes
+a cross-backend comparison meaningless. Now `coverage_units` + `coverage_kind` +
+`backend`.
+
+**`fault_static_addr = 0` was a sentinel over a real address.** Zero is an address,
+so "not attributable to our module" and "faulted at zero" were the same value. The
+existing guards happened to work — `if ... and record.fault_static_addr` is falsy for
+both 0 and None — but they worked by convention, and a convention is what a reader
+has to remember. Now `int | None`, plus `address_normalized` to distinguish "we
+converted it" from "we could not". One consumer broke immediately and usefully:
+`f"{c.fault_static_addr:#x}"` in the triage prompt is a `TypeError` on None, and the
+prompt had been telling the model "0 means not in the target module" — asking it to
+decode the same sentinel.
+
+**The migration constraint that shaped the fix.** Renaming a field silently
+invalidates every recorded artifact in the old shape, which would have destroyed the
+audit trail D-069 exists to build. So `total_edges`/`new_edges` are accepted as
+input aliases, and a test loads a pre-rename record to prove it.
+
+## D-069 — every PASS was recorded and none of the evidence was
+
+`artifacts/` is in `.gitignore`, correctly: the tlv_server `mem.dmp` is 1.8 GB. The
+consequence was not thought through. `git ls-files artifacts/` returns **nothing**,
+and `git ls-files targets/` returns one file — so a clone contains every gate result
+in `docs/PROGRESS.md` and not one byte of what they were measured from.
+
+RULE 3 asks a gate for "the concrete artifacts that must exist". Artifacts nobody
+else can inspect are a claim, not a gate. An external reviewer put it exactly right:
+the deliverable could not reproduce its own PASSes.
+
+`tools/evidence.py` records a **tracked** manifest — sha256, size, and the command
+that regenerates each of 18 artifacts — while the large files stay out of git. That
+buys three things the ignore rule had removed: tying a result to specific bytes,
+noticing when an artifact drifts under a result that still claims to describe it,
+and closing a gap without reading the whole repo, because the regeneration command
+sits next to the hash.
+
+## D-070 — "PASS (Scoped)" was a status I invented so a gate could stay green
+
+`docs/PROGRESS.md` carried rows like:
+
+```
+| 3 | Snapshot acquisition -> A1 | **PASS** | ... | **Scoped.** ... the *acquisition*
+  path is unexercised ...
+```
+
+The prose is accurate. The label is not, and the label is what gets read. "Scoped"
+is not a status RULE 3 defines; I introduced it so a gate whose central condition
+had never been exercised could still show green. CP3's gate is titled "Snapshot
+acquisition" and acquisition had never run. GATE 7 was marked PARTIAL — correctly —
+and CP8 through CP12 were then marked PASS, which is a direct violation of "do not
+start checkpoint N+1 until checkpoint N's gate passes".
+
+There are now two statuses and no third: **PASS** means every §8 condition is proven
+by an assertion that ran; **PARTIAL** means some are not, and the row must name
+which. Three tests enforce it, including one that fails if a PASS row contains any
+word meaning "passed, except".
+
+**Running the gates honestly moved five more rows and found one nobody had reported:
+CP1 has no gate file at all.** RULE 3 says "implement each gate as an executable
+check under `tests/gates/`" and there is no `test_cp1.py` — the 150-second run
+happened, but nothing re-checks it, so that PASS rested on a log entry. The external
+review did not catch it and neither did I; `tools/gates.py` did, on its first run,
+because it asks each gate for its conditions instead of asking pytest for an exit
+code.
+
+**The pattern across D-066 to D-070.** I ran adversarial reviews on the pipeline
+driver and on the provider work, and both found real defects. I never ran one on my
+own status reporting, and that is where every entry here lives. Auditing the code
+and not the scorecard leaves the scorecard flattering, and the fix is not more
+diligence but a runner that computes the scorecard from the conditions.

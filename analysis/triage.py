@@ -183,6 +183,18 @@ def configure_dspy(
     return lm
 
 
+def format_static_addr(addr: int | None) -> str:
+    """A static address for a prompt, or a statement that there is not one.
+
+    The absent case is spelled out rather than shown as `0x0`: the model is being
+    asked to reason about where a fault happened, and an address it cannot
+    distinguish from "we could not attribute this" is worse than a sentence.
+    """
+    if addr is None:
+        return "not attributable to the target module"
+    return f"{addr:#x}"
+
+
 def render_signals(bundle: SignalBundle) -> dict[str, str]:
     """One string per signal, kept in separate fields.
 
@@ -207,7 +219,11 @@ def render_signals(bundle: SignalBundle) -> dict[str, str]:
         f"fault type: {c.fault_type}\n"
         f"access: {c.access}\n"
         f"fault address: {c.fault_runtime_addr:#x} (runtime), "
-        f"{c.fault_static_addr:#x} (static; 0 means not in the target module)\n"
+        # `:#x` on None is a TypeError, so this is rendered explicitly rather
+        # than formatted. And what the model is told changed with it: "0 means
+        # not in the target module" asked it to decode a sentinel, which is the
+        # same demand the type change removed from our own code (D-068).
+        f"{format_static_addr(c.fault_static_addr)} (static)\n"
         f"module: {c.fault_module} symbol: {c.fault_symbol}\n"
         f"near_null: {c.near_null}   wild: {c.wild}\n"
         f"attacker_influenced: {c.attacker_influenced} "

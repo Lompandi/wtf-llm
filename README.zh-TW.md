@@ -245,15 +245,19 @@ tests/gates/   每個 checkpoint 一個可執行的 gate
 ## 測試
 
 ```powershell
-python -m pytest tests\gates -q
+pytest -q                        # 整套
+python -m tools.gates run        # 逐條對照 CLAUDE.md §8 的 gate 條件，不只是過或不過
+python -m tools.evidence verify  # 這些結果背後的 artifact 還在不在
 ```
 
 ```
-424 passed, 12 skipped
+493 passed, 12 skipped
 ```
 
-skip 的是需要 `SNAPFUZZ_LIVE_LLM`、`SNAPFUZZ_LIVE_MCP`、`SNAPFUZZ_LIVE_CP4B` 的
-live endpoint 測試。
+**測試全綠不等於 gate 通過**，`tools/gates.py` 就是用來分辨這兩件事的：它引用
+CLAUDE.md §8 每一條條件、指名證明它的測試，並且把「測試被 skip」的條件報成
+incomplete 而不是 passed。七個 gate 每條都過，七個是 partial，`docs/PROGRESS.md`
+會說每一個缺哪一條。專案的發布狀態是最早失敗的那個 gate。
 
 ## 致謝
 

@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 # Models holding raw fuzzer bytes need base64 in JSON; UTF-8 (the pydantic
 # default) raises on the non-UTF-8 payloads that fuzzing produces constantly.
@@ -107,18 +107,70 @@ class SeedRecord(BaseModel):
     rationale: str | None = None  # for llm_seed_gen: which branch it targets
 
 
+# What a coverage number counts. Not decoration: section 13.5 says the backends
+# measure DIFFERENT THINGS -- bochscpu gets full-system coverage for free and edge
+# coverage with `--edges`, while whv and kvm count software breakpoints on basic
+# blocks from the A3 list. A single field called `total_edges` claimed all three
+# were edges, and the comment beside it said "BPs hit", so the name and the
+# comment disagreed in one line of the spec (D-068).
+#
+# It matters for CP10: a cross-backend comparison of two numbers that count
+# different events is not a comparison.
+CoverageKind = Literal[
+    "edge",  # bochscpu with --edges: real edge coverage
+    "basic_block_breakpoint",  # whv/kvm: one hit per A3 breakpoint
+    "engine_native",  # whatever the master's `cov:` field reports
+]
+
+
 class CoverageSummary(BaseModel):
     """Aggregate coverage as seen by the MASTER, never one worker (section 12.3)."""
 
+    # Recorded summaries written BEFORE the rename must keep loading. An audit
+    # trail that a field rename silently invalidates is not an audit trail, and
+    # the whole point of the evidence bundle is that old runs stay checkable --
+    # so the pre-D-068 names are accepted as aliases on input.
+    model_config = ConfigDict(populate_by_name=True)
+
     tick: int
-    total_edges: int  # BPs hit
-    new_edges: int  # since last tick
+    # Renamed from `total_edges`/`new_edges` (section 6, D-068). "Units" because
+    # what a unit IS depends on the backend, and `coverage_kind` says which.
+    coverage_units: int = Field(validation_alias=AliasChoices("coverage_units", "total_edges"))
+    new_units: int = Field(validation_alias=AliasChoices("new_units", "new_edges"))
+    # Defaulted, because a pre-rename record cannot say what it counted. The
+    # default is the honest answer for those: the master's own number.
+    coverage_kind: CoverageKind = "engine_native"
+    # Which backend produced the number. Required for the same reason: a summary
+    # without it cannot be compared with another one safely.
+    backend: Backend | None = None
     plateau_ticks: int
     corpus_size: int
     crash_bucket_count: int
     frontier: list[int] = Field(
         default_factory=list
     )  # covered BBs whose successors are still unreached
+
+    @model_validator(mode="after")
+    def _new_cannot_exceed_total(self) -> "CoverageSummary":
+        if self.new_units > self.coverage_units:
+            raise ValueError(
+                f"new_units {self.new_units} exceeds coverage_units "
+                f"{self.coverage_units}: the delta cannot be larger than the total"
+            )
+        return self
+
+
+def coverage_kind_for(backend: str | None) -> CoverageKind:
+    """The kind a backend's own coverage number is, absent an explicit override.
+
+    bochscpu is `engine_native` rather than `edge`: `--edges` turns edge coverage
+    on, and this project does not pass it, so calling the master's number "edge"
+    would be the same overclaim the rename exists to remove (D-004: bochscpu
+    ignores the `.cov` file entirely).
+    """
+    if backend in ("whv", "kvm"):
+        return "basic_block_breakpoint"
+    return "engine_native"
 
 
 class CrashRecord(BaseModel):
@@ -127,14 +179,23 @@ class CrashRecord(BaseModel):
     input_bytes: bytes
     fault_type: str  # access-violation / abort / illegal-insn / timeout
     fault_runtime_addr: int
-    # De-slid (section 9) -- but ONLY when the fault lands inside the target
-    # module. 0 means "not attributable to our module", which is the common case:
-    # Application Verifier raises from verifier.dll when it catches a heap
-    # overflow, and applying our slide to that address yields garbage.
-    fault_static_addr: int
+    # De-slid (section 9), and **None when the fault is not attributable to the
+    # target module** -- which is the common case: Application Verifier raises
+    # from verifier.dll when it catches a heap overflow, and applying our slide to
+    # that address yields garbage.
+    #
+    # None rather than 0 (D-068). 0 is a real address, so a sentinel made three
+    # things indistinguishable from a fact: dedup keying every external fault
+    # together, a pseudo-C lookup at address zero, and a consumer that simply
+    # forgot. `int | None` makes the type system ask.
+    fault_static_addr: int | None = None
     # Which module the fault address belongs to, when it can be determined.
     # Distinguishes "faulted in the parser" from "the heap manager noticed".
     fault_module: str | None = None
+    # Whether the runtime -> static conversion was actually applied. Separates
+    # "we converted it and got this" from "we could not, so there is nothing to
+    # report" -- two states a bare address cannot tell apart.
+    address_normalized: bool = False
     registers: dict[str, int] = Field(default_factory=dict)
     backtrace: list[int] = Field(default_factory=list)  # static addrs where recoverable
     coverage_delta: int = 0

@@ -297,31 +297,127 @@ def test_progress_lists_every_edge() -> None:
 
 
 def test_live_edges_have_a_passed_gate(graph: dict) -> None:
-    """RULE 3, enforced: an edge is `live` only once its gate has passed.
+    """RULE 3, enforced: an edge is `live` only once its gate has proven it.
 
     Catches the failure RULE 3 exists to prevent -- marking an interface done
     because the code compiles, without the gate that proves it is wired.
+
+    PARTIAL counts, and that is a deliberate loosening rather than a leak. The
+    rule used to be "at least one gate says PASS", which is too coarse in a way
+    that pushes the wrong direction: GATE 6's single unproven condition is the
+    live GhidraMCP call, and edges 3/4/9 are about entry selection feeding A2 --
+    proven, and unrelated to MCP. Under the old rule, labelling GATE 6 honestly
+    as PARTIAL would have forced three edges to be marked pending that are
+    demonstrably wired, which trades one false statement for three.
+
+    What keeps PARTIAL from becoming a loophole is the companion test below: a
+    PARTIAL row must name the edges it does NOT prove, and this one checks the
+    edge is not among them.
     """
-    text = PROGRESS_PATH.read_text(encoding="utf-8")
-    # Gate-status table rows: | 2 | ... | **PASS** | ... |
-    passed_gates = {
-        gate
-        for gate, status in re.findall(
+    # ONLY the gate table. The EDGE table's rows also start `| <number> |`, and
+    # collecting both into a dict let an edge row overwrite a gate's status --
+    # `| 10 | ghidra.bb_enumerate | a3_bp_list |` became gate 10's "status".
+    text = _gate_table(PROGRESS_PATH.read_text(encoding="utf-8"))
+    rows = dict(
+        re.findall(
             r"^\|\s*(\d+b?)\s*\|[^|]*\|\s*\*{0,2}(\w+)\*{0,2}\s*\|", text, re.M
         )
-        if status.upper() == "PASS"
-    }
+    )
+    usable = {gate for gate, status in rows.items() if status.upper() in ("PASS", "PARTIAL")}
+
+    # "Edges 1/6/6b/7/8 stay pending", "Edge 22 still pending", "edge 14 ..."
+    row_text = dict(
+        re.findall(r"^\|\s*(\d+b?)\s*\|[^|]*\|[^|]*\|[^|]*\|([^|]*)\|", text, re.M)
+    )  # `text` is already the gate table only
+
+    def excluded_by(gate: str, edge_id: str) -> bool:
+        """Does this gate's note say it does NOT prove ``edge_id``?
+
+        Read to the end of the CLAUSE, not a fixed window, and keyed on "pending"
+        or "not wired" only. A first attempt also accepted "stay", which matched
+        "Edges 3/4/9 stay live" -- inverting the meaning of the sentence it was
+        reading.
+        """
+        note = row_text.get(gate, "")
+        for match in re.finditer(r"[Ee]dges?\s+([0-9b/, and]+)", note):
+            listed = re.split(r"[/,]|\s+and\s+", match.group(1))
+            if edge_id not in {piece.strip() for piece in listed if piece.strip()}:
+                continue
+            clause = re.split(r"[;.]", note[match.end() :], maxsplit=1)[0].lower()
+            if "pending" in clause or "not wired" in clause:
+                return True
+        return False
 
     for edge in graph["edges"]:
         if edge["status"] != "live":
             continue
         gates = {str(g) for g in edge.get("gates", [])}
         assert gates, f"edge {edge['id']} is live but names no gate"
-        assert gates & passed_gates, (
+        supporting = gates & usable
+        assert supporting, (
             f"edge {edge['id']} is marked live, but none of its gates "
-            f"{sorted(gates)} is recorded as PASS in PROGRESS.md "
-            f"(passed: {sorted(passed_gates)})"
+            f"{sorted(gates)} is recorded as PASS or PARTIAL in PROGRESS.md "
+            f"(recorded: {rows})"
         )
+        assert not all(excluded_by(g, str(edge["id"])) for g in supporting), (
+            f"edge {edge['id']} is marked live, but every supporting gate's row "
+            f"lists it as pending"
+        )
+
+
+def _gate_table(text: str) -> str:
+    """The gate-status table only.
+
+    The edge table below it has rows of the same shape, and mixing them lets an
+    edge row masquerade as a gate's status.
+    """
+    head, _, _ = text.partition("## Edges")
+    return head
+
+
+def test_a_partial_gate_says_what_it_does_not_prove(graph: dict) -> None:
+    """PARTIAL is only honest if the row is specific.
+
+    Without this, PARTIAL becomes what "PASS (Scoped)" was: a label that admits
+    something is missing without saying what, which reads as PASS to anyone
+    skimming (D-070). Every PARTIAL row has to name the unproven condition or the
+    variable that would prove it.
+    """
+    text = _gate_table(PROGRESS_PATH.read_text(encoding="utf-8"))
+    rows = re.findall(
+        r"^\|\s*(\d+b?)\s*\|([^|]*)\|\s*\*{0,2}(\w+)\*{0,2}\s*\|[^|]*\|([^|]*)\|",
+        text,
+        re.M,
+    )
+    partial = [(gate, note) for gate, _, status, note in rows if status.upper() == "PARTIAL"]
+    assert partial, "no gate is PARTIAL -- has the table been flattened back to PASS?"
+
+    for gate, note in partial:
+        lowered = note.lower()
+        assert any(
+            marker in lowered
+            for marker in ("unproven", "no gate file", "not a gate", "unmet", "pending")
+        ), f"gate {gate} is PARTIAL but its note does not say what is unproven: {note[:120]}"
+
+
+def test_no_gate_is_pass_with_a_scoped_style_caveat() -> None:
+    """The specific dishonesty this vocabulary replaced.
+
+    "**PASS** ... **Scoped.**" let a gate whose central condition was never
+    exercised present as green. Any word that means "passed, except" belongs in a
+    PARTIAL row, not next to PASS.
+    """
+    text = _gate_table(PROGRESS_PATH.read_text(encoding="utf-8"))
+    for line in text.splitlines():
+        if not re.match(r"^\|\s*\d+b?\s*\|", line):
+            continue
+        if "**PASS**" not in line:
+            continue
+        lowered = line.lower()
+        for weasel in ("scoped", "except", "unproven", "not exercised", "never executed"):
+            assert weasel not in lowered, (
+                f"a PASS row carries {weasel!r}, which means it is not a PASS:\n{line[:160]}"
+            )
 
 
 def test_progress_status_matches_graph(graph: dict) -> None:
@@ -413,3 +509,124 @@ def test_no_secrets_committed_in_config() -> None:
     assert not re.search(r"\bsk-[A-Za-z0-9]{16,}", text), (
         "config/llm.yaml looks like it contains an API key"
     )
+
+
+# --- the contract changes from the code review (D-068) --------------------
+
+
+def test_coverage_summary_says_what_its_number_counts() -> None:
+    """Section 13.5: the backends measure different events. bochscpu gets
+    full-system coverage (edges with --edges), whv and kvm count breakpoints on
+    A3's basic blocks. A field called `total_edges` claimed all of them were
+    edges, while the comment beside it in the same line of the spec said "BPs
+    hit". CP10 compares numbers across arms, so the kind has to travel with them.
+    """
+    from arch.contracts import CoverageSummary, coverage_kind_for
+
+    summary = CoverageSummary(
+        tick=1,
+        coverage_units=128,
+        new_units=12,
+        coverage_kind="basic_block_breakpoint",
+        backend="kvm",
+        plateau_ticks=0,
+        corpus_size=4,
+        crash_bucket_count=0,
+    )
+    assert summary.coverage_units == 128
+    assert summary.coverage_kind == "basic_block_breakpoint"
+    assert summary.backend == "kvm"
+
+    # Derived from the backend when nobody says otherwise, and NOT "edge" for
+    # bochscpu: --edges is what turns edge coverage on and this project does not
+    # pass it, so claiming edges would be the overclaim the rename removes.
+    assert coverage_kind_for("kvm") == "basic_block_breakpoint"
+    assert coverage_kind_for("whv") == "basic_block_breakpoint"
+    assert coverage_kind_for("bochscpu") == "engine_native"
+    assert coverage_kind_for(None) == "engine_native"
+
+
+def test_a_pre_rename_coverage_record_still_loads() -> None:
+    """An audit trail a field rename silently invalidates is not an audit trail.
+
+    The evidence bundle's whole purpose is that recorded runs stay checkable, so
+    `total_edges`/`new_edges` are accepted as input aliases.
+    """
+    from arch.contracts import CoverageSummary
+
+    summary = CoverageSummary.model_validate(
+        {
+            "tick": 7,
+            "total_edges": 9686,
+            "new_edges": 3,
+            "plateau_ticks": 0,
+            "corpus_size": 28,
+            "crash_bucket_count": 2,
+        }
+    )
+    assert summary.coverage_units == 9686
+    assert summary.new_units == 3
+    # A record that could not say what it counted gets the honest answer.
+    assert summary.coverage_kind == "engine_native"
+
+
+def test_a_coverage_delta_larger_than_the_total_is_refused() -> None:
+    """Not reachable through the tracker, which computes the delta -- but a
+    hand-written or corrupted artifact can carry it, and "+500 of 12 covered" is
+    the kind of number that gets quoted into a writeup."""
+    from arch.contracts import CoverageSummary
+
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="exceeds coverage_units"):
+        CoverageSummary(
+            tick=1,
+            coverage_units=12,
+            new_units=500,
+            coverage_kind="engine_native",
+            plateau_ticks=0,
+            corpus_size=1,
+            crash_bucket_count=0,
+        )
+
+
+def test_an_unattributable_fault_has_no_static_address_at_all() -> None:
+    """None, not 0. 0 is a real address, so the sentinel made "not attributable"
+    indistinguishable from "faulted at zero" -- and it silently invited three
+    things: dedup keying every external fault together, a pseudo-C lookup at
+    address zero, and a consumer that just forgot (D-068).
+    """
+    from arch.contracts import CrashRecord
+
+    record = CrashRecord(
+        input_bytes=b"x",
+        fault_type="access-violation-read",
+        fault_runtime_addr=0x7FF8AA3812DE,
+        backend="bochscpu",
+        timestamp=0.0,
+    )
+    assert record.fault_static_addr is None
+    assert record.address_normalized is False
+
+    # And the converted case says so, which is the distinction the flag exists for.
+    attributed = CrashRecord(
+        input_bytes=b"x",
+        fault_type="access-violation-write",
+        fault_runtime_addr=0x7FF719E51150,
+        fault_static_addr=0x140001150,
+        fault_module="tlv_server",
+        address_normalized=True,
+        backend="bochscpu",
+        timestamp=0.0,
+    )
+    assert attributed.address_normalized is True
+    assert attributed.fault_static_addr == 0x140001150
+
+
+def test_a_missing_static_address_is_rendered_for_the_model_as_a_sentence() -> None:
+    """`f"{None:#x}"` is a TypeError, and `0x0` would ask the model to decode a
+    sentinel -- the same demand the type change removed from our own code."""
+    from analysis.triage import format_static_addr
+
+    assert format_static_addr(None) == "not attributable to the target module"
+    assert format_static_addr(0x140001150) == "0x140001150"

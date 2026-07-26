@@ -194,7 +194,7 @@ def test_tracker_detects_growth_and_plateau() -> None:
     summaries = [tracker.observe(s) for s in iter_stat_lines("\n".join(lines))]
 
     assert len(summaries) == 4
-    assert summaries[1].new_edges == 500
+    assert summaries[1].new_units == 500
     assert tracker.is_growing
     # Two consecutive ticks without new coverage.
     assert summaries[-1].plateau_ticks == 2
@@ -278,9 +278,12 @@ def test_faults_outside_our_module_are_not_de_slid(tmp_path: Path) -> None:
     record = watcher.poll()[0]
 
     assert record.fault_runtime_addr == 0x7FF8AA3812DE
-    assert record.fault_static_addr == 0, (
+    assert record.fault_static_addr is None, (
         "a fault outside our module must not be de-slid with our slide"
     )
+    # None, not 0: 0 is a real address, so the old sentinel could not be told
+    # apart from a fault AT zero (D-068). address_normalized says which happened.
+    assert record.address_normalized is False
     # Unattributable: the nearest declared base below it is tlv_server's, but
     # 6.7 GB away, so the range check rejects it. Guessing would be worse than
     # admitting we do not know which module this is.
@@ -303,7 +306,10 @@ def test_a_fault_just_above_a_known_module_is_attributed(tmp_path: Path) -> None
     )
     record = watcher.poll()[0]
     assert record.fault_module == "verifier"
-    assert record.fault_static_addr == 0  # attributed, but not OUR module
+    # Attributed to a module, but not OURS -- so there is a module name and no
+    # static address, which is a state the two fields express together.
+    assert record.fault_static_addr is None
+    assert record.address_normalized is False
 
 
 def test_unknown_fault_types_pass_through_verbatim(tmp_path: Path) -> None:
@@ -400,7 +406,7 @@ def test_coverage_is_nonzero_and_growing() -> None:
             if line.strip()
         ]
         if summaries:
-            assert max(s.total_edges for s in summaries) > 0, "coverage was zero"
+            assert max(s.coverage_units for s in summaries) > 0, "coverage was zero"
 
 
 @requires_run

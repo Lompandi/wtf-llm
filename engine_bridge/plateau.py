@@ -365,8 +365,10 @@ def summarise(
     """
     return CoverageSummary(
         tick=tick,
-        total_edges=len(covered),
-        new_edges=max(0, len(covered) - previous_covered),
+        coverage_units=len(covered),
+        new_units=max(0, len(covered) - previous_covered),
+        # Counted from the .cov traces, which are basic-block breakpoints.
+        coverage_kind="basic_block_breakpoint",
         plateau_ticks=0,
         corpus_size=corpus_size,
         crash_bucket_count=crash_buckets,

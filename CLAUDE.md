@@ -519,8 +519,17 @@ class SeedRecord(BaseModel):
 
 class CoverageSummary(BaseModel):
     tick: int
-    total_edges: int        # BPs hit
-    new_edges: int          # since last tick
+    # NOT `total_edges`. §13.5 says the backends measure different events --
+    # bochscpu gets full-system coverage (edges with `--edges`), whv and kvm count
+    # software breakpoints on A3's basic blocks -- so a field called "edges"
+    # claimed all three were edges. The original spec line was
+    # `total_edges: int  # BPs hit`, whose name and comment disagreed with each
+    # other. CP10 compares these numbers across arms, so the kind travels with
+    # them (D-068).
+    coverage_units: int     # accepts `total_edges` as an input alias
+    new_units: int          # accepts `new_edges`; since the previous tick
+    coverage_kind: Literal["edge", "basic_block_breakpoint", "engine_native"]
+    backend: Literal["bochscpu", "whv", "kvm"] | None
     plateau_ticks: int
     corpus_size: int
     crash_bucket_count: int
@@ -530,7 +539,14 @@ class CrashRecord(BaseModel):
     input_bytes: bytes
     fault_type: str         # access-violation / abort / illegal-insn / timeout
     fault_runtime_addr: int
-    fault_static_addr: int  # de-slid — see §9
+    # de-slid (§9) — and **None** when the fault is not attributable to the target
+    # module, which is the common case. NOT 0: zero is a real address, so a
+    # sentinel made "outside our module" indistinguishable from "faulted at zero",
+    # and every consumer had to remember a convention instead of being asked by
+    # the type (D-068).
+    fault_static_addr: int | None
+    fault_module: str | None       # which module, when determinable
+    address_normalized: bool       # did the runtime→static conversion run
     registers: dict[str, int]
     backtrace: list[int]    # static addrs where recoverable
     coverage_delta: int
@@ -565,7 +581,7 @@ class TriageVerdict(BaseModel):
     cwe_guess: str | None
     exploitability: Literal["dos", "info_leak", "possible_rce", "unknown"]
     root_cause: str
-    signals_used: list[str]        # must name all four when available
+    signals_used: list[str]        # must name all FIVE when available (§3.2)
     reproducer_input_path: str
 ```
 
@@ -854,7 +870,8 @@ fault address; **assert no LLM call occurs anywhere in CP8's path.**
   the **four independent signals** and whose outputs are the `TriageVerdict`
   fields. DSPy fits because triage is structured classification + extraction with
   an evaluable metric.
-  - Inputs — **five** independent signals: (1) dedup info (bucket id, hit count);
+  - Inputs — **five** independent signals (§3.2 lists five; two places in an
+    earlier draft of this document said four, and the code was right): (1) dedup info (bucket id, hit count);
     (2) classification (fault type/addr/regs/attacker-influence); (3) replay result
     (reproduced/deterministic, and on which backend); (4) **symbolized execution
     trace** (dynamic — the path taken into the fault); (5) reverse-engineering
@@ -882,7 +899,7 @@ fault address; **assert no LLM call occurs anywhere in CP8's path.**
   Markdown** with Jinja2. Only `confirmed` ships; `false_positive` goes to a
   discard log (kept for evaluation, not shipped).
 
-**GATE 9 (edges 38–43):** triage consumes all four signals and `signals_used`
+**GATE 9 (edges 38–43):** triage consumes all **five** signals and `signals_used`
 reflects that; verdicts validate against `TriageVerdict`; precision/recall of the
 triage decision reported on the **held-out** planted-bug split; the GHSA report
 renders with confirmed findings only; discards logged separately.
@@ -907,6 +924,59 @@ renders with confirmed findings only; discards logged separately.
 
 **GATE 10:** baseline vs system numbers for ≥1 target with both ablations;
 coverage curves plotted; results written to `docs/RESULTS.md`.
+
+### CP11 — LLM-derived input structure (edges 12, 14)
+§3.1 draws this box and §3.2 gives it edges 12 and 14, but no gate above covered
+either — so it had no definition of done and stayed a hand-written struct through
+CP4–CP10 while looking finished on the diagram (§14.3, D-055). Specified here so
+that cannot recur.
+
+- `prep/input_struct.py` derives a pydantic-validated `InputSpec` from the entry's
+  pseudo-C **and its callers** — statefulness is a property of the caller.
+- `fuzzer/codegen.py`, **ordinary code**, renders the C++. The model fills a
+  schema; it never writes C++.
+
+**GATE 11 (edges 12, 14):** the derived spec reproduces a hand-written module's
+layout **by offset, width and length semantics — never by field name**, because
+pseudo-C has no names and comparing names tests the model's word choice; the
+generated C++ compiles; no LLM call exists in `codegen`; and **edge 14 requires the
+generated header to be a build dependency of the shipped module**, verified by
+changing a generated field offset and observing the guest-memory test fail. Until
+that last part holds, edge 14 stays `pending` and the box is offline code
+generation rather than a wired pipeline.
+
+### CP12 — End-to-end pipeline driver
+§8 defined no checkpoint for a driver, and the consequence was measurable: an
+adversarial pass found **eleven** ways it reported success without doing the work
+(§14.5, D-057). Specified here for the same reason as CP11.
+
+**GATE 12:** every stage names the artifact that proves it ran, and content is
+checked rather than existence; stages whose work is *time* are never skipped as
+up-to-date; a `--only`/`--from` typo is an error rather than a silent no-op; the
+summary returns non-zero if anything failed, was blocked or was never reached; and
+the driver imports no LLM client (RULE 1) while launching LLM stages as
+subprocesses.
+
+### The gate runner — how a gate is judged
+`pytest tests/gates` is **not** the gate. It reports "480 passed, 12 skipped" and
+exits 0, which says nothing about which of the conditions above were proven — and
+hides the case that matters most, a condition expressed as `pytest.skip`. GATE 7's
+coverage-increase criterion was exactly that (D-067).
+
+```
+python -m tools.gates run             # per-condition, quoting this section
+python -m tools.gates run --strict    # non-zero exit on any INCOMPLETE gate
+python -m tools.gates run --through cp7   # stop at the first non-pass (RULE 3)
+python -m tools.evidence verify       # are the artifacts behind those results still there
+```
+
+Two rules that follow from RULE 3 and are enforced by `tests/gates/test_cp0.py`:
+
+- **A condition whose test skipped is `incomplete`, never `pass`.** An assertion
+  that did not run proves nothing.
+- **`docs/PROGRESS.md` has exactly two gate statuses: PASS and PARTIAL.** A PARTIAL
+  row must name what is unproven. There is no "PASS, scoped" — that label let a
+  gate whose central condition was never exercised present as green (D-070).
 
 ---
 
@@ -1150,10 +1220,21 @@ Under `targets/<name>/`:
 | `crashes/` | saved crashes |
 | `state/` | `mem.dmp`, `regs.json`, `symbol-store.json` |
 
-`symbol-store.json` is a JSON file used **on Linux** to know where to place
-breakpoints, because those platforms have no symbols/dbgeng support. On Windows wtf
-regenerates it at runtime. **Add it to `SnapshotRef` in `arch/contracts.py`** — a
-Linux run without it cannot place coverage breakpoints.
+`symbol-store.json` is a JSON file wtf reads to know where to place breakpoints
+when there is no dbgeng. **Add it to `SnapshotRef` in `arch/contracts.py`.** Three
+states, not two, and the middle one was got wrong for a while (D-062):
+
+| Situation | Is the file needed? | Where does it come from? |
+|---|---|---|
+| wtf built for **Windows** | optional | regenerated at runtime from dbgeng |
+| snapshot taken by **`linux_mode`** | required | **written by the snapshotter itself** — `FuzzBkpt` builds it from `nm` output and `gdb_fuzzbkpt.py:377-380` moves it into `state/` |
+| a **hand-assembled** `state/` on a Linux host | required | generate it from Windows |
+
+The gate is `#ifdef LINUX` in `wtf.cc:195-201`, which is a property of **the host
+wtf was built for**, not of the target's OS. Its error message says "You need to
+generate it from Windows", and that message describes the case where it fires — a
+file that is absent — not the world. Reading it as "Linux cannot produce this" is
+what produced the wrong claim.
 
 ### 13.2 The three subcommands
 - **`master`** — the server/brain. Keeps all state: aggregated code-coverage and the

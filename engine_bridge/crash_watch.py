@@ -103,8 +103,13 @@ class CrashWatcher:
 
     So a fault is de-slid **only** when it falls inside the target module, and
     attributed only when it falls inside a declared range. Otherwise
-    ``fault_static_addr`` is 0 and ``fault_module`` is None -- admitting we do
-    not know beats guessing, and CP8's replay can recover the real answer.
+    ``fault_static_addr`` is **None** and ``address_normalized`` is False --
+    admitting we do not know beats guessing, and CP8's replay can recover the real
+    answer.
+
+    None rather than 0, since D-068: 0 is a real address, so the sentinel made
+    "outside our module" indistinguishable from "faulted at zero" -- and every
+    consumer had to remember a convention instead of being asked by the type.
     """
 
     crashes_dir: Path
@@ -132,18 +137,22 @@ class CrashWatcher:
             return None
         return best[1] if runtime_addr - best[0] <= self.max_image_size else None
 
-    def _to_static(self, runtime_addr: int) -> tuple[int, str | None]:
-        """De-slide only if the fault is inside OUR module."""
+    def _to_static(self, runtime_addr: int) -> tuple[int | None, str | None]:
+        """De-slide only if the fault is inside OUR module.
+
+        Returns None for the address whenever it was not converted, so the caller
+        cannot mistake "not attributable" for an address (D-068).
+        """
         module = self.attribute(runtime_addr)
         if not runtime_addr:
-            return 0, None
+            return None, None
         in_our_module = (
             self.space.module_base
             <= runtime_addr
             < self.space.module_base + self.max_image_size
         )
         if not in_our_module:
-            return 0, module
+            return None, module
         return self.space.to_static(runtime_addr), module or self.space.module
 
     def prime(self) -> int:
@@ -196,6 +205,10 @@ class CrashWatcher:
             fault_type=fault_type,
             fault_runtime_addr=runtime_addr,
             fault_static_addr=static_addr,
+            # True exactly when the conversion ran. Separates "converted, and this
+            # is the answer" from "could not convert" -- which a bare address,
+            # sentinel or not, cannot express.
+            address_normalized=static_addr is not None,
             registers={},  # needs a replay -- CP8
             backtrace=[],  # needs a replay -- CP8
             coverage_delta=0,

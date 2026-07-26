@@ -357,7 +357,10 @@ class Campaign:
 
         The log has every line, so the log is what the artifacts come from.
         """
-        tracker = CoverageTracker()
+        # The backend goes in so the summaries say what their numbers count
+        # (D-068): the same integer means edges on one backend and breakpoint hits
+        # on another, and CP10 compares them.
+        tracker = CoverageTracker(backend=self.cfg.backend)
         if self.master is not None:
             for stats in self.master.snapshot_stats():
                 tracker.observe(stats)
@@ -512,8 +515,8 @@ def main(argv: list[str] | None = None) -> int:
             summary = campaign.tick()
             if summary is not None:
                 print(
-                    f"tick {summary.tick:>3}  cov={summary.total_edges:<7}"
-                    f" +{summary.new_edges:<5} corpus={summary.corpus_size:<5}"
+                    f"tick {summary.tick:>3}  cov={summary.coverage_units:<7}"
+                    f" +{summary.new_units:<5} corpus={summary.corpus_size:<5}"
                     f" plateau={summary.plateau_ticks}"
                 )
             assert campaign.pool is not None
