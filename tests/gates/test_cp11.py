@@ -139,14 +139,57 @@ def test_a_magic_field_without_a_value_is_refused() -> None:
         InputField(name="Magic", kind="magic", ctype="uint32_t")
 
 
-def test_an_uncounted_variable_length_tail_is_refused() -> None:
-    """A tail with no length field means the parser cannot know where it ends.
-    Generating that struct would silently truncate every test-case."""
-    with pytest.raises(pydantic.ValidationError, match="no length field"):
+def test_an_unbounded_variable_length_tail_is_refused() -> None:
+    """A tail with NO way to end means the parser cannot know where it stops.
+
+    Generating that struct would silently truncate every test-case. Counted or delimited
+    both end it; neither does not.
+    """
+    with pytest.raises(pydantic.ValidationError, match="neither counted"):
         InputSpec(
             module="m", entry_symbol="e",
             fields=[InputField(name="Body", kind="bytes")],
         )
+
+
+def test_a_delimited_tail_is_accepted_without_a_length_field() -> None:
+    """A NUL-terminated string is the most ordinary shape in C, and it has no length.
+
+    The contract required a length field for every `bytes` field, which is true of
+    length-prefixed formats and false here. Handed a `char *` target, the model read it
+    correctly -- "validates the input starts with \"test\", uses the fifth byte" -- and
+    the spec was rejected for not inventing a length field the code does not have. The
+    terminator IS the length (D-075).
+    """
+    spec = InputSpec(
+        module="fuzzing-base-test",
+        entry_symbol="fuzzme",
+        fields=[
+            InputField(name="magic", kind="magic", ctype="uint32_t", magic_value=0x74736574),
+            InputField(name="payload", kind="bytes", terminator=0, max_length=256),
+        ],
+    )
+    payload = next(f for f in spec.fields if f.kind == "bytes")
+    assert payload.terminator == 0
+    assert not any(f.kind == "length" for f in spec.fields)
+
+
+def test_the_terminator_is_written_after_the_payload() -> None:
+    """Omitting the sentinel leaves the parser reading past the payload.
+
+    Checked on the generated C++, because "the spec allows it" and "the harness emits
+    it" are different claims and only the second one reaches the guest.
+    """
+    from fuzzer.codegen import _serialise_field
+
+    spec = InputSpec(
+        module="m",
+        entry_symbol="e",
+        fields=[InputField(name="payload", kind="bytes", terminator=0, max_length=64)],
+    )
+    lines = "\n".join(_serialise_field(spec, spec.fields[0]))
+    assert "push_back(uint8_t(0x00))" in lines, lines
+    assert "delimited by" in lines
 
 
 def test_two_variable_length_fields_are_refused() -> None:

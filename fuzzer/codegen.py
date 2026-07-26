@@ -41,7 +41,7 @@ from arch.contracts import HarnessSpec, InputField, InputSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-__all__ = ["generate_header", "write_header"]
+__all__ = ["cpp_namespace", "generate_header", "write_header"]
 
 _WIDTH = {
     "uint8_t": 1, "int8_t": 1, "uint16_t": 2, "int16_t": 2,
@@ -62,6 +62,28 @@ _TRANSLITERATE = {
     "←": "<-", "⇒": "=>", " ": " ", "×": "x", "≤": "<=",
     "≥": ">=", "≠": "!=", "·": "-", "•": "-",
 }
+
+
+def cpp_namespace(module: str) -> str:
+    """A valid C++ namespace for a target module name.
+
+    `f"Gen{module.title().replace('_', '')}"` was the whole derivation, and it produced
+    `namespace GenFuzzing-Base-Test` for a target called `fuzzing-base-test` -- a hyphen
+    is not an identifier character, so the generated file failed with
+    `error C2447: '{': missing function header`. A hyphenated executable name is
+    completely ordinary; the first target that had one broke the build (D-075).
+
+    Everything that is not alphanumeric is dropped rather than mapped to `_`, so
+    `fuzzing-base-test` and `fuzzing_base_test` produce the same namespace -- two names
+    for one program should not produce two namespaces, since both would then link into
+    the same binary.
+    """
+    cleaned = "".join(ch for ch in module.title() if ch.isalnum())
+    if not cleaned or cleaned[0].isdigit():
+        # A leading digit is not an identifier start; a name with nothing usable in it
+        # would silently produce `namespace Gen`, which collides with the next one.
+        cleaned = f"M{cleaned}"
+    return f"Gen{cleaned}"
 
 
 def ascii_comment(text: str) -> str:
@@ -154,11 +176,20 @@ def _field_comment(field: InputField) -> str:
 def _serialise_field(spec: InputSpec, field: InputField) -> list[str]:
     """Lines that append one field to the wire buffer."""
     if field.kind == "bytes":
-        return [
+        lines = [
             f"  // {field.name}: variable-length tail",
             f"  Out.insert(Out.end(), Packet.{field.name}.begin(),",
             f"             Packet.{field.name}.end());",
         ]
+        if field.terminator is not None:
+            # Delimited rather than counted, so the sentinel IS the length. Omitting it
+            # would leave the parser reading past the payload into whatever follows.
+            lines += [
+                f"  // delimited by {field.terminator:#04x}, not counted -- the parser "
+                f"reads until this byte",
+                f"  Out.push_back(uint8_t({field.terminator:#04x}));",
+            ]
+        return lines
 
     width = _WIDTH[field.ctype]
     lines = [f"  // {field.name} ({field.ctype}, {width} byte(s))"]
@@ -387,7 +418,7 @@ def generate_module(
     """Render a complete wtf fuzzer module from the two derived specs."""
     from fuzzer.module_template import MODULE_TEMPLATE
 
-    namespace = namespace or f"Gen{spec.module.title().replace('_', '')}"
+    namespace = namespace or cpp_namespace(spec.module)
     target_var = f"{namespace}Target"
     tail = next((f for f in spec.fields if f.kind == "bytes"), None)
 

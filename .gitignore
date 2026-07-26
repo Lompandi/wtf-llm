@@ -85,3 +85,7 @@ snapfuzz_new_review_fixes.md
 # Any further review write-ups: same category, and the first one was deleted
 # from the remote by hand rather than caught by a pattern.
 snapfuzz_*review*.md
+
+# A second real target: a 4.1 GB mem.dmp plus its exe. Same reason as
+# targets/*/state/mem.dmp -- hashes travel in git, gigabytes do not (D-069).
+fuzzing-snapshot-2/

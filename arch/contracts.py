@@ -397,6 +397,21 @@ class InputField(BaseModel):
     # `bytes` fields only: an upper bound the harness will not exceed.
     max_length: int | None = None
 
+    # HOW A VARIABLE-LENGTH FIELD ENDS, when nothing counts it.
+    #
+    # The contract used to require a length field for every `bytes` field, on the
+    # reasoning that a parser cannot otherwise know where the data ends. That is true of
+    # length-prefixed formats and false of the most common shape there is: a
+    # NUL-terminated string. Handed a `char *` target, the model read it correctly --
+    # "validates the input starts with \"test\", uses the fifth byte" -- and the spec was
+    # rejected for not inventing a length field the code does not have (D-075).
+    #
+    # `terminator` is the sentinel byte that ends the field: 0 for a C string. The
+    # validator accepts a variable-length field that is EITHER counted or delimited, and
+    # still refuses one that is neither -- because that really is a struct which
+    # truncates every test-case.
+    terminator: int | None = None
+
     rationale: str = ""  # which line of pseudo-C implied this field
 
     @model_validator(mode="after")
@@ -467,17 +482,25 @@ class InputSpec(BaseModel):
             if field.counts_field == field.name:
                 raise ValueError(f"length field {field.name!r} counts itself")
 
-        # A variable-length tail with no length field means the parser cannot know
-        # where the data ends, so either the model missed the length field or the
-        # shape is wrong. Refusing beats generating a struct that silently
-        # truncates every test-case.
+        # A variable-length tail has to end SOMEHOW: counted by a length field, or
+        # delimited by a sentinel. Neither means the parser cannot know where the data
+        # ends, and generating that struct would silently truncate every test-case.
+        #
+        # Delimited was not accepted at first, which rejected the most ordinary shape in
+        # C -- a NUL-terminated string -- and forced the model to invent a length field
+        # the target does not have (D-075).
         variable = [f for f in self.fields if f.kind == "bytes"]
         if variable:
             counted = {f.counts_field for f in self.fields if f.kind == "length"}
-            uncounted = [f.name for f in variable if f.name not in counted]
+            uncounted = [
+                f.name
+                for f in variable
+                if f.name not in counted and f.terminator is None
+            ]
             if uncounted:
                 raise ValueError(
-                    f"variable-length field(s) {uncounted} have no length field. "
+                    f"variable-length field(s) {uncounted} are neither counted by a "
+                    f"length field nor delimited by a terminator. "
                     f"Either the spec is missing one, or the parser delimits them "
                     f"some other way -- say which in the rationale and model it."
                 )

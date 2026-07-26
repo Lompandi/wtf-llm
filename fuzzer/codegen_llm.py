@@ -75,6 +75,40 @@ _SYSTEM = (
 )
 
 
+def required_namespace(spec: InputSpec) -> str:
+    """The namespace the generated module must use.
+
+    Every fuzzer module in `fuzzer/module/` is compiled into ONE wtf.exe, so two modules
+    sharing a namespace is a link error, not a style question. The first generation
+    copied the example's `namespace Snapfuzz` -- which is what "copy the shape" invited --
+    and the build failed with four LNK2005s and LNK1169: `Snapfuzz::Init`,
+    `Snapfuzz::Restore`, `Snapfuzz::InsertTestcase` and the `Target_t` object all already
+    defined in fuzzer_snapfuzz.cc.obj.
+
+    The model's C++ was fine; the prompt had not said this. Same convention
+    `fuzzer/codegen.py` uses, so both generators produce the same name (D-075).
+    """
+    from fuzzer.codegen import cpp_namespace
+
+    # The same function the deterministic renderer uses. Two derivations of one name is
+    # how the two generators end up disagreeing about which namespace is "already used".
+    return cpp_namespace(spec.module)
+
+
+def existing_namespaces(module_dir: Path, exclude: Path | None = None) -> set[str]:
+    """Namespaces already used by modules that link into the same binary."""
+    found: set[str] = set()
+    for source in sorted(module_dir.glob("*.cc")):
+        if exclude and source.resolve() == exclude.resolve():
+            continue
+        try:
+            text = source.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        found.update(re.findall(r"^namespace\s+(\w+)\s*\{", text, re.M))
+    return found
+
+
 def _prompt(spec: InputSpec, harness: HarnessSpec, example: str) -> str:
     fields = "\n".join(
         f"  {i}. {f.name}: kind={f.kind} ctype={f.ctype or 'bytes'} "
@@ -106,8 +140,14 @@ def _prompt(spec: InputSpec, harness: HarnessSpec, example: str) -> str:
         f"fields in wire order:\n{fields}\n\n"
         f"BREAKPOINTS to install in Init:\n{breakpoints or '  (none beyond the entry)'}\n\n"
         f"REQUIREMENTS\n"
-        f"1. Register with: Target_t <Name>(\"{harness.target_name}\", Init, "
-        f"InsertTestcase, Restore, CustomMutator_t::Create);\n"
+        f"1. Put EVERYTHING in `namespace {required_namespace(spec)} {{ ... }}` and "
+        f"name the registration object `{required_namespace(spec)}Target`. Every module "
+        f"in this project links into ONE wtf.exe, so reusing the example's namespace or "
+        f"its object name is a link error (LNK2005 on Init, Restore, InsertTestcase and "
+        f"the Target_t object). Do not copy the example's namespace.\n"
+        f"7. Register with: Target_t {required_namespace(spec)}Target"
+        f"(\"{harness.target_name}\", Init, InsertTestcase, Restore, "
+        f"CustomMutator_t::Create);\n"
         f"2. A breakpoint whose spec carries an `rva` MUST be placed BY ADDRESS: "
         f"Gva_t(g_Dbg->GetModuleBase(\"<module>\") + rva). A stripped target has no "
         f"symbols for dbgeng, so a name-resolved breakpoint fails and every worker dies "
@@ -146,6 +186,19 @@ def check_generated(text: str, harness: HarnessSpec) -> list[str]:
         problems.append(
             f"non-ASCII characters ({shown}); MSVC rejects these under /WX with C4819 "
             f"on a non-UTF-8 codepage (D-054)"
+        )
+
+    # A NAMESPACE COLLISION is a link error four hundred lines later, and the linker's
+    # message names mangled symbols rather than the mistake. Caught here instead.
+    used = re.findall(r"^namespace\s+(\w+)\s*\{", text, re.M)
+    clash = set(used) & existing_namespaces(
+        REPO_ROOT / "fuzzer" / "module", exclude=REPO_ROOT / "fuzzer" / "module" / "fuzzer_gen.cc"
+    )
+    if clash:
+        problems.append(
+            f"namespace {sorted(clash)} is already used by another module in this "
+            f"binary; every module links into one wtf.exe, so this is LNK2005 on Init, "
+            f"Restore, InsertTestcase and the Target_t object"
         )
 
     if not re.search(r"\bTarget_t\s+\w+\s*\(\s*\"" + re.escape(harness.target_name), text):
@@ -201,7 +254,12 @@ def generate_module(
         if own_client:
             client.close()
 
-    text = completion.text if hasattr(completion, "text") else str(completion)
+    # , not . The first version used a hasattr fallback to
+    #  and therefore wrote the dataclass REPR to the file -- one line,
+    # with the C++ escaped inside it. A hasattr guard on an attribute name that does not
+    # exist silently produces the wrong thing instead of an AttributeError, which is why
+    # the field is now named outright.
+    text = completion.content
     # Models fence code even when told not to. Stripping it is not indulgence: the
     # alternative is a file whose first line is ```cpp, which fails to compile for a
     # reason that says nothing about the harness.
