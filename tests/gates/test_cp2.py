@@ -10,8 +10,8 @@ need `artifacts/` (gitignored) and the extracted target, so they skip cleanly on
 a fresh clone -- regenerate with:
 
     python -m prep.ghidra_headless --binary targets/tlv_server/target/tlv_server.exe \
-        --scope function-closure --entry ProcessPacket --out artifacts/a3_ghidra_blocks.json
-    python -m prep.bb_to_wtf --export artifacts/a3_ghidra_blocks.json \
+        --scope function-closure --entry ProcessPacket --out artifacts/tlv_server/a3_ghidra_blocks.json
+    python -m prep.bb_to_wtf --export artifacts/tlv_server/a3_ghidra_blocks.json \
         --coverage-dir artifacts/coverage
 
 The reference comparison is stronger than the gate asks for and is the reason to
@@ -37,12 +37,16 @@ from prep.bb_to_wtf import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# Repo-level artifacts: campaign runs, gate results, logs. NOT per target.
 ARTIFACTS = REPO_ROOT / "artifacts"
+# The DEVELOPMENT TARGET's derived artifacts. Per target since D-075: a second
+# target used to overwrite these, and destroying them makes unrelated tests fail.
+TARGET_ARTIFACTS = ARTIFACTS / "tlv_server"
 
-BP_LIST = ARTIFACTS / "a3_bp_list.json"
+BP_LIST = TARGET_ARTIFACTS / "a3_bp_list.json"
 COV_FILE = ARTIFACTS / "coverage" / "tlv_server.cov"
-EXPORT_CLOSURE = ARTIFACTS / "a3_ghidra_blocks.json"
-EXPORT_MODULE = ARTIFACTS / "a3_ghidra_blocks_module.json"
+EXPORT_CLOSURE = TARGET_ARTIFACTS / "a3_ghidra_blocks.json"
+EXPORT_MODULE = TARGET_ARTIFACTS / "a3_ghidra_blocks_module.json"
 SHIPPED_COV = REPO_ROOT / "targets" / "tlv_server" / "coverage" / "tlv_server.cov"
 
 TLV_IMAGE_BASE = 0x140000000

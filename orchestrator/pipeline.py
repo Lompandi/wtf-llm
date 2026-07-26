@@ -216,7 +216,19 @@ class PipelineConfig:
 
     @property
     def artifacts(self) -> Path:
-        return self.repo_root / "artifacts"
+        """This target's own artifacts directory.
+
+        Per target, because these files are one filename each and a second target
+        OVERWROTE the first's: provenance stops them being reused for the wrong program
+        (D-073) but not from being destroyed, and destroying the development target's
+        recorded evidence makes eighteen tests fail for reasons unrelated to whatever is
+        being changed. That happened twice in one session (D-075).
+
+        Keyed on the target MODULE rather than `--target-name`: artifacts describe a
+        program, so two directory names for one binary must not scatter them, and the
+        same binary analysed under another target name should find its existing analysis.
+        """
+        return self.repo_root / "artifacts" / self.target_module
 
 
 def build_stages(config: PipelineConfig) -> list[Stage]:

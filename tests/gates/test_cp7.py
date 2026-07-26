@@ -69,7 +69,11 @@ from llm.sidecar import Sidecar, SidecarConfig
 from prep.pseudoc_cache import PseudoCCache
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# Repo-level artifacts: campaign runs, gate results, logs. NOT per target.
 ARTIFACTS = REPO_ROOT / "artifacts"
+# The DEVELOPMENT TARGET's derived artifacts. Per target since D-075: a second
+# target used to overwrite these, and destroying them makes unrelated tests fail.
+TARGET_ARTIFACTS = ARTIFACTS / "tlv_server"
 
 # GATE 7's own evidence directory -- one per gate, for the reason recorded in
 # test_cp4.py: a later run under a shared label retroactively invalidates an
@@ -87,8 +91,8 @@ CAPACITY_PROBE = EVIDENCE / "capacity_probe.json"
 SIDECAR_EVENTS = ARTIFACTS / "sidecar_events.jsonl"
 SEED_PROVENANCE = ARTIFACTS / "seed_provenance.jsonl"
 
-A1 = ARTIFACTS / "a1_snapshot.json"
-A3_MODULE = ARTIFACTS / "a3_ghidra_blocks_module.json"
+A1 = TARGET_ARTIFACTS / "a1_snapshot.json"
+A3_MODULE = TARGET_ARTIFACTS / "a3_ghidra_blocks_module.json"
 COV_TRACES = ARTIFACTS / "cov-traces"
 CP7_TARGET = REPO_ROOT / "targets" / "snapfuzz-cp7b"
 
@@ -911,7 +915,7 @@ def test_build_config_populates_the_symbol_path_from_shared_code() -> None:
     Asserting they share the function is what stops it recurring.
     """
     if not (A1.exists() and CP7_TARGET.is_dir()):
-        pytest.skip("needs artifacts/a1_snapshot.json and targets/snapfuzz-cp7b")
+        pytest.skip("needs artifacts/tlv_server/a1_snapshot.json and targets/snapfuzz-cp7b")
 
     from llm.sidecar import build_config
 

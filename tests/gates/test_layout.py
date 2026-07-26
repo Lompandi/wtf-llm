@@ -35,7 +35,7 @@ from prep.layout import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STATE = REPO_ROOT / "targets" / "tlv_server" / "state"
 BINARY = REPO_ROOT / "targets" / "tlv_server" / "target" / "tlv_server.exe"
-A2 = REPO_ROOT / "artifacts" / "a2_pseudoc_module.json"
+A2 = REPO_ROOT / "artifacts" / "tlv_server" / "a2_pseudoc_module.json"
 
 RIP = 0x7FF719E51150
 IMAGE_BASE = 0x140000000

@@ -96,49 +96,49 @@ EVIDENCE: tuple[Evidence, ...] = (
     ),
     # --- derived artifacts ------------------------------------------------
     Evidence(
-        "artifacts/a1_snapshot.json",
+        "artifacts/tlv_server/a1_snapshot.json",
         "cp3",
         "A1: the SnapshotRef wtf loads, with module_base and entry_runtime_addr",
         "python -m prep.snapshot_win ingest --state targets/tlv_server/state "
         "--module tlv_server --binary targets/tlv_server/target/tlv_server.exe "
-        "--entry-symbol ProcessPacket --out artifacts/a1_snapshot.json",
+        "--entry-symbol ProcessPacket --out artifacts/tlv_server/a1_snapshot.json",
     ),
     Evidence(
-        "artifacts/a3_bp_list.json",
+        "artifacts/tlv_server/a3_bp_list.json",
         "cp2",
         "A3: the basic-block list the .cov breakpoint file is generated from",
         "python -m prep.ghidra_headless --what blocks --binary "
         "targets/tlv_server/target/tlv_server.exe --out "
-        "artifacts/a3_ghidra_blocks_module.json --scope module --entry ProcessPacket "
-        "&& python -m prep.bb_to_wtf --export artifacts/a3_ghidra_blocks_module.json "
-        "--coverage-dir targets/snapfuzz/coverage --bp-list artifacts/a3_bp_list.json",
+        "artifacts/tlv_server/a3_ghidra_blocks_module.json --scope module --entry ProcessPacket "
+        "&& python -m prep.bb_to_wtf --export artifacts/tlv_server/a3_ghidra_blocks_module.json "
+        "--coverage-dir targets/snapfuzz/coverage --bp-list artifacts/tlv_server/a3_bp_list.json",
     ),
     Evidence(
-        "artifacts/a2_pseudoc_module.sqlite",
+        "artifacts/tlv_server/a2_pseudoc_module.sqlite",
         "cp6",
         "A2: the pseudo-C three of the four LLM stages read",
         "python -m prep.ghidra_headless --what pseudoc --binary "
         "targets/tlv_server/target/tlv_server.exe --out "
-        "artifacts/a2_pseudoc_module.json --scope module --entry ProcessPacket "
+        "artifacts/tlv_server/a2_pseudoc_module.json --scope module --entry ProcessPacket "
         "&& python -m prep.pseudoc_cache build "
-        "--export artifacts/a2_pseudoc_module.json "
-        "--cache artifacts/a2_pseudoc_module.sqlite",
+        "--export artifacts/tlv_server/a2_pseudoc_module.json "
+        "--cache artifacts/tlv_server/a2_pseudoc_module.sqlite",
         large=True,
     ),
     Evidence(
-        "artifacts/fuzz_entry_llm.json",
+        "artifacts/tlv_server/fuzz_entry_llm.json",
         "cp6",
         "the FuzzEntry the model chose from 84 candidates, matching ground truth",
-        "python -m prep.entry_select --cache artifacts/a2_pseudoc_module.sqlite "
+        "python -m prep.entry_select --cache artifacts/tlv_server/a2_pseudoc_module.sqlite "
         "--module tlv_server --module-base 0x7ff719e50000 "
-        "--ghidra-image-base 0x140000000 --out artifacts/fuzz_entry_llm.json",
+        "--ghidra-image-base 0x140000000 --out artifacts/tlv_server/fuzz_entry_llm.json",
     ),
     Evidence(
-        "artifacts/input_spec.json",
+        "artifacts/tlv_server/input_spec.json",
         "cp11",
         "the InputSpec derived from pseudo-C; GATE 11's layout comparison reads it",
-        "python -m prep.input_struct --entry artifacts/fuzz_entry_llm.json "
-        "--cache artifacts/a2_pseudoc_module.sqlite --out artifacts/input_spec.json",
+        "python -m prep.input_struct --entry artifacts/tlv_server/fuzz_entry_llm.json "
+        "--cache artifacts/tlv_server/a2_pseudoc_module.sqlite --out artifacts/tlv_server/input_spec.json",
     ),
     # --- run evidence -----------------------------------------------------
     Evidence(

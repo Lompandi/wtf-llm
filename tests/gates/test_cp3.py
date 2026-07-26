@@ -64,7 +64,7 @@ from prep.snapshot_win import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-A1 = REPO_ROOT / "artifacts" / "a1_snapshot.json"
+A1 = REPO_ROOT / "artifacts" / "tlv_server" / "a1_snapshot.json"
 TLV = REPO_ROOT / "targets" / "tlv_server"
 TLV_STATE = TLV / "state"
 TLV_BINARY = TLV / "target" / "tlv_server.exe"
@@ -278,7 +278,7 @@ def test_a1_address_chain_agrees_with_ghidra() -> None:
     space = AddressSpace("tlv_server", ref.module_base, ref.ghidra_image_base)
     assert space.to_static(ref.entry_runtime_addr) == ENTRY_STATIC
 
-    export = REPO_ROOT / "artifacts" / "a3_ghidra_blocks.json"
+    export = REPO_ROOT / "artifacts" / "tlv_server" / "a3_ghidra_blocks.json"
     if export.exists():
         closure = json.loads(export.read_text(encoding="utf-8"))
         assert closure["entry"] == f"ProcessPacket@{ENTRY_STATIC:x}"

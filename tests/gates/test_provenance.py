@@ -3,7 +3,7 @@
 Written against a reported failure, and the transcript is the specification:
 
     --binary .../fuzzing-base-test.exe --target-name fuzzing-snapshot-2
-    [1/13] 01-pseudoc  SKIPPED, already produced: artifacts/a2_pseudoc_module.json
+    [1/13] 01-pseudoc  SKIPPED, already produced: artifacts/tlv_server/a2_pseudoc_module.json
     [5/13] 05-covfile  cov file: .../tlv_server.cov  (613 RVAs, name='tlv_server')
                        FAILED: fuzzing-base-test.cov absent
 

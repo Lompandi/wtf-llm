@@ -1,7 +1,7 @@
 {
   "type": "evidence-manifest",
-  "recorded_at": 1785072305.9917836,
-  "commit": "725c582fc902d56c28c367477ec563c10fc58883",
+  "recorded_at": 1785078803.7020833,
+  "commit": "3f39b2dbc51e58f265cdea78e7c2a21d25d875da",
   "branch": "snapfuzz/cp0-cp4",
   "note": "artifacts/ and the large target files are gitignored. This manifest is tracked so a recorded gate result can be tied to specific bytes and regenerated -- see tools/evidence.py.",
   "present": 18,
@@ -52,10 +52,10 @@
       "mtime": 1785068543.7591221
     },
     {
-      "path": "artifacts/a1_snapshot.json",
+      "path": "artifacts/tlv_server/a1_snapshot.json",
       "gate": "cp3",
       "proves": "A1: the SnapshotRef wtf loads, with module_base and entry_runtime_addr",
-      "regenerate": "python -m prep.snapshot_win ingest --state targets/tlv_server/state --module tlv_server --binary targets/tlv_server/target/tlv_server.exe --entry-symbol ProcessPacket --out artifacts/a1_snapshot.json",
+      "regenerate": "python -m prep.snapshot_win ingest --state targets/tlv_server/state --module tlv_server --binary targets/tlv_server/target/tlv_server.exe --entry-symbol ProcessPacket --out artifacts/tlv_server/a1_snapshot.json",
       "large": false,
       "present": true,
       "sha256": "d50f6022cffca54fe67f5160dba0d18c63d6feb07d646ea268197ab65ba3f8ce",
@@ -63,10 +63,10 @@
       "mtime": 1785072136.6196208
     },
     {
-      "path": "artifacts/a3_bp_list.json",
+      "path": "artifacts/tlv_server/a3_bp_list.json",
       "gate": "cp2",
       "proves": "A3: the basic-block list the .cov breakpoint file is generated from",
-      "regenerate": "python -m prep.ghidra_headless --what blocks --binary targets/tlv_server/target/tlv_server.exe --out artifacts/a3_ghidra_blocks_module.json --scope module --entry ProcessPacket && python -m prep.bb_to_wtf --export artifacts/a3_ghidra_blocks_module.json --coverage-dir targets/snapfuzz/coverage --bp-list artifacts/a3_bp_list.json",
+      "regenerate": "python -m prep.ghidra_headless --what blocks --binary targets/tlv_server/target/tlv_server.exe --out artifacts/tlv_server/a3_ghidra_blocks_module.json --scope module --entry ProcessPacket && python -m prep.bb_to_wtf --export artifacts/tlv_server/a3_ghidra_blocks_module.json --coverage-dir targets/snapfuzz/coverage --bp-list artifacts/tlv_server/a3_bp_list.json",
       "large": false,
       "present": true,
       "sha256": "aca208d866c81553dcf8756a3a23c0fe0fbbb265e0b4dc5ab7de7e52417de954",
@@ -74,10 +74,10 @@
       "mtime": 1785072136.6412582
     },
     {
-      "path": "artifacts/a2_pseudoc_module.sqlite",
+      "path": "artifacts/tlv_server/a2_pseudoc_module.sqlite",
       "gate": "cp6",
       "proves": "A2: the pseudo-C three of the four LLM stages read",
-      "regenerate": "python -m prep.ghidra_headless --what pseudoc --binary targets/tlv_server/target/tlv_server.exe --out artifacts/a2_pseudoc_module.json --scope module --entry ProcessPacket && python -m prep.pseudoc_cache build --export artifacts/a2_pseudoc_module.json --cache artifacts/a2_pseudoc_module.sqlite",
+      "regenerate": "python -m prep.ghidra_headless --what pseudoc --binary targets/tlv_server/target/tlv_server.exe --out artifacts/tlv_server/a2_pseudoc_module.json --scope module --entry ProcessPacket && python -m prep.pseudoc_cache build --export artifacts/tlv_server/a2_pseudoc_module.json --cache artifacts/tlv_server/a2_pseudoc_module.sqlite",
       "large": true,
       "present": true,
       "sha256": "d9e3a3c7064a9e07b9aff3bcafff8e49386a16891ef4880db1573824503068d6",
@@ -85,10 +85,10 @@
       "mtime": 1785072136.741126
     },
     {
-      "path": "artifacts/fuzz_entry_llm.json",
+      "path": "artifacts/tlv_server/fuzz_entry_llm.json",
       "gate": "cp6",
       "proves": "the FuzzEntry the model chose from 84 candidates, matching ground truth",
-      "regenerate": "python -m prep.entry_select --cache artifacts/a2_pseudoc_module.sqlite --module tlv_server --module-base 0x7ff719e50000 --ghidra-image-base 0x140000000 --out artifacts/fuzz_entry_llm.json",
+      "regenerate": "python -m prep.entry_select --cache artifacts/tlv_server/a2_pseudoc_module.sqlite --module tlv_server --module-base 0x7ff719e50000 --ghidra-image-base 0x140000000 --out artifacts/tlv_server/fuzz_entry_llm.json",
       "large": false,
       "present": true,
       "sha256": "d7c840c92472d3a160abe4f62bdc37445bf6196623b0efe74644b4289e5b46ca",
@@ -96,10 +96,10 @@
       "mtime": 1785072137.1141572
     },
     {
-      "path": "artifacts/input_spec.json",
+      "path": "artifacts/tlv_server/input_spec.json",
       "gate": "cp11",
       "proves": "the InputSpec derived from pseudo-C; GATE 11's layout comparison reads it",
-      "regenerate": "python -m prep.input_struct --entry artifacts/fuzz_entry_llm.json --cache artifacts/a2_pseudoc_module.sqlite --out artifacts/input_spec.json",
+      "regenerate": "python -m prep.input_struct --entry artifacts/tlv_server/fuzz_entry_llm.json --cache artifacts/tlv_server/a2_pseudoc_module.sqlite --out artifacts/tlv_server/input_spec.json",
       "large": false,
       "present": true,
       "sha256": "a662ed870a052a83c9949d2f89cdb8771ce3b9c1d49f4a5f8794eaf16caa6a4b",
@@ -201,9 +201,9 @@
       "regenerate": "python -m tools.gates run",
       "large": false,
       "present": true,
-      "sha256": "664104a0fa87c85987b79d0c20aa20fe6f81d45f53e2aa761a1cecab0a50da37",
-      "size_bytes": 34476,
-      "mtime": 1785072302.65855
+      "sha256": "5e3b5c5ed6fe417d12bed1aeace316da08cbed5d6433e832b90b4b0f1570bbae",
+      "size_bytes": 34477,
+      "mtime": 1785078801.7773924
     }
   ]
 }

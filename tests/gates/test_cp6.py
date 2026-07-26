@@ -17,8 +17,8 @@ Live tests are split by what they cost and what they need:
 Regenerate the artifacts with::
 
     analyzeHeadless ... -postScript ExportPseudoC.java <out> function-closure ProcessPacket
-    python -m prep.pseudoc_cache build --export artifacts/a2_pseudoc_export.json
-    python -m prep.entry_select --cache artifacts/a2_pseudoc_module.sqlite
+    python -m prep.pseudoc_cache build --export artifacts/tlv_server/a2_pseudoc_export.json
+    python -m prep.entry_select --cache artifacts/tlv_server/a2_pseudoc_module.sqlite
 """
 
 from __future__ import annotations
@@ -35,13 +35,17 @@ from prep.entry_select import _resolve_name, candidates
 from prep.pseudoc_cache import PseudoCCache, build_from_export
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# Repo-level artifacts: campaign runs, gate results, logs. NOT per target.
 ARTIFACTS = REPO_ROOT / "artifacts"
+# The DEVELOPMENT TARGET's derived artifacts. Per target since D-075: a second
+# target used to overwrite these, and destroying them makes unrelated tests fail.
+TARGET_ARTIFACTS = ARTIFACTS / "tlv_server"
 
-A2_CLOSURE = ARTIFACTS / "a2_pseudoc.sqlite"
-A2_MODULE = ARTIFACTS / "a2_pseudoc_module.sqlite"
-A2_EXPORT = ARTIFACTS / "a2_pseudoc_export.json"
-FUZZ_ENTRY_LLM = ARTIFACTS / "fuzz_entry_llm.json"
-A1_LLM = ARTIFACTS / "a1_snapshot_llm.json"
+A2_CLOSURE = TARGET_ARTIFACTS / "a2_pseudoc.sqlite"
+A2_MODULE = TARGET_ARTIFACTS / "a2_pseudoc_module.sqlite"
+A2_EXPORT = TARGET_ARTIFACTS / "a2_pseudoc_export.json"
+FUZZ_ENTRY_LLM = TARGET_ARTIFACTS / "fuzz_entry_llm.json"
+A1_LLM = TARGET_ARTIFACTS / "a1_snapshot_llm.json"
 
 # Ground truth, established independently in tests/test_addr.py and by reading
 # src/wtf/fuzzer_tlv_server.cc:113-124.

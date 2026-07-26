@@ -156,7 +156,7 @@ def _recorded() -> dict:
             f"{RESULT} does not exist. Produce it with "
             f"`python -m orchestrator.scheduler --label gate1 --workers 1 "
             f"--minutes 1.5 --target-dir targets/tlv_server "
-            f"--a1 artifacts/a1_snapshot.json --module snapfuzz --no-sidecar`"
+            f"--a1 artifacts/tlv_server/a1_snapshot.json --module snapfuzz --no-sidecar`"
         )
     return json.loads(RESULT.read_text(encoding="utf-8"))
 
@@ -239,7 +239,7 @@ def test_a_live_campaign_meets_the_gate(tmp_path: Path) -> None:
             "--workers", "1",
             "--minutes", "1.5",
             "--target-dir", str(DEV_TARGET),
-            "--a1", str(REPO_ROOT / "artifacts" / "a1_snapshot.json"),
+            "--a1", str(REPO_ROOT / "artifacts" / "tlv_server" / "a1_snapshot.json"),
             "--module", "snapfuzz",
             "--no-sidecar",
         ],

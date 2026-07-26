@@ -40,7 +40,7 @@ from arch.contracts import FuzzEntry, InputField, InputSpec
 from fuzzer.codegen import ascii_comment, generate_header, write_header
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SPEC_PATH = REPO_ROOT / "artifacts" / "input_spec.json"
+SPEC_PATH = REPO_ROOT / "artifacts" / "tlv_server" / "input_spec.json"
 
 live_llm = pytest.mark.skipif(
     os.environ.get("SNAPFUZZ_LIVE_LLM") != "1",
@@ -331,10 +331,10 @@ def test_a_magic_field_is_defaulted_to_its_constant() -> None:
 
 
 def test_the_generated_file_says_it_is_generated_and_how_to_regenerate() -> None:
-    header = generate_header(_ground_truth_spec(), spec_path="artifacts/input_spec.json")
+    header = generate_header(_ground_truth_spec(), spec_path="artifacts/tlv_server/input_spec.json")
     assert "GENERATED FILE" in header
     assert "do not edit by hand" in header
-    assert "python -m fuzzer.codegen --spec artifacts/input_spec.json" in header
+    assert "python -m fuzzer.codegen --spec artifacts/tlv_server/input_spec.json" in header
 
 
 def test_the_generated_file_states_what_is_NOT_generated() -> None:
@@ -385,7 +385,7 @@ def _recorded_spec() -> InputSpec:
     if not SPEC_PATH.exists():
         pytest.skip(
             f"{SPEC_PATH.relative_to(REPO_ROOT)} has not been produced. Run: "
-            f"python -m prep.input_struct --entry artifacts/fuzz_entry_llm.json"
+            f"python -m prep.input_struct --entry artifacts/tlv_server/fuzz_entry_llm.json"
         )
     return InputSpec.model_validate_json(SPEC_PATH.read_text(encoding="utf-8"))
 
@@ -453,12 +453,12 @@ def test_live_derivation_from_pseudoc() -> None:
     from prep.input_struct import derive_input_spec
     from prep.pseudoc_cache import PseudoCCache
 
-    entry_path = REPO_ROOT / "artifacts" / "fuzz_entry_llm.json"
+    entry_path = REPO_ROOT / "artifacts" / "tlv_server" / "fuzz_entry_llm.json"
     if not entry_path.exists():
         pytest.skip("no FuzzEntry recorded; run prep.entry_select first")
     entry = FuzzEntry.model_validate_json(entry_path.read_text(encoding="utf-8"))
 
-    cache_path = REPO_ROOT / "artifacts" / "a2_pseudoc_module.sqlite"
+    cache_path = REPO_ROOT / "artifacts" / "tlv_server" / "a2_pseudoc_module.sqlite"
     with PseudoCCache(cache_path) as cache, LlmClient.from_config() as client:
         spec, warnings = derive_input_spec(entry, cache, client)
 

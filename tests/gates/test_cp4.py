@@ -28,7 +28,11 @@ from engine_bridge.coverage import CoverageTracker, iter_stat_lines, parse_stat_
 from engine_bridge.crash_watch import CrashWatcher, parse_crash_name
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# Repo-level artifacts: campaign runs, gate results, logs. NOT per target.
 ARTIFACTS = REPO_ROOT / "artifacts"
+# The DEVELOPMENT TARGET's derived artifacts. Per target since D-075: a second
+# target used to overwrite these, and destroying them makes unrelated tests fail.
+TARGET_ARTIFACTS = ARTIFACTS / "tlv_server"
 
 # GATE 4's own evidence directory. A shared one does not work: GATE 4b's
 # 4-worker run overwrote GATE 4's single-worker metadata and made this gate fail
@@ -43,7 +47,7 @@ RUN_METADATA = EVIDENCE / "run_metadata.json"
 MASTER_LOG = EVIDENCE / "master.log"
 SYMBOLIZED = ARTIFACTS / "traces-symbolized" / "snapfuzz.rip.txt"
 
-# From artifacts/a1_snapshot.json, verified in tests/test_addr.py.
+# From artifacts/tlv_server/a1_snapshot.json, verified in tests/test_addr.py.
 MODULE_BASE = 0x7FF719E50000
 GHIDRA_IMAGE_BASE = 0x140000000
 ENTRY_STATIC = 0x140001150
@@ -570,7 +574,7 @@ def test_a1_and_config_agree_on_the_entry() -> None:
     """
     import yaml
 
-    a1 = ARTIFACTS / "a1_snapshot.json"
+    a1 = TARGET_ARTIFACTS / "a1_snapshot.json"
     if not a1.exists():
         pytest.skip("A1 not generated")
 

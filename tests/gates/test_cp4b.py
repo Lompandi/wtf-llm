@@ -43,7 +43,11 @@ from engine_bridge.coverage import iter_stat_lines, parse_stat_line
 from fuzzer.corpus import SeedSpool
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# Repo-level artifacts: campaign runs, gate results, logs. NOT per target.
 ARTIFACTS = REPO_ROOT / "artifacts"
+# The DEVELOPMENT TARGET's derived artifacts. Per target since D-075: a second
+# target used to overwrite these, and destroying them makes unrelated tests fail.
+TARGET_ARTIFACTS = ARTIFACTS / "tlv_server"
 
 # GATE 4b's own evidence directory -- see the note in test_cp4.py. Produce with:
 #   python -m fuzzer.run --minutes 4 --workers 4 --label gate4b
@@ -269,7 +273,7 @@ def test_worker_id_is_absent_and_that_is_recorded() -> None:
     """
     from arch.contracts import CrashRecord
 
-    crashes = ARTIFACTS / "a5_crashes.jsonl"
+    crashes = TARGET_ARTIFACTS / "a5_crashes.jsonl"
     if not crashes.exists():
         pytest.skip("no crash records")
 
@@ -324,7 +328,7 @@ def test_injected_seed_reaches_a_worker() -> None:
         )
     config = dataclasses.replace(base, target_dir=clean)
 
-    a1 = json.loads((ARTIFACTS / "a1_snapshot.json").read_text(encoding="utf-8"))
+    a1 = json.loads((TARGET_ARTIFACTS / "a1_snapshot.json").read_text(encoding="utf-8"))
     campaign = Campaign(
         config=config,
         space=AddressSpace(
@@ -397,7 +401,7 @@ def test_killing_a_worker_does_not_stop_the_campaign() -> None:
         REPO_ROOT / "config" / "target.yaml",
         worker_count=3,
     )
-    a1 = json.loads((ARTIFACTS / "a1_snapshot.json").read_text(encoding="utf-8"))
+    a1 = json.loads((TARGET_ARTIFACTS / "a1_snapshot.json").read_text(encoding="utf-8"))
     campaign = Campaign(
         config=config,
         space=AddressSpace("tlv_server", a1["module_base"], a1["ghidra_image_base"]),
