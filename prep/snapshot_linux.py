@@ -7,9 +7,16 @@ against a real guest.
 Two honest caveats, both recorded in docs/DEVIATIONS.md:
 
 * **D-010** -- CLAUDE.md describes this as "GDB-based ELF snapshot" of a
-  user-mode process. wtf's ``linux_mode/`` is GDB driving a **full-system QEMU
-  VM with a kernel build** (``qemu_snapshot/gdb_server.sh`` +
-  ``gdb_client.sh``), which is a substantially larger setup.
+  user-mode process. That is right about *what* is captured and wrong about the
+  *cost*: ``linux_mode/README.md`` calls it "experimental user-mode Linux mode"
+  and "Linux ELF userland snapshotting", so the snapshot is indeed of a
+  user-mode process -- but getting it requires building a whole target VM and
+  kernel (``qemu_snapshot/setup.sh``), running QEMU under KVM
+  (``gdb_server.sh``), scp'ing the target into the guest, and attaching GDB
+  (``gdb_client.sh``). The full-system VM is the vehicle, not the subject.
+
+  An earlier version of this docstring said "not a user-mode process", which
+  contradicted wtf's own README and propagated into README.md.
 * CLAUDE.md states "ASLR must be disabled". A grep of ``linux_mode/`` for
   ``aslr`` / ``randomize_va_space`` finds **nothing**, so that requirement is
   not corroborated by the repo. It is asserted here anyway, because it is
@@ -17,10 +24,17 @@ Two honest caveats, both recorded in docs/DEVIATIONS.md:
   snapshot's ``module_base`` is one sample of a value that moves, and every
   static<->runtime conversion built on it is quietly wrong.
 
-``symbol-store.json`` is **required** on Linux and cannot be produced there:
-there is no dbgeng, so wtf reads the file instead of resolving symbols
-(``debugger.h:30-60``), and ``wtf.cc:195-201`` refuses to start without it. It
-has to be generated from Windows first.
+``symbol-store.json`` is **required** and cannot be produced there: there is no
+dbgeng, so wtf reads the file instead of resolving symbols
+(``debugger.h:30-60``), and ``wtf.cc:195-201`` refuses to start without it,
+saying so in as many words -- "You need to generate it from Windows."
+
+Note the condition is ``#ifdef LINUX``: it is about the **host wtf was built
+for**, not the target's OS. A Linux HOST needs the file whatever it is fuzzing.
+The same DebuggerLess path also gives up on the reverse direction --
+``GetName`` prints "GetName does not work on Linux" -- so address-to-symbol
+resolution is unavailable there, which matters for stack-hash dedup and for
+``analysis/reverse.py``.
 """
 
 from __future__ import annotations
@@ -138,21 +152,23 @@ def ingest_state_dir(
 
 
 PROCEDURE_NOTES = """\
-EXPERIMENTAL. wtf's Linux mode is GDB against a full-system QEMU VM, not a
-user-mode process (docs/DEVIATIONS.md D-010). From linux_mode/README.md:
+EXPERIMENTAL. wtf snapshots a user-mode ELF process, but does it from inside a
+purpose-built QEMU VM driven by GDB (docs/DEVIATIONS.md D-010). From
+linux_mode/README.md:
 
   1. linux_mode/qemu_snapshot/setup.sh          -- build the target VM + kernel
-  2. ../qemu_snapshot/gdb_server.sh             -- start QEMU (one tab)
-  3. ../qemu_snapshot/gdb_client.sh             -- attach GDB (another tab)
-  4. a bkpt.py deriving from gdb_fuzzbkpt.py    -- set the break address
-  5. (gdb) cpu                                  -- dump the CPU state
+  2. a bkpt.py deriving from gdb_fuzzbkpt.py    -- name the break symbol + file
+  3. ../qemu_snapshot/gdb_server.sh             -- start QEMU (one tab)
+  4. target_vm/scp.sh <your binary>             -- copy the target into the guest
+  5. ../qemu_snapshot/gdb_client.sh             -- attach GDB (another tab)
+  6. (gdb) cpu                                  -- dump the CPU state
 
 Before any of it, IN THE GUEST:
 
     sysctl -w kernel.randomize_va_space=0
 
-and carry state/symbol-store.json over from a Windows run -- it cannot be
-produced on Linux.
+and carry state/symbol-store.json over from a Windows run -- wtf cannot produce
+it on a Linux host.
 """
 
 

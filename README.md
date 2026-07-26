@@ -1,7 +1,7 @@
 # snapfuzz
 
-LLM-guided snapshot fuzzing for x86-64 binaries, with no source. Windows is the
-supported path; Linux works but is rougher.
+LLM-guided snapshot fuzzing for x86-64 binaries, no source needed. Windows PE and
+Linux ELF.
 
 Point it at an executable. It decompiles with Ghidra, has an LLM pick the fuzz entry
 and derive the input format and harness, generates a C++
@@ -18,12 +18,12 @@ advisory.
 ```powershell
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m tools.bootstrap    # checks tools, fetches Ghidra, records paths
-.\.venv\Scripts\python.exe -m fuzzer.build       # needs the VS C++ toolchain
+.\.venv\Scripts\python.exe -m tools.bootstrap
+.\.venv\Scripts\python.exe -m fuzzer.build
 ```
 
-`bootstrap` downloads Ghidra if it is missing (pinned version, sha256 verified) and
-writes every tool path into `config/`. `--check` reports without changing anything.
+`bootstrap` fetches Ghidra if it is missing and writes every tool path into `config/`.
+`--check` reports without changing anything.
 
 ```
   [  ok   ] Python packages    8 present
@@ -36,20 +36,16 @@ writes every tool path into `config/`. `--check` reports without changing anythi
   [  ok   ] 0vercl0k/snapshot  D:\tools\snapshot\snapshot.dll
   [absent ] Hyper-V guest      Hyper-V IS installed, but this shell cannot query it
                                -> run as administrator, or join 'Hyper-V Administrators'
-
-Ready to fuzz an EXISTING snapshot. Not ready to take a new one:
-  - Hyper-V guest: ...
 ```
 
-The LLM key goes in `.env`, which is gitignored:
+The LLM key goes in `.env`:
 
 ```
 SNAPFUZZ_LLM_API_KEY=sk-...
 ```
 
-Requirements: Python 3.11+, JDK 21+, a C++ toolchain, an OpenAI-compatible LLM
-endpoint. Ghidra is not optional — the harness is derived from its pseudo-C. Taking
-your own snapshots also needs Hyper-V, `kd.exe` from the Windows SDK,
+Needs Python 3.11+, JDK 21+, a C++ toolchain, Ghidra, and an OpenAI-compatible LLM
+endpoint. Taking your own snapshots also needs Hyper-V, `kd.exe` from the Windows SDK,
 [0vercl0k/snapshot](https://github.com/0vercl0k/snapshot) and a guest VM
 ([docs/GUEST-VM.md](docs/GUEST-VM.md)).
 
@@ -77,10 +73,7 @@ python -m orchestrator.pipeline `
     --workers 2 --minutes 15
 ```
 
-`--kd-pipe` adds the acquisition stage; that is the only difference.
-`--entry-symbol` is optional — the LLM picks the entry in stage 03.
-
-Output:
+`--entry-symbol` is optional; the LLM picks the entry in stage 03.
 
 ```
 target    : snapfuzz (D:\wtf-llm\targets\snapfuzz)
@@ -108,6 +101,8 @@ PIPELINE SUMMARY
   all stages accounted for
 ```
 
+Results land in `targets/<name>/` and `artifacts/runs/<label>-triage/advisory.md`.
+
 ### Flags
 
 | Flag | Effect |
@@ -120,6 +115,7 @@ PIPELINE SUMMARY
 | `--scope function-closure` | narrow analysis to the entry's call closure |
 | `--workers N` | worker count |
 | `--minutes N` | campaign length |
+| `--kd-pipe`, `--kd-stimulus`, `--wow64` | snapshot acquisition |
 
 ### Stages
 
@@ -140,39 +136,38 @@ PIPELINE SUMMARY
 13-triage     LLM: five-signal triage                 -> advisory.md
 ```
 
-Each stage names an artifact it must produce, and that artifact is what counts as
-done — `analyzeHeadless` and `wtf` both exit 0 having written nothing. Stages whose
-work is time rather than a file are never skipped because an old output exists.
+Each stage runs standalone too: [docs/STAGES.md](docs/STAGES.md).
 
-Stages also run standalone: [docs/STAGES.md](docs/STAGES.md).
+## Linux binaries
 
-## Linux targets
+ELF targets work. The snapshot is taken with wtf's own `linux_mode/` scripts
+(QEMU + GDB, user-mode ELF snapshotting) rather than the KD path above.
 
-The Ghidra and analysis halves are OS-agnostic and ELF input works. Snapshotting is
-the hard part: wtf's Linux mode is GDB against a full-system QEMU VM, not a user-mode
-process.
+In the guest, before snapshotting:
 
 ```bash
-# in the guest, first
 sysctl -w kernel.randomize_va_space=0
 ```
 
-Then follow wtf's `linux_mode/` procedure (`qemu_snapshot/setup.sh`, `gdb_server.sh`,
-`gdb_client.sh`, a `bkpt.py` deriving from `gdb_fuzzbkpt.py`, then `cpu` in GDB) and
-ingest by hand:
+Take the snapshot per [`linux_mode/README.md`](linux_mode/README.md): `setup.sh` builds
+the target VM, `scp` your binary in, write a `bkpt.py` naming the break symbol, then
+`gdb_server.sh` and `gdb_client.sh`. Bring `state/symbol-store.json` from a Windows
+run — wtf cannot generate it on a Linux host.
+
+Then ingest and run the rest:
 
 ```bash
 python -m prep.snapshot_linux ingest --state targets/mytarget/state \
     --module mytarget --module-base 0x555555554000 --ghidra-image-base 0x100000 \
     --entry-runtime-addr 0x5555555551a9 --randomize-va-space 0 \
     --out artifacts/a1_snapshot.json
+
+python -m orchestrator.pipeline --binary mytarget \
+    --state-dir targets/mytarget/state --target-name mytarget \
+    --from 08 --workers 2 --minutes 15
 ```
 
-Ingest refuses unless ASLR is off — with it on, `module_base` differs between snapshot
-and replay and address translation quietly produces garbage. `state/symbol-store.json`
-is required on Linux and cannot be generated there; carry it over from a Windows run.
-The pipeline's snapshot stage is Windows-only, so run stage 07 yourself and use
-`--from 08`. `python -m prep.snapshot_linux notes` prints the procedure.
+`python -m prep.snapshot_linux notes` prints the procedure.
 
 ## How it works
 
@@ -180,7 +175,7 @@ The pipeline's snapshot stage is Windows-only, so run stage 07 yourself and use
 binary ──┬─> Ghidra ──> A2 pseudo-C ──> [LLM] entry, input format, harness
          │              A3 basic blocks ──> coverage breakpoints
          │              A6 global symbols
-         └─> KD + !snapshot ──> A1 snapshot
+         └─> KD or GDB + !snapshot ──> A1 snapshot
 
                ┌─────────── fast clock ───────────┐   ┌─── slow clock ───┐
                │ wtf master  ──>  N wtf workers   │   │ sidecar process  │
@@ -191,15 +186,12 @@ crashes ──> dedup ──> classify ──> replay ──> trace ──┐
                                     A2 pseudo-C ──────┴──> [LLM] triage ──> GHSA
 ```
 
-- No LLM anywhere in the fast clock, including the master — it serves every worker, so
-  one call there stalls the pool. The slow clock is a separate process that watches
-  aggregate coverage and drops seeds into a spool the master's mutator drains without
-  blocking. A gate test greps for the LLM client in fast-loop modules.
-- The LLM fills pydantic-validated schemas (`InputSpec`, `HarnessSpec`);
-  `fuzzer/codegen.py` renders the C++.
-- Triage takes five independent signals: dedup bucket, fault classification,
-  deterministic replay, symbolized trace, pseudo-C. The last two stay separate — one
-  says what ran, the other what the code is.
+The LLM runs on the slow clock only: entry selection, input format, harness, seed
+generation on plateau, and triage. The fast clock is wtf's execution loop and never
+calls it.
+
+Triage takes five independent signals: dedup bucket, fault classification,
+deterministic replay, symbolized trace, pseudo-C.
 
 ## Results
 
@@ -214,13 +206,8 @@ crashes ──> dedup ──> classify ──> replay ──> trace ──┐
 | ablation: no seed gen | 80,161 | 738 | 35 | 4 | 12,761 | 20,040 |
 | ablation: no pseudo-C | 101,788 | 862 | 36 | 3 | 12,751 | 33,929 |
 
-70× fewer executions per bug than libFuzzer and 366× fewer than honggfuzz, at a tenth
-to a thirtieth of the throughput. LLM seed generation is not supported by this data:
-4 buckets against the no-seedgen ablation's 4.
-
-Dedup collapsed 53 crash files with 52 distinct fault addresses into 4 buckets, all
-four reproducing deterministically. Caveats and full numbers:
-[docs/RESULTS.md](docs/RESULTS.md).
+70× fewer executions per bug than libFuzzer, 366× fewer than honggfuzz. Full numbers,
+methodology and caveats: [docs/RESULTS.md](docs/RESULTS.md).
 
 ## Layout
 
@@ -249,7 +236,7 @@ python -m pytest tests\gates -q
 424 passed, 12 skipped
 ```
 
-The skips are live-endpoint tests behind `SNAPFUZZ_LIVE_LLM`, `SNAPFUZZ_LIVE_MCP` and
+Skips are live-endpoint tests behind `SNAPFUZZ_LIVE_LLM`, `SNAPFUZZ_LIVE_MCP` and
 `SNAPFUZZ_LIVE_CP4B`.
 
 ## Credits
@@ -262,4 +249,4 @@ Built on [wtf](https://github.com/0vercl0k/wtf) by Axel Souchet, with
 [docs/README.wtf-upstream.md](docs/README.wtf-upstream.md).
 
 Design notes: [CLAUDE.md](CLAUDE.md), [docs/DECISIONS.md](docs/DECISIONS.md),
-[docs/DEVIATIONS.md](docs/DEVIATIONS.md).
+[docs/DEVIATIONS.md](docs/DEVIATIONS.md), [docs/RESULTS.md](docs/RESULTS.md).
