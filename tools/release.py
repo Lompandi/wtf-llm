@@ -142,6 +142,7 @@ def collect_source_with_skips(
 ) -> tuple[list[Path], list[Path]]:
     """(packaged, skipped-because-untracked). Separated so callers can report."""
     tracked = _tracked_files(repo_root)
+    ignored = _ignored_files(repo_root)
     out: list[Path] = []
     skipped: list[Path] = []
     for entry in SOURCE_INCLUDE:
@@ -151,10 +152,33 @@ def collect_source_with_skips(
         for path in _walk(target, repo_root):
             relative = path.relative_to(repo_root).as_posix()
             if tracked is not None and relative not in tracked:
-                skipped.append(path)
+                # Ignored on purpose is not "forgot to commit", so it is excluded
+                # silently. Anything else is reported.
+                if relative not in ignored:
+                    skipped.append(path)
                 continue
             out.append(path)
     return sorted(set(out)), sorted(set(skipped))
+
+
+def _ignored_files(repo_root: Path) -> set[str]:
+    """Paths git deliberately ignores, so the warning does not demand the impossible.
+
+    The first version of the untracked warning listed CLAUDE.md and the four internal
+    docs and said "commit them, or they ship in nothing" -- for files that must never
+    ship (D-072). Ignored and merely-new are different things, and only the second is
+    somebody forgetting to commit.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "--others", "--ignored", "--exclude-standard"],
+            cwd=repo_root, capture_output=True, text=True, timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if proc.returncode != 0:
+        return set()
+    return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
 
 
 def _tracked_files(repo_root: Path) -> set[str] | None:

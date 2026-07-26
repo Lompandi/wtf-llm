@@ -86,10 +86,23 @@ def test_an_ambiguous_derivation_refuses_rather_than_picking() -> None:
     candidates = candidates_from_rip(RIP, IMAGE_BASE, functions)
     assert len(candidates) == 2
 
+    # Built here rather than read from the recorded target, so this runs on a clone and
+    # inside a release archive. It used to read the dev target's exe and regs.json and
+    # therefore skipped in both -- proving the refusal only where the 1.8 GB recording
+    # lives (D-075).
+    import tempfile
+
+    from tests.gates.pe_fixture import build_pe
+
+    tmp = Path(tempfile.mkdtemp())
+    binary = tmp / "ambiguous.exe"
+    binary.write_bytes(build_pe(image_base=IMAGE_BASE))
+    (tmp / "regs.json").write_text(json.dumps({"rip": hex(RIP)}), encoding="utf-8")
+
     with pytest.raises(LayoutError) as exc:
         derive_layout(
-            binary=BINARY,
-            regs_json=STATE / "regs.json",
+            binary=binary,
+            regs_json=tmp / "regs.json",
             export=_export_with(functions),
         )
     assert "different module bases" in str(exc.value)
