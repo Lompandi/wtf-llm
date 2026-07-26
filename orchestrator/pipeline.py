@@ -162,6 +162,20 @@ class PipelineConfig:
         self.state_dir = Path(self.state_dir).resolve()
 
     @property
+    def target_module(self) -> str:
+        """The target's module name AS THE SNAPSHOT KNOWS IT.
+
+        The PE's own CodeView record beats the filename, because wtf resolves
+        breakpoints and .cov files by this name and a snapshot loaded the image under
+        whatever it was called then. A renamed executable otherwise produces a harness
+        whose `GetModuleBase` returns 0, a breakpoint at `0 + rva`, and a campaign that
+        completes with zero coverage and no error (D-075).
+        """
+        from prep.layout import pe_module_name
+
+        return pe_module_name(self.binary) or self.binary.stem
+
+    @property
     def use_generated_harness(self) -> bool:
         """Resolve `generated_harness`, defaulting per target.
 
@@ -431,7 +445,7 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
                 "--regs", str(config.state_dir / "regs.json"),
                 "--mem-dmp", str(config.state_dir / "mem.dmp"),
                 "--export", str(a2_json),
-                "--module", Path(config.binary).stem,
+                "--module", config.target_module,
                 "--out", str(layout_json),
             ),
             needs=[config.binary, config.state_dir / "regs.json", a2_json],
@@ -449,7 +463,7 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
             title="LLM: describe the fuzz entry",
             argv=py(
                 "prep.entry_select", "--cache", str(a2_db),
-                "--module", Path(config.binary).stem, "--out", str(entry_json),
+                "--module", config.target_module, "--out", str(entry_json),
                 # The entry is not open for choice once a snapshot exists: rip decided
                 # it in stage 02b. This stage derives the input REGISTERS for that
                 # function. Left free, the model chose a different function and derived
@@ -492,7 +506,7 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
                 # not the cause (D-073). Passing it makes the two agree by
                 # construction and turns a disagreement into a message about the
                 # wrong program.
-                "--module", Path(config.binary).stem,
+                "--module", config.target_module,
             ),
             needs=[a3_json],
             # BOTH: the .cov in the target's coverage/ directory is the actual
@@ -501,7 +515,7 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
             # actually reads was absent.
             produces=[
                 art / "a3_bp_list.json",
-                config.target_dir / "coverage" / f"{Path(config.binary).stem}.cov",
+                config.target_dir / "coverage" / f"{config.target_module}.cov",
             ],
             note=(
                 "bochscpu ignores .cov and takes full-system coverage instead, so "
@@ -538,7 +552,7 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
                         "--pipe", config.kd_pipe,
                         # SEPARATE arguments: the entry may still be the
                         # placeholder here, and substitution is by whole argument.
-                        "--module", Path(config.binary).stem,
+                        "--module", config.target_module,
                         "--break-at", entry_for_scoping,
                         "--kind", "full",
                         "--timeout", str(config.kd_timeout_s),
@@ -580,7 +594,7 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
             argv=py(
                 "prep.snapshot_win", "ingest",
                 "--state", str(config.state_dir),
-                "--module", Path(config.binary).stem,
+                "--module", config.target_module,
                 "--binary", str(config.binary),
                 "--entry-symbol", entry_for_scoping,
                 # From stage 02b, so a snapshot with no symbol-store.json ingests --
@@ -770,7 +784,7 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
                 # symbolized with the dev target's module prefix, disassembled the dev
                 # target's PE at the fault address, and handed the dev target's
                 # pseudo-C to triage -- four wrong answers, no error (D-073).
-                "--module-prefix", Path(config.binary).stem,
+                "--module-prefix", config.target_module,
                 "--target-binary", str(config.binary),
                 "--entry-symbol", entry_for_scoping,
                 "--a1", str(a1_json),
@@ -1722,7 +1736,7 @@ def main(argv: list[str] | None = None) -> int:
     # "module : demo" is what a user saw immediately before the run wrote
     # `tlv_server.cov`, and neither string was wrong -- they were answers to
     # different questions (D-073).
-    print(f"target mod: {config.binary.stem}   (what symbols and .cov are named for)")
+    print(f"target mod: {config.target_module}   (what symbols and .cov are named for)")
     if config.use_generated_harness:
         print(f"fuzzer mod: {config.module}_gen   (GENERATED from this binary's "
               f"pseudo-C, compiled by stage 10)")
