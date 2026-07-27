@@ -281,8 +281,14 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
     # link line) and never selected at run time.
     fuzzer_module = generated_target_name if use_generated_harness else config.module
     wtf_exe = config.repo_root / "src" / "build" / "wtf.exe"
-    gate8 = art / "runs" / f"{config.label}-analysis"
-    gate9 = art / "runs" / f"{config.label}-triage"
+    # CAMPAIGN OUTPUTS ARE REPO-LEVEL, not per target. They are keyed by --label, which
+    # already defaults to the target name, and orchestrator/scheduler.py writes them to
+    # artifacts/runs/ directly. Building them from config.artifacts made the driver look
+    # under artifacts/<module>/runs/ while the scheduler wrote to artifacts/runs/, so a
+    # campaign that ran fine failed with "scheduler_result.json absent" (D-075).
+    runs = config.repo_root / "artifacts" / "runs"
+    gate8 = runs / f"{config.label}-analysis"
+    gate9 = runs / f"{config.label}-triage"
 
     def py(module: str, *args: str) -> list[str]:
         return [str(PYTHON), "-u", "-m", module, *args]
@@ -297,7 +303,7 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
         a green stage, and the analysis stage then built a fresh-looking advisory
         from the previous run's crashes (D-057).
         """
-        path = art / "runs" / config.label / "scheduler_result.json"
+        path = runs / config.label / "scheduler_result.json"
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -806,7 +812,7 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
                 "--module", fuzzer_module,
             ),
             needs=[wtf_exe, a1_json],
-            produces=[art / "runs" / config.label / "scheduler_result.json"],
+            produces=[runs / config.label / "scheduler_result.json"],
             calls_llm=True,
             # A campaign's work is TIME. Re-using a label made it look produced, so
             # --minutes 60 --workers 8 became zero seconds of fuzzing that reported

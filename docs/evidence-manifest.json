@@ -1,7 +1,7 @@
 {
   "type": "evidence-manifest",
-  "recorded_at": 1785078803.7020833,
-  "commit": "3f39b2dbc51e58f265cdea78e7c2a21d25d875da",
+  "recorded_at": 1785128104.2490516,
+  "commit": "e87bf1c762689811e2817eb807cae7a922102577",
   "branch": "snapfuzz/cp0-cp4",
   "note": "artifacts/ and the large target files are gitignored. This manifest is tracked so a recorded gate result can be tied to specific bytes and regenerated -- see tools/evidence.py.",
   "present": 18,
@@ -201,9 +201,9 @@
       "regenerate": "python -m tools.gates run",
       "large": false,
       "present": true,
-      "sha256": "5e3b5c5ed6fe417d12bed1aeace316da08cbed5d6433e832b90b4b0f1570bbae",
+      "sha256": "7a79010cdf08744c03b252abff31e8cdfbc1c382bfa9d58a92aacc98fb995ff6",
       "size_bytes": 34477,
-      "mtime": 1785078801.7773924
+      "mtime": 1785128102.0177426
     }
   ]
 }
