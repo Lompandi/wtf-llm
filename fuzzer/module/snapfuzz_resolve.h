@@ -96,29 +96,29 @@ inline uint64_t ResolveModuleBase(const char *Name) {
 // observable".
 //
 //
-// The return type, which adapts rather than picking a side.
+// RETURNS Gva_t. One type, the one every guest-memory call takes.
 //
-// Both spellings are natural and both are in use: the deterministic renderer wants a
-// `uint64_t` because it walks the structure with `Address += sizeof(field)`, and the
-// model writes `const Gva_t Addr = ResolveInputAddress(...)` because every
-// guest-memory call takes a Gva_t. Returning either one alone makes the other a
-// compile error -- C2440, `cannot convert from 'uint64_t' to 'Gva_t'`, which is where
-// two repair rounds went.
+// The previous version returned a struct with implicit conversions to BOTH `uint64_t` and
+// `Gva_t`, reasoning that a helper meant to remove a decision should not impose one. That
+// was wrong, and measurably so: it made the natural call sites AMBIGUOUS instead of
+// flexible. `Backend_t::Rcx` is overloaded on `uint64_t` and `Gva_t` (backend.h:554-555),
+// so a value convertible to both gives
 //
-// A helper whose purpose is to remove a decision should not introduce one. Gva_t's
-// constructor is `explicit` (gxa.h:37) precisely so addresses are not confused with
-// integers, and that is worth keeping everywhere EXCEPT at this one seam, where the
-// value has just been computed as an integer and is about to be used as an address.
+//     error C2668: 'Backend_t::Rcx': ambiguous call to overloaded function
+//     error C2440: cannot convert from 'const snapfuzz::InputAddress' to 'Gva_t'
+//     error C2228: left of '.U64' must have class/struct/union
 //
-struct InputAddress {
-  uint64_t Value;
-  operator uint64_t() const { return Value; }
-  operator Gva_t() const { return Gva_t(Value); }
-};
-
-inline InputAddress ResolveInputAddress(uint64_t Pointer, size_t Bytes) {
+// on one generation in three -- the model writing perfectly reasonable C++ against a type
+// I had made unusable. Two implicit conversions do not widen what compiles, they delete
+// overload resolution.
+//
+// So: `Gva_t`, which `Backend->Rcx(...)`, `VirtWriteDirty` and `SetBreakpoint` all accept
+// directly, which supports `+ Gva_t(sizeof(x))`, and whose `.U64()` gives the integer when
+// one is wanted. The deterministic renderer calls `.U64()` and keeps its own arithmetic.
+//
+inline Gva_t ResolveInputAddress(uint64_t Pointer, size_t Bytes) {
   if (Bytes == 0 || Bytes > kPageSize) {
-    return InputAddress{Pointer};
+    return Gva_t(Pointer);
   }
 
   //
@@ -155,7 +155,7 @@ inline InputAddress ResolveInputAddress(uint64_t Pointer, size_t Bytes) {
                    "  and, on a stack pointer, corrupt the caller frames.\n",
                    BufferBytes);
       }
-      return InputAddress{Pointer};
+      return Gva_t(Pointer);
     }
   }
 
@@ -179,7 +179,7 @@ inline InputAddress ResolveInputAddress(uint64_t Pointer, size_t Bytes) {
                              ? std::strtoull(MaxEnv, nullptr, 0)
                              : 0;
     if (Boundary >= Bytes && Bytes <= Max) {
-      return InputAddress{Boundary - Bytes};
+      return Gva_t(Boundary - Bytes);
     }
 
     static bool CapWarned = false;
@@ -206,20 +206,14 @@ inline InputAddress ResolveInputAddress(uint64_t Pointer, size_t Bytes) {
                "  mapped memory and never fault. Run prep.guard_page to establish a "
                "boundary.\n");
   }
-  return InputAddress{(Pointer & ~(kPageSize - 1)) + (kPageSize - Bytes)};
+  return Gva_t((Pointer & ~(kPageSize - 1)) + (kPageSize - Bytes));
 }
 
 //
-// The same thing in wtf's own address type, because both spellings are natural at the
-// call site and the alternative is a type error rather than a wrong answer.
+// The same, taking wtf's address type, because `Gva_t` has no implicit conversion to
+// `uint64_t` and a caller holding one should not have to reach for `.U64()`.
 //
-// `Gva_t`'s constructor is `explicit` (gxa.h:37), so `const Gva_t A =
-// ResolveInputAddress(...)` on the uint64_t overload is C2440. That is a harmless
-// failure -- the compiler catches it -- but it is a failure the caller cannot fix without
-// knowing which overload exists, and a helper whose job is to remove a decision should
-// not add one. Overloading costs nothing and makes both readings correct.
-//
-inline InputAddress ResolveInputAddress(Gva_t Pointer, size_t Bytes) {
+inline Gva_t ResolveInputAddress(Gva_t Pointer, size_t Bytes) {
   return ResolveInputAddress(Pointer.U64(), Bytes);
 }
 

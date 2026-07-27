@@ -674,7 +674,7 @@ def generate_module(
                 "        // generator was shown this file as its example and reproduced",
                 "        // the same mistake.",
                 f"        uint64_t Address = ResolveInputAddress("
-                f"Backend->{input_reg_getter}(), Bytes);",
+                f"Backend->{input_reg_getter}(), Bytes).U64();",
             ]
         ).replace("{getter}", input_reg_getter)
     placement += f"\n        Backend->{input_reg_setter}(Address);"

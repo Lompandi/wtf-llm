@@ -531,6 +531,61 @@ def module_histogram(symbolized: Path, limit: int = 10) -> list[tuple[str, int]]
     return sorted(counts.items(), key=lambda kv: -kv[1])[:limit]
 
 
+def validate_delivery(
+    target: TraceTarget,
+    input_path: Path,
+    *,
+    trace_dir: Path,
+    symbolizer: Path | None = None,
+) -> tuple[bool, str]:
+    """Does the input CHANGE anything? Returns (delivered, explanation).
+
+    THE CHECK CP4 ASKS FOR IS VACUOUS ON THESE SNAPSHOTS, and that was measured rather
+    than reasoned: with `InsertTestcase` deliberately altered to queue nothing, the rip
+    trace still reported `first hit: line 1` and HARNESS VALIDATION PASSED. The reason is
+    structural -- a snapshot is taken AT the fuzz entry, so `rip` is already inside it and
+    the trace's first instruction hits the entry symbol whether or not a test-case was
+    ever written. "Execution reaches the parser" is true of the untouched snapshot.
+
+    So compare against a BASELINE: the same harness run on an empty input. An empty
+    test-case is universally constructible, needs no knowledge of the target, and takes
+    the same path through `InsertTestcase` that a rejected one does -- it queues nothing.
+    If a real seed traces identically to that, the seed is not reaching the guest.
+
+    This is what would have caught all three of the harness failures recorded here, none
+    of which the entry-symbol check can see:
+
+      * a wire format that did not match the corpus, so every case was skipped (D-082);
+      * a breakpoint at 0 + rva because GetModuleBase returned 0 (D-075);
+      * a module registered for a different target (D-085).
+
+    A false NEGATIVE is possible and worth naming: a target that genuinely ignores its
+    input would also produce identical traces. That is not a harness fault, and the
+    message says so rather than asserting a cause it cannot distinguish.
+    """
+    empty = trace_dir / "_baseline_empty.bin"
+    empty.parent.mkdir(parents=True, exist_ok=True)
+    empty.write_bytes(b"")
+
+    seed_trace = generate_trace(target, input_path, trace_dir / "seed", trace_type="rip")
+    base_trace = generate_trace(target, empty, trace_dir / "baseline", trace_type="rip")
+
+    seed_lines = seed_trace.read_text(encoding="utf-8", errors="replace").splitlines()
+    base_lines = base_trace.read_text(encoding="utf-8", errors="replace").splitlines()
+    if seed_lines != base_lines:
+        return True, (
+            f"the input changes execution: {len(seed_lines)} instruction(s) with the seed "
+            f"against {len(base_lines)} with an empty test-case"
+        )
+    return False, (
+        f"the seed and an EMPTY test-case trace identically ({len(seed_lines)} "
+        f"instruction(s)), so nothing is reaching the guest. The entry-symbol check cannot "
+        f"see this: the snapshot's rip is already inside the fuzz entry, so the trace hits "
+        f"it whether or not a test-case was delivered. Either InsertTestcase is queueing "
+        f"nothing, the breakpoint is not firing, or the target ignores this input."
+    )
+
+
 def validate_harness(
     target: TraceTarget,
     input_path: Path,
@@ -571,12 +626,30 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--wtf", type=Path, default=REPO_ROOT / "src/build/wtf.exe")
     ap.add_argument("--target-dir", type=Path, required=True)
     ap.add_argument("--name", required=True, help="wtf --name (the module)")
-    ap.add_argument("--input", type=Path, required=True)
+    ap.add_argument(
+        "--input",
+        type=Path,
+        required=True,
+        help="a test-case, or a DIRECTORY of them -- the first is used. The directory "
+             "form exists because the pipeline builds this stage's argv before the seed "
+             "stage has run, so no filename is known yet",
+    )
     ap.add_argument("--entry-symbol", required=True, help="e.g. ProcessPacket")
     ap.add_argument("--binary-dir", type=Path, help="directory holding the PDB")
     ap.add_argument("--symbolizer", type=Path)
     ap.add_argument("--out", type=Path, default=REPO_ROOT / "artifacts")
     args = ap.parse_args(argv)
+
+    chosen = args.input
+    if chosen.is_dir():
+        candidates = sorted(p for p in chosen.iterdir() if p.is_file())
+        if not candidates:
+            raise SystemExit(
+                f"{chosen} holds no test-case to validate the harness with. Harness "
+                f"validation needs one input; the seed stage should have written it."
+            )
+        chosen = candidates[0]
+        print(f"input       : {chosen} (first of {len(candidates)} in {args.input})")
 
     state = args.target_dir / "state"
     symbol_paths = ["srv*C:\\symbols*https://msdl.microsoft.com/download/symbols"]
@@ -594,7 +667,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ref = validate_harness(
         target,
-        args.input,
+        chosen,
         args.entry_symbol,
         # Per-module trace directory: two modules validated against the same
         # snapshot would otherwise write the same filename.
@@ -612,6 +685,20 @@ def main(argv: list[str] | None = None) -> int:
     print("modules     :")
     for module, count in module_histogram(sym):
         print(f"  {count:>7}  {module}")
+
+    delivered, why = validate_delivery(
+        target,
+        chosen,
+        trace_dir=args.out / "delivery" / args.name,
+        symbolizer=args.symbolizer,
+    )
+    print(f"delivery    : {'YES' if delivered else 'NO'} -- {why}")
+    if not delivered:
+        print(
+            "\nHARNESS VALIDATION FAILED: the harness does not deliver the test-case. "
+            "It will run at full speed and report coverage while fuzzing nothing."
+        )
+        return 1
 
     if not ref.reached_fuzz_entry:
         print(

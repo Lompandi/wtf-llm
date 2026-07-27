@@ -136,6 +136,48 @@ def build_env(
     return env
 
 
+def harness_env(a1: Path, harness_spec: Path | None = None) -> dict[str, str]:
+    """The SNAPFUZZ_* variables a generated harness needs, from A1 and the harness spec.
+
+    ONE OWNER, because this has now been got wrong in three separate places and the failure
+    is the same every time: a `wtf run` whose Init cannot place its breakpoint, which
+    reports its refusal to stdout and is otherwise indistinguishable from a target that
+    does not crash.
+
+      * the campaign had them (fuzzer/run.py sets them from A1);
+      * the ANALYSIS stage did not, so replay produced "NO REPLAY RAN", no trace was
+        written, and triage discarded a real finding for want of a signal (D-085);
+      * the HARNESS VALIDATION stage did not, so the check added to catch exactly this
+        class of bug failed on it.
+
+    `SNAPFUZZ_MODULE_BASE` is where the target is mapped, from walking the dump's page
+    tables -- needed because `GetModuleBase` returns 0 on a snapshot whose
+    symbol-store.json names another program. `SNAPFUZZ_INPUT_BUFFER_BYTES` decides WHERE
+    the input is written, so a stage that lacks it replays a different experiment (D-083).
+
+    Missing files yield an empty dict rather than an error: a caller may legitimately have
+    neither, and the harness prints its own refusal when it cannot resolve a base.
+    """
+    env: dict[str, str] = {}
+    if a1.is_file():
+        try:
+            env["SNAPFUZZ_MODULE_BASE"] = hex(
+                int(json.loads(a1.read_text(encoding="utf-8"))["module_base"])
+            )
+        except (ValueError, KeyError, OSError):
+            pass
+    if harness_spec is not None and harness_spec.is_file():
+        try:
+            buffer_bytes = json.loads(harness_spec.read_text(encoding="utf-8")).get(
+                "input_buffer_bytes"
+            )
+        except (ValueError, OSError):
+            buffer_bytes = None
+        if buffer_bytes:
+            env["SNAPFUZZ_INPUT_BUFFER_BYTES"] = str(buffer_bytes)
+    return env
+
+
 @dataclass
 class CampaignConfig:
     """Everything a run needs, loaded from config rather than hardcoded."""

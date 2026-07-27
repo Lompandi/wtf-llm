@@ -217,18 +217,25 @@ def _result(key: str, status: str, detail: str = "") -> StageResult:
 # --- ordering: derived from the stage list, not pinned --------------------
 
 
-def test_the_stage_list_is_the_sixteen_stage_pipeline() -> None:
+def test_the_stage_list_is_the_seventeen_stage_pipeline() -> None:
     """A canary on the count only. The ORDER is derived by the tests below, so a
     reorder must fail for a reason that names the constraint it broke.
 
-    Sixteen. `08b-harness` derives the HarnessSpec -- `prep/harness_derive.py` existed
+    Seventeen. `08b-harness` derives the HarnessSpec -- `prep/harness_derive.py` existed
     from CP11 and no stage ran it, which is why the generated module in the tree was
     built once for tlv_server and never again (D-073). `02b-layout` reads the module
     base and the fuzz entry out of the snapshot, and `09b-seed` builds a first
     test-case from the InputSpec, which together are what let a user supply a memory
-    dump, a register state and an executable and nothing else (D-075)."""
+    dump, a register state and an executable and nothing else (D-075).
+
+    `10b-validate` is the newest and has the same history as `08b`: CP4 calls a
+    symbolized rip trace proving execution reaches the fuzz entry MANDATORY,
+    `analysis/trace.py:validate_harness` implemented it, and no stage invoked it. So
+    "it compiled" was the only thing between a generated module and a 15-minute
+    campaign -- and three harness failures went through that gap in one session, each
+    producing a green pipeline with zero findings (D-075, D-082, D-085)."""
     stages = _stages()
-    assert len(stages) == 16
+    assert len(stages) == 17
     keys = [s.key for s in stages]
     assert len(set(keys)) == len(keys), f"duplicate stage keys: {keys}"
 
@@ -1224,4 +1231,68 @@ def test_every_stage_that_runs_wtf_names_the_SAME_module() -> None:
         f"wtf --name disagrees across stages: build={build!r} campaign={campaign!r} "
         f"analysis={analysis!r}. A campaign that fuzzes one module and an analysis that "
         f"replays another produces 'NO REPLAY RAN' and a discarded finding, with no error"
+    )
+
+
+def test_the_entry_symbol_check_is_vacuous_when_the_snapshot_stops_at_the_entry(
+    tmp_path, monkeypatch
+) -> None:
+    """Why 10b-validate compares against a baseline instead of trusting CP4's wording.
+
+    CP4 requires "a symbolized rip trace proving execution reaches FuzzEntry.static_addr".
+    On every snapshot this project takes, that is true of the UNTOUCHED snapshot: `rip` is
+    already inside the fuzz entry, so the trace's first instruction hits the entry symbol
+    whether or not a test-case was delivered.
+
+    Measured, not reasoned: with InsertTestcase altered to queue nothing, the stage still
+    reported `first hit: line 1` and HARNESS VALIDATION PASSED. A check that cannot fail is
+    worse than no check, because it is quoted as evidence.
+
+    `validate_delivery` asks the answerable question -- does the input CHANGE execution --
+    by tracing the seed and an empty test-case and comparing. Empty is universally
+    constructible and takes the same path through InsertTestcase that a rejected input
+    does.
+    """
+    from pathlib import Path
+
+    import analysis.trace as trace_mod
+
+    calls: list[Path] = []
+    traces = {
+        "seed": "\n".join(f"0x{i:x}" for i in range(100)),
+        "baseline": "0x1000",
+    }
+
+    def fake_generate_trace(target, input_path, out_dir, trace_type="rip"):
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        calls.append(Path(input_path))
+        # An empty input is the baseline; anything else is the seed.
+        key = "baseline" if Path(input_path).stat().st_size == 0 else "seed"
+        written = Path(out_dir) / "t.trace"
+        written.write_text(traces[key], encoding="utf-8")
+        return written
+
+    monkeypatch.setattr(trace_mod, "generate_trace", fake_generate_trace)
+
+    seed = tmp_path / "seed.json"
+    seed.write_bytes(b'{"magic":1}')
+    delivered, why = trace_mod.validate_delivery(
+        object(), seed, trace_dir=tmp_path / "tr"
+    )
+    assert delivered, why
+    assert "changes execution" in why
+    assert any(p.stat().st_size == 0 for p in calls), (
+        "no empty-input baseline was traced, so the comparison proves nothing"
+    )
+
+    # And the failing direction: identical traces mean nothing reached the guest.
+    traces["baseline"] = traces["seed"]
+    delivered, why = trace_mod.validate_delivery(
+        object(), seed, trace_dir=tmp_path / "tr2"
+    )
+    assert not delivered
+    assert "nothing is reaching the guest" in why
+    assert "the snapshot's rip is already inside the fuzz entry" in why, (
+        "the message must explain why the entry-symbol check missed this, or the next "
+        "reader will trust that check again"
     )

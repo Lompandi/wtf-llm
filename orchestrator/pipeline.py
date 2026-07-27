@@ -415,6 +415,59 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
             )
         return None
 
+    validation_seed = config.target_dir / "inputs"
+    validation_dir = config.artifacts / "harness-validation"
+    validation_trace = (
+        validation_dir / "traces-symbolized" / f"{fuzzer_module}.rip.txt"
+    )
+
+    def harness_reached_entry() -> str | None:
+        """The symbolized trace must actually name the fuzz entry.
+
+        Not the exit code. `analysis.trace` does exit non-zero when the entry is absent,
+        but CP12's rule is that exit 0 is not evidence -- and here the artifact IS the
+        evidence, so it is read.
+
+        This is the check CP4 calls mandatory and nothing was running. Every harness
+        failure this project has recorded is invisible to coverage and visible here: an
+        empty delivery queue from a wire-format mismatch (D-082), a breakpoint placed at
+        0 + rva because GetModuleBase returned 0 (D-075), and a module registered for a
+        different target (D-085). All three produce a trace that never enters the entry.
+        """
+        if not validation_trace.is_file():
+            return f"{validation_trace.name} was not written, so nothing was validated"
+        text = validation_trace.read_text(encoding="utf-8", errors="replace")
+        if not text.strip():
+            return f"{validation_trace.name} is empty"
+        # THE ENTRY IS LATE-BOUND. `entry_for_scoping` may still be `ENTRY_PLACEHOLDER`,
+        # which the stage runner substitutes from the layout or the FuzzEntry at launch. A
+        # verify closure that captured the placeholder searched the trace for the literal
+        # `<ENTRY>`, never found it, and reported failure on a trace whose own tool had
+        # just printed HARNESS VALIDATION PASSED -- a check that fails when the thing it
+        # checks succeeds is worse than no check.
+        entry = entry_for_scoping
+        if entry == ENTRY_PLACEHOLDER:
+            resolved_argv = resolve_entry(
+                ["--entry-symbol", ENTRY_PLACEHOLDER],
+                config.artifacts / "fuzz_entry_llm.json",
+                config.artifacts / "a0_layout.json",
+            )
+            if isinstance(resolved_argv, str):
+                return f"the fuzz entry is unresolved: {resolved_argv}"
+            entry = resolved_argv[1]
+
+        # The frame may be mangled (`?fuzzme@@YAHPEAD@Z`) or plain, so match the bare
+        # symbol as a substring rather than a whole frame -- the same mangled/demangled
+        # mismatch that cost signal 5 in D-085.
+        if entry not in text:
+            head = "\n    ".join(text.splitlines()[:5])
+            return (
+                f"the trace never enters {entry!r}: the harness runs and will report "
+                f"coverage, but it is not fuzzing the intended code. First frames:"
+                f"\n    {head}"
+            )
+        return None
+
     def build_is_fresh() -> str | None:
         """wtf.exe must be newer than every module source.
 
@@ -798,6 +851,42 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
             verify=build_is_fresh,
         ),
         Stage(
+            key="10b-validate",
+            title="Prove the built harness reaches the fuzz entry (CP4, no LLM)",
+            # CP4 CALLS THIS MANDATORY and the driver was not doing it. `validate_harness`
+            # has existed in analysis/trace.py the whole time; nothing invoked it, so
+            # "it compiled" was the only thing standing between a generated module and a
+            # 15-minute campaign.
+            #
+            # Three harness failures reached campaigns in one session, and this stage
+            # catches all three, because none of them can produce a trace that enters the
+            # entry symbol:
+            #   * the wire format did not match the corpus, so the queue was empty and the
+            #     test-case ended at 0 instructions with cov 1 (D-082);
+            #   * the breakpoint went to 0 + rva because GetModuleBase returned 0, and Init
+            #     returned true anyway (D-075);
+            #   * the stage ran a module registered for a DIFFERENT target and failed on
+            #     that target's entry symbol (D-085).
+            # Coverage growth distinguishes none of them. A symbolized rip trace does.
+            argv=py(
+                "analysis.trace",
+                "--wtf", str(wtf_exe),
+                "--target-dir", str(config.target_dir),
+                "--name", fuzzer_module,
+                "--input", str(validation_seed),
+                "--entry-symbol", entry_for_scoping,
+                "--binary-dir", str(config.binary.parent),
+                "--out", str(validation_dir),
+            ),
+            needs=[wtf_exe],
+            produces=[validation_trace],
+            # The trace is evidence about THIS build. A previous run's trace says nothing
+            # about a module that has since been regenerated, and this stage exists
+            # precisely to catch a regenerated module that no longer delivers.
+            idempotent=False,
+            verify=harness_reached_entry,
+        ),
+        Stage(
             key="11-fuzz",
             title="Campaign: master + workers + slow clock",
             argv=py(
@@ -981,6 +1070,51 @@ def _config_describes(target_cfg: dict, binary: Path) -> bool:
     if not configured:
         return False
     return Path(configured).stem.lower() == Path(binary).stem.lower()
+
+
+def _harness_env_from_artifacts(artifacts: Path) -> dict[str, str]:
+    """The SNAPFUZZ_* variables every stage that runs `wtf run` needs.
+
+    Three places needed these and two did not have them. The campaign set them itself; the
+    analysis stage did not, so replay reported "NO REPLAY RAN", no trace was written, and
+    triage discarded a genuine finding for want of a signal; and the harness-validation
+    stage did not, so the check added to catch exactly that class of bug failed on it
+    (D-085).
+
+    A SEPARATE FUNCTION rather than inline in `run_pipeline`, because a CP12 test scans
+    that function's artifact-name literals to prove the late-bound entry is resolved from
+    one place. Adding two more filenames there would have broken a guarantee that has
+    nothing to do with this, and weakening the test to accommodate them would have been
+    the wrong trade.
+
+    Read by hand rather than by importing `fuzzer.run.harness_env`, because this module's
+    docstring claims it imports no LLM client and a CP12 test enforces that against the
+    IMPORTS -- `fuzzer.run` pulls in the engine bridge. Section 14.7 makes the same
+    exception for the same reason and comments it as a considered cost of RULE 1. Both
+    derive from the same two files, so they cannot disagree about the values; they can only
+    disagree about whether they run, which is what the validation stage now catches.
+    """
+    env: dict[str, str] = {}
+    a1 = artifacts / "a1_snapshot.json"
+    if a1.is_file():
+        try:
+            base = json.loads(a1.read_text(encoding="utf-8")).get("module_base")
+        except (OSError, json.JSONDecodeError):
+            base = None
+        if base:
+            env["SNAPFUZZ_MODULE_BASE"] = hex(int(base))
+
+    harness = artifacts / "harness_spec.json"
+    if harness.is_file():
+        try:
+            buffer_bytes = json.loads(harness.read_text(encoding="utf-8")).get(
+                "input_buffer_bytes"
+            )
+        except (OSError, json.JSONDecodeError):
+            buffer_bytes = None
+        if buffer_bytes:
+            env["SNAPFUZZ_INPUT_BUFFER_BYTES"] = str(buffer_bytes)
+    return env
 
 
 def registered_fuzzer_modules(repo_root: Path = REPO_ROOT) -> set[str]:
@@ -1430,6 +1564,8 @@ def run_pipeline(
     env = dict(os.environ)
     parts = (p.strip().strip('"') for p in env.get("PATH", "").split(os.pathsep))
     env["PATH"] = os.pathsep.join(p for p in parts if p)
+
+    env.update(_harness_env_from_artifacts(config.artifacts))
 
     # WHICH TARGET THIS RUN IS FOR. Hashing the binary once here, not per stage:
     # every stage compares against the same identity, and a target rebuilt midway
