@@ -4,13 +4,13 @@
 // prep/input_struct.py derived from Ghidra pseudo-C (CLAUDE.md edges 12 and 14).
 // Regenerate with:
 //
-//     python -m fuzzer.codegen --spec artifacts\tlv_server\input_spec.json --out <this file>
+//     python -m fuzzer.codegen --spec D:\wtf-llm\artifacts\fuzzing-base-test\input_spec.json --out <this file>
 //
-// Target : tlv_server!ProcessPacket
-// Source : ProcessPacket, main
+// Target : fuzzing-base-test!fuzzme
+// Source : fuzzme, FUN_1400011a0
 //
 // Why the shape is this, per the model:
-//   The packet format begins with a 4-byte command (offset 0), a 2-byte header field (offset 4), and a 2-byte payload length (offset 6). The payload starts at offset 8 and its size is given by the length field. The caller supplies the total packet size, but the parser only uses the fields described.
+//   The parser expects a 4-byte magic "test" followed by a 1-byte length field that indicates how many subsequent bytes constitute the payload. The payload may be up to 0x41 bytes; the total buffer is limited to 32 bytes, and the length field is after the magic. The entry function validates the magic and length before processing the payload, and it is invoked only once per test case, so the format does not support a sequence of packets.
 //
 // Hand-written code -- Init, InsertTestcase, Restore, the crash oracle, the
 // mutator -- lives in the module that includes this header. Those encode
@@ -45,14 +45,12 @@ inline void AppendBigEndian(std::vector<uint8_t> &Out, const T Value) {
 }
 
 struct Packet_t {
-  // scalar -- iVar2 = *(int *)param_1; // command ID at offset 0
-  uint32_t Cmd;
-  // scalar -- *(undefined2 *)(param_1 + 4) // stored into local_res8 at offset 4
-  uint16_t HeaderInfo;
-  // length; counts Payload in bytes -- (ulonglong)*(ushort *)((longlong)local_res8._Mypair._Myval2 + 2) // length of payload used for memcpy
-  uint16_t PayloadSize;
-  // bytes; capped at 65535 bytes -- memcpy(*(void **)_Var1._Myval2, param_1 + 8, (ulonglong)*(ushort *)((longlong)local_res8._Mypair._Myval2 + 2)); // copies PayloadSize bytes from offset 8
-  std::vector<uint8_t> Payload;
+  // magic; parser compares against 0x74736574 -- The code checks param_1[0]=='t', param_1[1]=='e', param_1[2]=='s', param_1[3]=='t' which together form the ASCII string "test"; interpreted as a 32-bit little-endian magic value 0x74736574.
+  uint32_t magic = 0x74736574;
+  // length; counts payload in bytes -- param_1[4] is used as the length for the following payload (passed as the third argument to FUN_14001b1b0). The code only processes a payload when the total input length exceeds 4 bytes.
+  uint8_t payload_len;
+  // bytes; capped at 65 bytes -- The remaining bytes of the 32-byte buffer up to the length indicated by payload_len are processed; the function is called with a constant 0x41 which appears to be an upper bound for the payload size. Terminated by 0x00: fuzzme opens with while (param_1[i] != 0) i++, so the buffer is a C string and an unterminated input makes that scan read past the end of the data. Set after the derivation missed it -- the scan is the first statement in the pseudo-C.
+  std::vector<uint8_t> payload;
 
   //
   // How many bytes the target is TOLD arrived, independent of how many were
@@ -68,9 +66,9 @@ struct Packet_t {
 };
 
 //
-// Fixed-size prefix, in bytes. 8 = 4 + 2 + 2
+// Fixed-size prefix, in bytes. 5 = 4 + 1
 //
-constexpr size_t kPacket_tHeaderBytes = 8;
+constexpr size_t kPacket_tHeaderBytes = 5;
 
 //
 // Serialise one Packet_t to the bytes the target will parse.
@@ -81,26 +79,25 @@ constexpr size_t kPacket_tHeaderBytes = 8;
 //
 inline std::vector<uint8_t> Serialize(const Packet_t &Packet) {
   std::vector<uint8_t> Out;
-  Out.reserve(kPacket_tHeaderBytes + Packet.Payload.size());
+  Out.reserve(kPacket_tHeaderBytes + Packet.payload.size());
 
-  // Cmd (uint32_t, 4 byte(s))
-  Append(Out, Packet.Cmd);
+  // magic (uint32_t, 4 byte(s))
+  Append(Out, Packet.magic);
 
-  // HeaderInfo (uint16_t, 2 byte(s))
-  Append(Out, Packet.HeaderInfo);
-
-  // PayloadSize (uint16_t, 2 byte(s))
+  // payload_len (uint8_t, 1 byte(s))
   // Recomputed, NOT taken from the test-case: a mutated length that
   // disagrees with the payload is rejected at the parser's first
   // check, and that is the difference between 5% and 50% coverage
   // (CLAUDE.md CP4).
-  const uint16_t PayloadSizeValue =
-      static_cast<uint16_t>(Packet.Payload.size());
-  Append(Out, PayloadSizeValue);
+  const uint8_t payload_lenValue =
+      static_cast<uint8_t>(Packet.payload.size());
+  Append(Out, payload_lenValue);
 
-  // Payload: variable-length tail
-  Out.insert(Out.end(), Packet.Payload.begin(),
-             Packet.Payload.end());
+  // payload: variable-length tail
+  Out.insert(Out.end(), Packet.payload.begin(),
+             Packet.payload.end());
+  // delimited by 0x00, not counted -- the parser reads until this byte
+  Out.push_back(uint8_t(0x00));
 
   return Out;
 }

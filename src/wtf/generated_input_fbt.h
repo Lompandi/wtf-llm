@@ -4,7 +4,7 @@
 // prep/input_struct.py derived from Ghidra pseudo-C (CLAUDE.md edges 12 and 14).
 // Regenerate with:
 //
-//     python -m fuzzer.codegen --spec D:\wtf-llm\artifacts\fuzzing-base-test\input_spec.json --out <this file>
+//     python -m fuzzer.codegen --spec artifacts\fuzzing-base-test\input_spec.json --out <this file>
 //
 // Target : fuzzing-base-test!fuzzme
 // Source : fuzzme, FUN_1400011a0

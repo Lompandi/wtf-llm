@@ -6,18 +6,18 @@
 //
 // Both were derived from Ghidra pseudo-C by an LLM. Regenerate with:
 //
-//     python -m fuzzer.codegen --spec artifacts\tlv_server\input_spec.json --harness artifacts\tlv_server\harness_spec.json \
+//     python -m fuzzer.codegen --spec D:\wtf-llm\artifacts\fuzzing-base-test\input_spec.json --harness D:\wtf-llm\artifacts\fuzzing-base-test\harness_spec.json \
 //         --module-out <this file>
 //
-// Target : tlv_server!ProcessPacket
-// Input  : rcx, length in rdx
-// Source : ProcessPacket, main
+// Target : fuzzing-base-test!fuzzme
+// Input  : rcx
+// Source : FUN_1400011a0, fuzzme
 //
 // The model's reading of the format:
-//   The packet format begins with a 4-byte command (offset 0), a 2-byte header field (offset 4), and a 2-byte payload length (offset 6). The payload starts at offset 8 and its size is given by the length field. The caller supplies the total packet size, but the parser only uses the fields described.
+//   The parser expects a 4-byte magic "test" followed by a 1-byte length field that indicates how many subsequent bytes constitute the payload. The payload may be up to 0x41 bytes; the total buffer is limited to 32 bytes, and the length field is after the magic. The entry function validates the magic and length before processing the payload, and it is invoked only once per test case, so the format does not support a sequence of packets.
 //
 // The model's reading of how to drive it:
-//   Input arrives via main's recv loop: it reads a 4-byte length, allocates a buffer, reads exactly that many bytes, then calls ProcessPacket(buf, len). Each call processes one TLV structure (command + ID + length + payload), so deliver_sequence=true. The snapshot restore already resets all globals (ChunkList, TLS), so restore_globals is empty. printf is silenced because it's pure logging. No end_of_testcase breakpoint needed because returning from ProcessPacket naturally ends one test case. Max input bounded by main's 0x1000 check, well under 4096.
+//   The fuzz input arrives in RCX as a pointer to a null-terminated string buffer. The caller FUN_1400011a0 prepares a 32-byte stack buffer, initializes it to zeros, and passes it to fuzzme. The function fuzzme expects the string 'test' followed by an optional fifth byte. No output or nondeterministic functions are called that require silencing; FUN_140001020 appears to be a logging function but its behavior is unclear, so it is left unsilenced. The snapshot restore will reset all memory including the stack buffer between iterations. Max input is set to 4096 bytes, though the parser only reads up to 5 bytes.
 //
 // THIS FILE IS NOT THE BUILD LOCATION. .gitignore's `src/wtf/fuzzer_*` would
 // silently untrack it there (D-012); fuzzer/build.py copies it in at build time.
@@ -45,7 +45,7 @@
 #include <system_error>
 #include <vector>
 
-namespace GenTlvServer {
+namespace GenFuzzingBaseTest {
 
 namespace sfs = std::filesystem;
 namespace json = nlohmann;
@@ -55,7 +55,7 @@ constexpr bool LoggingOn = false;
 template <typename... Args_t>
 void DebugPrint(const char *Format, const Args_t &...args) {
   if constexpr (LoggingOn) {
-    fmt::print("GenTlvServer: ");
+    fmt::print("GenFuzzingBaseTest: ");
     fmt::print(Format, args...);
   }
 }
@@ -64,8 +64,8 @@ void DebugPrint(const char *Format, const Args_t &...args) {
 // The symbols this harness hooks. Every one was chosen by the model from the
 // target's decompiled code; none is hardcoded here by a human.
 //
-constexpr const char *kFuzzEntry = "tlv_server!ProcessPacket";
-constexpr const char *kSkip01 = "tlv_server!printf";  // silence_io: All printf calls are diagnostic logging (e.g., 'Allocate command', 'Edit command', error m
+constexpr const char *kFuzzEntry = "fuzzing-base-test!fuzzme";
+constexpr const char *kSkip01 = "fuzzing-base-test!FUN_140001020";  // silence_io: Console I/O. Left unsilenced by the model because its behaviour was unclear; it blocks, th
 
 //
 // Page-tail alignment. Writing the structure flush against the end of the page
@@ -85,14 +85,12 @@ constexpr size_t kMaxInputBytes = 4096;
 constexpr const char *kSpoolEnvVar = "SNAPFUZZ_SEED_SPOOL";
 
 struct Packet_t {
-  // scalar -- iVar2 = *(int *)param_1; // command ID at offset 0
-  uint32_t Cmd;
-  // scalar -- *(undefined2 *)(param_1 + 4) // stored into local_res8 at offset 4
-  uint16_t HeaderInfo;
-  // length; counts Payload in bytes -- (ulonglong)*(ushort *)((longlong)local_res8._Mypair._Myval2 + 2) // length of payload used for memcpy
-  uint16_t PayloadSize;
-  // bytes; capped at 65535 bytes -- memcpy(*(void **)_Var1._Myval2, param_1 + 8, (ulonglong)*(ushort *)((longlong)local_res8._Mypair._Myval2 + 2)); // copies PayloadSize bytes from offset 8
-  std::vector<uint8_t> Payload;
+  // magic; parser compares against 0x74736574 -- The code checks param_1[0]=='t', param_1[1]=='e', param_1[2]=='s', param_1[3]=='t' which together form the ASCII string "test"; interpreted as a 32-bit little-endian magic value 0x74736574.
+  uint32_t magic = 0x74736574;
+  // length; counts payload in bytes -- param_1[4] is used as the length for the following payload (passed as the third argument to FUN_14001b1b0). The code only processes a payload when the total input length exceeds 4 bytes.
+  uint8_t payload_len;
+  // bytes; capped at 65 bytes -- The remaining bytes of the 32-byte buffer up to the length indicated by payload_len are processed; the function is called with a constant 0x41 which appears to be an upper bound for the payload size. Terminated by 0x00: fuzzme opens with while (param_1[i] != 0) i++, so the buffer is a C string and an unterminated input makes that scan read past the end of the data. Set after the derivation missed it -- the scan is the first statement in the pseudo-C.
+  std::vector<uint8_t> payload;
 
   //
   // How many bytes the target is TOLD arrived, independent of how many were
@@ -113,10 +111,9 @@ struct Packet_t {
 //
 inline void to_json(json::json &Json, const Packet_t &Value) {
   Json = json::json{
-      {"Cmd", Value.Cmd},
-      {"HeaderInfo", Value.HeaderInfo},
-      {"PayloadSize", Value.PayloadSize},
-      {"Payload", Value.Payload},
+      {"magic", Value.magic},
+      {"payload_len", Value.payload_len},
+      {"payload", Value.payload},
       {"WireSize", Value.WireSize}
   };
 }
@@ -128,32 +125,13 @@ inline void to_json(json::json &Json, const Packet_t &Value) {
 // entry written before a field was added.
 //
 inline void from_json(const json::json &Json, Packet_t &Value) {
-  Value.Cmd = Json.value("Cmd", uint32_t(0));
-  Value.HeaderInfo = Json.value("HeaderInfo", uint16_t(0));
-  Value.PayloadSize = Json.value("PayloadSize", uint16_t(0));
-  Value.Payload = Json.value("Payload", std::vector<uint8_t>{});
+  Value.magic = Json.value("magic", uint32_t(0));
+  Value.payload_len = Json.value("payload_len", uint8_t(0));
+  Value.payload = Json.value("payload", std::vector<uint8_t>{});
   Value.WireSize = Json.value("WireSize", uint32_t(0));
 }
 
-//
-// One test-case carries several structures, delivered in order to the
-// SAME live process. State the target builds up persists between them,
-// which is what makes a branch requiring an existing object reachable
-// at all (section 13.7).
-//
-struct Packets_t {
-  std::vector<Packet_t> Packets;
-};
 
-inline void from_json(const json::json &Json,
-                      Packets_t &Value) {
-  Json.at("Packets").get_to(Value.Packets);
-}
-
-inline void to_json(json::json &Json,
-                    const Packets_t &Value) {
-  Json = json::json{{"Packets", Value.Packets}};
-}
 
 //
 // Residual state we own. The packet queue is ours; guest memory and registers are
@@ -188,13 +166,13 @@ struct {
 // Bytes on the wire for one structure, as the target will see it.
 //
 inline size_t WireSizeOf(const Packet_t &Value) {
-  return 8 + Value.Payload.size();
+  return 5 + Value.payload.size();
 }
 
 //
 // InsertTestcase -- runs on the WORKER.
 //
-// It does NOT write guest memory here. The test-case is a *sequence* of structures, and the
+// It does NOT write guest memory here. The test-case is a single structure, and the
 // write happens at the entry breakpoint, which is the only place the target is at
 // the state the input belongs to.
 //
@@ -213,17 +191,49 @@ bool InsertTestcase(const uint8_t *Buffer, const size_t BufferSize) {
 
   try {
     const auto &Root = json::json::parse(Buffer, Buffer + BufferSize);
-    const auto &Parsed = Root.get<Packets_t>();
-    for (auto Item : Parsed.Packets) {
-      GlobalState.Inputs.emplace_back(std::move(Item));
-    }
+    GlobalState.Inputs.emplace_back(Root.get<Packet_t>());
   } catch (const std::exception &E) {
     DebugPrint("input is not valid JSON ({}), skipping\n", E.what());
     return true;
   }
 
-  // A sequence is delivered one structure per hit of the entry
-  // breakpoint, which fires on the second and later passes.
+  //
+  // ONE structure per test-case. Written NOW, at the input pointer,
+  // because rip is already the entry and a breakpoint there would
+  // never fire. Same shape as wtf's own
+  // src/wtf/fuzzer_linux_crash_test.cc.
+  //
+  if (!GlobalState.Inputs.empty()) {
+    const auto &Input = GlobalState.Inputs.front();
+    uint64_t Address = g_Backend->Rcx();
+
+    if (!g_Backend->VirtWriteStructDirty(Gva_t(Address),
+                       &Input.magic)) {
+      fmt::print("GenFuzzingBaseTest: failed to write magic\n");
+      return true;
+    }
+    Address += sizeof(Input.magic);
+
+    //
+    // Written from the test-case, NOT recomputed from the
+    // payload. The disagreement between them is the bug
+    // trigger; recomputing here would neuter every overflow.
+    //
+    if (!g_Backend->VirtWriteStructDirty(Gva_t(Address),
+                       &Input.payload_len)) {
+      fmt::print("GenFuzzingBaseTest: failed to write payload_len\n");
+      return true;
+    }
+    Address += sizeof(Input.payload_len);
+
+    if (!Input.payload.empty() &&
+        !g_Backend->VirtWriteDirty(Gva_t(Address),
+                     Input.payload.data(),
+                     Input.payload.size())) {
+      fmt::print("GenFuzzingBaseTest: failed to write payload\n");
+      return true;
+    }
+  }
   return true;
 }
 
@@ -245,7 +255,7 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
   // Resolve the module BEFORE installing anything. Failing here is the difference
   // between an error and a campaign that reports coverage while delivering nothing.
   //
-  if (ResolveModuleBase("tlv_server") == 0) {
+  if (ResolveModuleBase("fuzzing-base-test") == 0) {
     return false;
   }
 
@@ -259,7 +269,7 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
   // The fuzz entry. Each hit delivers the next structure; an empty queue ends the
   // test-case.
   //
-  if (!g_Backend->SetBreakpoint(kFuzzEntry, [](Backend_t *Backend) {
+  if (!g_Backend->SetBreakpoint(Gva_t(ResolveModuleBase("fuzzing-base-test") + 0x10d0), [](Backend_t *Backend) {
         if (GlobalState.Inputs.empty()) {
           return Backend->Stop(Ok_t());
         }
@@ -277,19 +287,8 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
           return Backend->Stop(Ok_t());
         }
 
-        //
-        // rdx carries the length, in BYTES.
-        //
-        // WireSize, when set, reports FEWER (or more) bytes than
-        // were written -- modelling a short read on a socket. It is
-        // what makes a `size < header` guard reachable at all
-        // (D-040).
-        //
-        size_t Reported = Bytes;
-        if (Input.WireSize != 0 && Input.WireSize < kPageSize) {
-          Reported = Input.WireSize;
-        }
-        Backend->Rdx(Reported);
+        // No separate length parameter was identified, so the target
+        // must derive the length from the data itself.
 
         //
         // rcx HOLDS the buffer address. Slide the write to the tail of the page
@@ -299,35 +298,27 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
         // guard page must sit behind the real data, or an over-reported size would
         // read our own bytes instead of faulting.
         //
-        // Flush against an UNMAPPED page, so a write past the data
-        // faults instead of silently landing in mapped memory. The
-        // boundary comes from prep/guard_page.py, which walked the
-        // dump's page tables to verify it; ResolveInputAddress falls
-        // back to the tail of this pointer's own page and says so.
-        //
-        // This was `PageBase = Backend->Rcx(); PageBase +
-        // (kPageSize - Bytes)`, which is wrong twice over: a register
-        // holds a POINTER, so without masking the low 12 bits the sum
-        // lands PAST the page end, and whether the next page is
-        // unmapped was never checked. The model that wrote the other
-        // generator was shown this file as its example and reproduced
-        // the same mistake.
-        uint64_t Address = ResolveInputAddress(Backend->Rcx(), Bytes);
+        // The target provides 32 bytes at rcx, which is smaller than a page, so the
+        // test-case is written AT the pointer. The page-end placement
+        // below is only valid for a page-sized scratch area: against a
+        // 32-byte buffer it would write ~4096 bytes past
+        // it and the parser would read untouched memory (D-075).
+        uint64_t Address = Backend->Rcx();
+        if (Bytes > 32) {
+          // More than the target can hold. Truncating silently would
+          // make an over-long case indistinguishable from a valid one,
+          // so the case is skipped and the next one delivered.
+          GlobalState.Inputs.pop_front();
+          return Backend->Stop(Ok_t());
+        }
         Backend->Rcx(Address);
 
         if (!Backend->VirtWriteStructDirty(Gva_t(Address),
-                                           &Input.Cmd)) {
-          fmt::print("GenTlvServer: failed to write Cmd\n");
+                                           &Input.magic)) {
+          fmt::print("GenFuzzingBaseTest: failed to write magic\n");
           std::abort();
         }
-        Address += sizeof(Input.Cmd);
-
-        if (!Backend->VirtWriteStructDirty(Gva_t(Address),
-                                           &Input.HeaderInfo)) {
-          fmt::print("GenTlvServer: failed to write HeaderInfo\n");
-          std::abort();
-        }
-        Address += sizeof(Input.HeaderInfo);
+        Address += sizeof(Input.magic);
 
         //
         // Written from the test-case, NOT recomputed from the
@@ -335,22 +326,22 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
         // trigger; recomputing here would neuter every overflow.
         //
         if (!Backend->VirtWriteStructDirty(Gva_t(Address),
-                                           &Input.PayloadSize)) {
-          fmt::print("GenTlvServer: failed to write PayloadSize\n");
+                                           &Input.payload_len)) {
+          fmt::print("GenFuzzingBaseTest: failed to write payload_len\n");
           std::abort();
         }
-        Address += sizeof(Input.PayloadSize);
+        Address += sizeof(Input.payload_len);
 
-        if (!Input.Payload.empty() &&
+        if (!Input.payload.empty() &&
             !Backend->VirtWriteDirty(Gva_t(Address),
-                                     Input.Payload.data(),
-                                     Input.Payload.size())) {
-          fmt::print("GenTlvServer: failed to write Payload\n");
+                                     Input.payload.data(),
+                                     Input.payload.size())) {
+          fmt::print("GenFuzzingBaseTest: failed to write payload\n");
           std::abort();
         }
         GlobalState.Inputs.pop_front();
       })) {
-    fmt::print("GenTlvServer: failed to SetBreakpoint on {}\n", kFuzzEntry);
+    fmt::print("GenFuzzingBaseTest: failed to SetBreakpoint on {}\n", kFuzzEntry);
     return false;
   }
 
@@ -362,22 +353,48 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
   // The address is read from the stack rather than named as a symbol: it is a
   // return site, not a function, so there is nothing for dbgeng to resolve.
   //
+  //
+  // WHERE THE TEST-CASE ENDS, which decides WHICH BUGS THIS HARNESS CAN SEE.
+  //
+  // `RestoreGprs` rewinds rip to the snapshot, i.e. back to the fuzz entry. That is how a
+  // SEQUENCE gets delivered -- return, rewind, deliver the next structure. It also means
+  // the CALLER'S EPILOGUE NEVER RUNS, and on a stack-protected binary the epilogue is
+  // where `__security_check_cookie` lives. So a harness that rewinds unconditionally
+  // cannot observe any stack-cookie violation, no matter how badly the target overflows.
+  //
+  // Measured on the second real target, whose planted bug overflows the caller's 32-byte
+  // buffer:
+  //
+  //     rewinding:      good  99 instr / cov 53   overflow 124 instr / cov 78   crash 0
+  //     running on:     good 283k instr           overflow  3.3k instr         crash 1
+  //
+  // Same module, same input, same target. The only difference is whether the epilogue was
+  // allowed to execute (D-084).
+  //
+  // So: rewind ONLY when there is another structure to deliver. On the last one, let
+  // execution continue -- the crash oracle, `nt!SwapContext` (a clean Cr3Change stop) or
+  // `--limit` will end the test-case. Costlier per case, and the cost buys a bug class.
+  //
   if (!g_Backend->SetBreakpoint(ReturnAddress, [](Backend_t *Backend) {
+        if (GlobalState.Inputs.empty()) {
+          DebugPrint("last input delivered; letting the caller's epilogue run\n");
+          return;
+        }
         GlobalState.RestoreGprs(Backend);
         DebugPrint("back at the entry point, ready for the next input\n");
       })) {
-    fmt::print("GenTlvServer: failed to SetBreakpoint on the return address\n");
+    fmt::print("GenFuzzingBaseTest: failed to SetBreakpoint on the return address\n");
     return false;
   }
 
   //
-  // tlv_server!printf: silence_io.
-  // All printf calls are diagnostic logging (e.g., 'Allocate command', 'Edit command', error messages). They do not affect parsing logic or state. Silencing them removes console I/O ov
+  // fuzzing-base-test!FUN_140001020: silence_io.
+  // Console I/O. Left unsilenced by the model because its behaviour was unclear; it blocks, the thread context-switches into nt!SwapContext, and the test-case ends before the memset th
   //
-  if (!g_Backend->SetBreakpoint(kSkip01, [](Backend_t *Backend) {
+  if (!g_Backend->SetBreakpoint(Gva_t(ResolveModuleBase("fuzzing-base-test") + 0x1020), [](Backend_t *Backend) {
         Backend->SimulateReturnFromFunction(0);
       })) {
-    fmt::print("GenTlvServer: failed to SetBreakpoint on {}\n", kSkip01);
+    fmt::print("GenFuzzingBaseTest: failed to SetBreakpoint on {}\n", kSkip01);
     return false;
   }
 
@@ -392,7 +409,7 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
   // every Windows target.
   //
   if (!SetupUsermodeCrashDetectionHooks()) {
-    fmt::print("GenTlvServer: failed to SetupUsermodeCrashDetectionHooks\n");
+    fmt::print("GenFuzzingBaseTest: failed to SetupUsermodeCrashDetectionHooks\n");
     return false;
   }
 
@@ -429,15 +446,15 @@ public:
     if (const char *Env = std::getenv("SNAPFUZZ_MUTATOR"); Env && *Env) {
       const std::string Which(Env);
       if (Which == "libfuzzer") {
-        fmt::print("GenTlvServer: BASELINE arm -- libfuzzer mutator\n");
+        fmt::print("GenFuzzingBaseTest: BASELINE arm -- libfuzzer mutator\n");
         return LibfuzzerMutator_t::Create(Rng, TestcaseMaxSize);
       }
       if (Which == "honggfuzz") {
-        fmt::print("GenTlvServer: BASELINE arm -- honggfuzz mutator\n");
+        fmt::print("GenFuzzingBaseTest: BASELINE arm -- honggfuzz mutator\n");
         return HonggfuzzMutator_t::Create(Rng, TestcaseMaxSize);
       }
       if (Which != "custom") {
-        fmt::print("GenTlvServer: SNAPFUZZ_MUTATOR={} is not "
+        fmt::print("GenFuzzingBaseTest: SNAPFUZZ_MUTATOR={} is not "
                    "libfuzzer/honggfuzz/custom; refusing to guess the arm\n",
                    Which);
         std::fflush(stdout);
@@ -545,60 +562,59 @@ private:
   // disagree, because that disagreement is the bug.
   //
   std::string Generate() {
-    Packets_t Root;
-    const uint32_t Count = GetUint32(1, 10);
-    for (uint32_t N = 0; N < Count; N++) {
-      Packet_t Item;
-      Item.Cmd = uint32_t(GetUint32(0, 16));
-      Item.HeaderInfo = uint16_t(GetUint32(0, 16));
-      // Consistent with the payload: an inconsistent length is
+    Packet_t Root;
+        Packet_t Item;
+        // The parser compares this against a constant, so a random
+      // value is rejected immediately. Kept correct MOST of the
+      // time so the corpus gets past the check at all.
+      Item.magic = GetUint32(1, 10) == 1
+                              ? uint32_t(GetUint32(0, 0xffff))
+                              : uint32_t(0x74736574);
+        // Consistent with the payload: an inconsistent length is
       // rejected at the parser's first check, and a corpus of
       // rejected inputs teaches the fuzzer nothing (CP4).
-      Item.PayloadSize = uint16_t(Item.Payload.size());
-      const uint32_t Len = GetUint32(0, 4088);
-      Item.Payload.resize(Len);
-      for (uint32_t I = 0; I < Len; I++) {
-        Item.Payload[I] = uint8_t(GetUint32(0, 255));
-      }
-      // Usually the natural size; occasionally a lie, which is the
+      Item.payload_len = uint8_t(Item.payload.size());
+        const uint32_t Len = GetUint32(0, 65);
+        Item.payload.resize(Len);
+        for (uint32_t I = 0; I < Len; I++) {
+          Item.payload[I] = uint8_t(GetUint32(0, 255));
+        }
+        // Usually the natural size; occasionally a lie, which is the
       // only way a `size < header` guard is reachable (D-040).
       Item.WireSize = GetUint32(1, 8) == 1 ? GetUint32(0, 8) : 0;
-      Root.Packets.emplace_back(Item);
-    }
+    Root = Item;
     json::json Serialized;
     to_json(Serialized, Root);
     return Serialized.dump();
   }
 
   std::string Mutate(uint8_t *Data, const size_t DataLen, const size_t MaxSize) {
-    Packets_t Root;
+    Packet_t Root;
     try {
       const auto &Parsed = json::json::parse(Data, Data + DataLen);
-      Root = Parsed.get<Packets_t>();
+      Root = Parsed.get<Packet_t>();
     } catch (const std::exception &) {
       // Not our format -- start fresh rather than aborting the master.
       return Generate();
     }
-    if (Root.Packets.empty()) {
+    std::vector<Packet_t> Items{Root};
+    if (Items.empty()) {
       return Generate();
     }
 
-    const size_t Index = GetUint32(0, uint32_t(Root.Packets.size() - 1));
-    auto &Item = Root.Packets[Index];
+    const size_t Index = GetUint32(0, uint32_t(Items.size() - 1));
+    auto &Item = Items[Index];
 
     switch (GetUint32(0, 5)) {
     case 0:
       // Flip a header field. Length fields included ON PURPOSE: a
       // length that disagrees with the payload is the bug.
-      switch (GetUint32(0, 2)) {
+      switch (GetUint32(0, 1)) {
       case 0:
-        Item.Cmd = uint32_t(GetUint32(0, 0xffff));
+        Item.magic = uint32_t(GetUint32(0, 0xffff));
         break;
       case 1:
-        Item.HeaderInfo = uint16_t(GetUint32(0, 0xffff));
-        break;
-      case 2:
-        Item.PayloadSize = uint16_t(GetUint32(0, 0xffff));
+        Item.payload_len = uint8_t(GetUint32(0, 0xffff));
         break;
       }
       break;
@@ -606,39 +622,27 @@ private:
       // Grow the payload without touching the declared length.
       const uint32_t Extra = GetUint32(1, 64);
       for (uint32_t I = 0; I < Extra; I++) {
-        Item.Payload.push_back(uint8_t(GetUint32(0, 255)));
+        Item.payload.push_back(uint8_t(GetUint32(0, 255)));
       }
       break;
     }
     case 2:
       // Shrink it, likewise leaving the length alone.
-      if (!Item.Payload.empty()) {
-        Item.Payload.resize(Item.Payload.size() / 2);
+      if (!Item.payload.empty()) {
+        Item.payload.resize(Item.payload.size() / 2);
       }
       break;
     case 3:
-      if (!Item.Payload.empty()) {
-        Item.Payload[GetUint32(0, uint32_t(Item.Payload.size() - 1))] =
+      if (!Item.payload.empty()) {
+        Item.payload[GetUint32(0, uint32_t(Item.payload.size() - 1))] =
             uint8_t(GetUint32(0, 255));
-      }
-      break;
-    case 4:
-      // Duplicate a structure. Repetition is how a fixed-size table
-      // gets exhausted, and coverage gives no gradient toward it
-      // (eval/coverage_gradient.py).
-      if (Root.Packets.size() < 64) {
-        Root.Packets.push_back(Item);
-      }
-      break;
-    case 5:
-      if (Root.Packets.size() > 1) {
-        Root.Packets.erase(Root.Packets.begin() + Index);
       }
       break;
     default:
       Item.WireSize = GetUint32(0, 16);
       break;
     }
+    Root = Items[0];
     json::json Serialized;
     to_json(Serialized, Root);
     std::string Out = Serialized.dump();
@@ -649,13 +653,13 @@ private:
   }
 };
 
-} // namespace GenTlvServer
+} // namespace GenFuzzingBaseTest
 
 //
 // The registration. ONE artifact, loaded by the master (which uses
 // CustomMutator_t) and every worker (which uses Init / InsertTestcase / Restore).
 // Both roles, one module (edges 21a and 21b).
 //
-Target_t GenTlvServerTarget("snapfuzz_gen", GenTlvServer::Init,
-                      GenTlvServer::InsertTestcase, GenTlvServer::Restore,
-                      GenTlvServer::CustomMutator_t::Create);
+Target_t GenFuzzingBaseTestTarget("snapfuzz_gen", GenFuzzingBaseTest::Init,
+                      GenFuzzingBaseTest::InsertTestcase, GenFuzzingBaseTest::Restore,
+                      GenFuzzingBaseTest::CustomMutator_t::Create);

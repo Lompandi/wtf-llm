@@ -829,7 +829,20 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
             title="Crash dedup, classify, replay, trace (no LLM)",
             argv=py(
                 "analysis.pipeline", "--target-dir", str(config.target_dir),
-                "--module", config.module, "--label", f"{config.label}-analysis",
+                # `fuzzer_module`, NOT `config.module`. This is wtf's --name, and stages 10
+                # and 11 both use the generated one while this stage used the default
+                # "snapfuzz" -- so the campaign fuzzed snapfuzz_gen and the analysis
+                # replayed snapfuzz, a module registered for a DIFFERENT target. It failed
+                # with "Could not set a breakpoint at tlv_server!ProcessPacket", which is
+                # the dev target's entry, on a crash from this one.
+                #
+                # The consequence was not an error. Replay reported "NO REPLAY RAN", trace
+                # produced nothing, and triage received FOUR of its five signals and
+                # correctly declined to confirm a real EXCEPTION_STACK_BUFFER_OVERRUN:
+                # "the harness breakpoint could not be set, so it is unclear whether the
+                # fuzzer's input reached the vulnerable code path". A found bug, discarded,
+                # with sound reasoning over broken inputs (D-085).
+                "--module", fuzzer_module, "--label", f"{config.label}-analysis",
                 "--replays", str(config.replays),
                 # THIS run's target, not config/target.yaml's. Absent these, analysis
                 # symbolized with the dev target's module prefix, disassembled the dev

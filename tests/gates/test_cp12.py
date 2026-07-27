@@ -1183,3 +1183,45 @@ def test_only_deterministic_regenerators_are_exempt():
                 f"{stage.key} is exempt from the byte comparison and has no verify "
                 f"hook, so nothing checks it did its work"
             )
+
+
+def test_every_stage_that_runs_wtf_names_the_SAME_module() -> None:
+    """Build, campaign and analysis must agree on wtf --name (D-085).
+
+    They did not. `fuzzer_module` is `snapfuzz_gen` when the generated harness is in use,
+    and stages 10 and 11 used it while stage 12 passed `config.module`, the "snapfuzz"
+    default. So the campaign fuzzed one module and the analysis replayed another --
+    registered for a DIFFERENT target, failing with "Could not set a breakpoint at
+    tlv_server!ProcessPacket" on a crash from this target.
+
+    Nothing errored. Replay reported "NO REPLAY RAN", trace produced nothing, and triage
+    got four of five signals and discarded a genuine EXCEPTION_STACK_BUFFER_OVERRUN as a
+    false positive -- reasoning correctly from inputs this stage had broken.
+    """
+    from pathlib import Path
+
+    from orchestrator.pipeline import PipelineConfig, build_stages
+
+    config = PipelineConfig(
+        target_name="t",
+        binary=Path(__file__),
+        entry_symbol="Entry",
+        state_dir=Path(__file__).parent,
+    )
+    stages = {s.key: s for s in build_stages(config)}
+
+    def named(stage) -> str:
+        argv = stage.argv
+        for flag in ("--expect-target", "--module"):
+            if flag in argv:
+                return argv[argv.index(flag) + 1]
+        raise AssertionError(f"{stage.key} names no module: {argv}")
+
+    build = named(stages["10-build"])
+    campaign = named(stages["11-fuzz"])
+    analysis = named(stages["12-analysis"])
+    assert build == campaign == analysis, (
+        f"wtf --name disagrees across stages: build={build!r} campaign={campaign!r} "
+        f"analysis={analysis!r}. A campaign that fuzzes one module and an analysis that "
+        f"replays another produces 'NO REPLAY RAN' and a discarded finding, with no error"
+    )

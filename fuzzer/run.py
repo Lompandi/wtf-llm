@@ -355,28 +355,28 @@ class Campaign:
                 last = exc
                 continue
             covered = min(guard.trailing_free, wanted)
-            log.info(
-                "clock=fast guard boundary {:#x}: page {:#x}, {} unmapped pages above, "
-                "{} unused trailing bytes. An input of n bytes goes at boundary-n, so a "
-                "write past it faults. Covers inputs up to {} of the {} the harness may "
-                "write{}",
-                guard.boundary,
-                guard.page_base,
-                guard.hole_pages,
-                guard.trailing_free,
-                covered,
-                wanted,
-                "" if covered >= wanted else " -- larger ones get no guard page",
+            print(
+                f"GUARD PAGE: boundary {guard.boundary:#x} (page {guard.page_base:#x}, "
+                f"{guard.hole_pages} unmapped pages above, {guard.trailing_free} unused "
+                f"trailing bytes). An input of n bytes goes at boundary-n, so a write "
+                f"past it faults."
             )
+            if covered < wanted:
+                print(
+                    f"  covers inputs up to {covered} of the {wanted} bytes the harness "
+                    f"may write; larger ones get no guard page"
+                )
             return guard.boundary, covered
 
-        log.warning(
-            "clock=fast no guard page for inputs of {} bytes or smaller: {}. Overflows "
-            "of the buffer the harness supplies will not fault, so they will not be "
-            "detected and 'no crashes' means 'none were observable' (CLAUDE.md 2).",
-            wanted,
-            last,
+        # NOT a failure. A snapshot with no safe boundary still fuzzes correctly -- it just
+        # cannot observe overflows of a buffer WE supply. Printed rather than swallowed
+        # because an unverified guard page fails OPEN, and then "no crashes" quietly means
+        # "no crashes were observable" (CLAUDE.md section 2).
+        print(
+            f"GUARD PAGE: none available for inputs of {wanted} bytes or smaller, so an "
+            f"overflow of a buffer the harness supplies would not fault."
         )
+        print(f"  {last}")
         return None
 
     def start(self) -> None:

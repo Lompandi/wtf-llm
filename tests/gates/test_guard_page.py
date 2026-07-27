@@ -306,3 +306,53 @@ def test_run_py_passes_regs_json() -> None:
         "fuzzer/run.py calls find_guard_page without regs_json, so the live thread stack "
         "is not excluded and every crash it reports may be the harness's (D-083)"
     )
+
+
+# --- the CONSUMER, whose refusal path had never been executed ----------------
+
+
+def test_the_refusal_path_actually_runs(tmp_path, capsys) -> None:
+    """`_guard_boundary` must survive not finding one. It did not.
+
+    Every test above exercises `find_guard_page`; none exercised the caller. So a
+    `log.warning` in the refusal branch -- referring to a `log` that fuzzer/run.py does not
+    define, since it prints rather than logs -- raised NameError and killed the campaign
+    three seconds in. On the snapshot in hand the refusal branch is the ONLY branch, so the
+    feature worked in isolation and broke the thing it was added to.
+
+    Testing the unhappy path of a best-effort helper is the whole point: the happy path was
+    covered nine times over, and the branch that runs on real data was covered zero times.
+    """
+    from arch.addr import AddressSpace
+    from fuzzer.run import Campaign, CampaignConfig
+
+    target = tmp_path / "targets" / "t"
+    (target / "state").mkdir(parents=True)
+    # A dump that cannot yield a boundary. find_guard_page opens it for real, so any
+    # unreadable file exercises the same branch -- GuardPageError either way.
+    (target / "state" / "mem.dmp").write_bytes(b"not a dump")
+
+    config = CampaignConfig(
+        wtf_exe=tmp_path / "wtf.exe",
+        target_dir=target,
+        name="t",
+        backend="bochscpu",
+        limit=1,
+        max_len=4096,
+        runs=0,
+        worker_count=1,
+        symbol_paths=[],
+        seed_spool=tmp_path / "spool",
+        artifacts_dir=tmp_path / "artifacts",
+    )
+    campaign = Campaign(
+        config,
+        AddressSpace(module="t", module_base=0x140000000, ghidra_image_base=0x140000000),
+    )
+
+    assert campaign._guard_boundary() is None
+    out = capsys.readouterr().out
+    assert "GUARD PAGE: none available" in out, (
+        "the refusal must be reported: an unverified guard page fails open, and silence "
+        "turns 'no crashes' into 'no crashes were observable'"
+    )

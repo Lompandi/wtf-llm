@@ -253,7 +253,33 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {{
   // The address is read from the stack rather than named as a symbol: it is a
   // return site, not a function, so there is nothing for dbgeng to resolve.
   //
+  //
+  // WHERE THE TEST-CASE ENDS, which decides WHICH BUGS THIS HARNESS CAN SEE.
+  //
+  // `RestoreGprs` rewinds rip to the snapshot, i.e. back to the fuzz entry. That is how a
+  // SEQUENCE gets delivered -- return, rewind, deliver the next structure. It also means
+  // the CALLER'S EPILOGUE NEVER RUNS, and on a stack-protected binary the epilogue is
+  // where `__security_check_cookie` lives. So a harness that rewinds unconditionally
+  // cannot observe any stack-cookie violation, no matter how badly the target overflows.
+  //
+  // Measured on the second real target, whose planted bug overflows the caller's 32-byte
+  // buffer:
+  //
+  //     rewinding:      good  99 instr / cov 53   overflow 124 instr / cov 78   crash 0
+  //     running on:     good 283k instr           overflow  3.3k instr         crash 1
+  //
+  // Same module, same input, same target. The only difference is whether the epilogue was
+  // allowed to execute (D-084).
+  //
+  // So: rewind ONLY when there is another structure to deliver. On the last one, let
+  // execution continue -- the crash oracle, `nt!SwapContext` (a clean Cr3Change stop) or
+  // `--limit` will end the test-case. Costlier per case, and the cost buys a bug class.
+  //
   if (!g_Backend->SetBreakpoint(ReturnAddress, [](Backend_t *Backend) {{
+        if (GlobalState.Inputs.empty()) {{
+          DebugPrint("last input delivered; letting the caller's epilogue run\\n");
+          return;
+        }}
         GlobalState.RestoreGprs(Backend);
         DebugPrint("back at the entry point, ready for the next input\\n");
       }})) {{

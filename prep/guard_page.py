@@ -269,8 +269,19 @@ def find_guard_page(
             "walked; install it or pass an explicit placement"
         ) from exc
 
-    dump = kdmp_parser.KernelDumpParser(str(mem_dmp))
-    pages = mapped_user_pages(dump)
+    # kdmp-parser raises TypeError -- not anything catchable by name -- on a file it cannot
+    # read, and the page-table walk can raise on a truncated one. Both must arrive as
+    # GuardPageError, because every caller treats that as "no guard page, carry on" while an
+    # arbitrary exception propagates and kills the campaign three seconds in.
+    try:
+        dump = kdmp_parser.KernelDumpParser(str(mem_dmp))
+        pages = mapped_user_pages(dump)
+    except GuardPageError:
+        raise
+    except Exception as exc:
+        raise GuardPageError(
+            f"{mem_dmp} could not be read as a kernel dump ({type(exc).__name__}: {exc})"
+        ) from exc
     if not pages:
         raise GuardPageError(f"{mem_dmp} maps no user pages at all")
 

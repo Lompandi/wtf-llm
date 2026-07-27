@@ -167,10 +167,45 @@ def _deepest_documented_frame(
 
     skipped: list[str] = []
     for name in reversed(call_path):
-        if cache.get_by_function(name) is not None:
-            return name, skipped
+        for candidate in _name_candidates(name):
+            if cache.get_by_function(candidate) is not None:
+                return candidate, skipped
         skipped.append(name)
     return None, skipped
+
+
+def _name_candidates(name: str) -> list[str]:
+    """The spellings A2 might hold this function under, most specific first.
+
+    symbolizer-rs prints what the PDB or export table says, which for C++ is the MSVC
+    MANGLED name; Ghidra stores pseudo-C under the DEMANGLED one. On the second real
+    target that is `?fuzzme@@YAHPEAD@Z` against `fuzzme`, so a lookup keyed on the frame
+    name missed a function A2 had all along:
+
+        none of the 3 in-module function(s) on the fault path has pseudo-C in A2:
+        ['?fuzzme@@YAHPEAD@Z', 'fuzzing-base-test.exe+0x1020', '?fuzzme@@YAHPEAD@Z']
+
+    Triage then received four of its five signals -- no static context -- for a crash
+    whose faulting frame had been identified correctly. It still confirmed the finding,
+    but on the dynamic evidence alone, and section 3.2 is explicit that signals 4 and 5
+    are separate because their errors are uncorrelated (D-085).
+
+    Only the base name is extracted, not a full demangling: `?name@@YA...` yields `name`,
+    and `Class@Namespace` yields the qualified pieces Ghidra tends to store. Anything more
+    ambitious needs a real demangler, and guessing at argument types would produce
+    plausible names that match nothing.
+    """
+    candidates = [name]
+    if name.startswith("?"):
+        base = name[1:].split("@@", 1)[0]
+        if base:
+            # `?fuzzme@@YAHPEAD@Z` -> `fuzzme`; `?Method@Class@@...` -> `Method@Class`,
+            # then `Class::Method`, which is how Ghidra names a method.
+            candidates.append(base)
+            parts = base.split("@")
+            if len(parts) > 1:
+                candidates.append("::".join(reversed([p for p in parts if p])))
+    return candidates
 
 
 def assemble_context(

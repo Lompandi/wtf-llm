@@ -25,6 +25,7 @@ anti-pattern, and it applies to our own expensive stages, not just to the LLM.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -454,6 +455,39 @@ def build_config(
             f"not have (D-073). Pass entry_symbol=/--entry-symbol."
         )
     entry = entry.split("!", 1)[-1]
+
+    # THE HARNESS ENVIRONMENT, exported process-wide so every `wtf run` this stage spawns
+    # inherits it. A deliberate side effect, and the alternative was measured: without it,
+    # replay and trace both run a harness whose Init REFUSES -- GetModuleBase returns 0 on
+    # this snapshot -- so no trace is produced, and triage receives FOUR signals instead of
+    # five and correctly declines to confirm anything. Its own words, on a real crash that
+    # was the planted bug:
+    #
+    #   "no trace was captured ... The harness breakpoint could not be set, so it is
+    #    unclear whether the fuzzer's input reached the vulnerable code path."
+    #
+    # Verdict: false_positive, confidence 0.65, on an EXCEPTION_STACK_BUFFER_OVERRUN the
+    # campaign had genuinely found. The model reasoned correctly from bad inputs, which is
+    # the failure this stage owns rather than one triage can fix (D-085).
+    #
+    # Set here because `ref` is where module_base lives, and because the child-environment
+    # builders are several: analysis/trace.py has its own `_sanitised_env`, which copies
+    # os.environ and adds only PATH and _NT_SYMBOL_PATH. That duplication is D-064's
+    # pattern and it diverged from fuzzer/run.py's build_env the moment build_env grew a
+    # variable.
+    os.environ["SNAPFUZZ_MODULE_BASE"] = hex(ref.module_base)
+    harness_spec = artifacts / "harness_spec.json"
+    if harness_spec.is_file():
+        try:
+            buffer_bytes = json.loads(harness_spec.read_text(encoding="utf-8")).get(
+                "input_buffer_bytes"
+            )
+        except (ValueError, OSError):
+            buffer_bytes = None
+        if buffer_bytes:
+            # Decides WHERE the input is written, so replay must agree with the campaign or
+            # it replays a different experiment (D-083).
+            os.environ["SNAPFUZZ_INPUT_BUFFER_BYTES"] = str(buffer_bytes)
 
     return AnalysisConfig(
         target_dir=target_dir,
