@@ -37,6 +37,11 @@ src/wtf/fuzzer_*
 # fuzzer/build.py, for the same reason the modules are: the compiler resolves
 # #include relative to the STAGED .cc. Its tracked home is fuzzer/module/.
 src/wtf/snapfuzz_resolve.h
+# Same for the generated struct headers. fuzzer/build.py stages every *.h from
+# fuzzer/module/, so anything added there arrives here too -- and a build product
+# tracked in git is D-012 in the other direction: the copy starts drifting from the
+# original and it is not obvious which one the compiler read.
+src/wtf/generated_input*.h
 src/build/
 src/build_msvc/
 src/out

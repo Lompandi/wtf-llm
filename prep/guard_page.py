@@ -39,6 +39,29 @@ before the snapshot is taken; wtf hooks `verifier!VerifierStopMessage` for exact
 (same file), which is evidence the approach is sanctioned rather than invented here.
 Both remain limitations to state plainly, per §11 — this narrows the gap, it does not
 close it.
+
+**AND WHAT IS STILL UNPROVEN HERE, said plainly rather than left to be discovered.**
+
+* **No campaign has ever used a boundary this module produced.** On the one real snapshot
+  available it correctly REFUSES: every candidate is `KUSER_SHARED_DATA`, inside a mapped
+  image, in the live stack, or short of trailing slack. The selection logic is unit-tested
+  against a synthetic page walk; the *effect* — an overflow faulting where the boundary
+  was placed — has been observed only from a hand-set environment variable, and the crash
+  it produced then was the harness corrupting live stack (D-083). So treat this as written
+  and not yet exercised, in §14.2's sense.
+* **Only the CURRENT thread's stack is excluded.** `_stack_run` takes `rsp` from
+  `regs.json`, which is one thread. Every other thread in the process has a live stack
+  that this walk does not recognise, and a snapshot taken in a multi-threaded service will
+  have several. Excluding them properly means walking the process's thread list out of the
+  dump to collect each `rsp`; that is real work and it is not done. Until it is, a
+  boundary chosen in a multi-threaded target may sit on another thread's frames — the
+  D-083 failure again, with nothing in this module able to tell.
+* **The 1 MB window is a heuristic for a VAD.** It is the default Windows thread-stack
+  reserve, not a fact read from the snapshot. A target built with a larger stack reserve
+  has live pages outside the window.
+
+The safe direction is the same for all three: refusing costs one bug class on one
+snapshot, and a wrong acceptance costs every crash the campaign reports.
 """
 
 from __future__ import annotations
