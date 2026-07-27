@@ -64,6 +64,24 @@ __all__ = ["Arm", "ArmResult", "ARMS", "run_arm", "minset_corpus"]
 # the search, not of the starting point.
 POOR_SEED = b'{"Packets":[{"Id":1,"Command":0,"BodySize":0,"Body":[]}]}'
 
+# The same idea for the second real target, whose wire format is different: magic correct
+# so the parser's first four comparisons pass, and a zero length so nothing further is
+# reached. `fuzzme` then finds strlen == 4, fails `4 < len`, and performs no memset -- it
+# walks the whole compare chain and triggers nothing, which is what "deliberately poor"
+# has to mean for a comparison to be about the SEARCH rather than the starting point.
+POOR_SEEDS: dict[str, bytes] = {
+    "snapfuzz": POOR_SEED,
+    "snapfuzz_gen": b'{"magic":1953719668,"payload_len":0,"payload":[]}',
+}
+
+
+class ArmDidNotRun(RuntimeError):
+    """An arm produced no corpus and no executions, so it measured nothing.
+
+    Distinct from "this arm found nothing", which is a legitimate result and the reason
+    the two must not share a representation.
+    """
+
 
 @dataclass(frozen=True)
 class Arm:
@@ -137,7 +155,12 @@ class ArmResult:
 
 
 def prepare_target(
-    *, name: str, source_state: Path, cov_file: Path, repo_root: Path = REPO_ROOT
+    *,
+    name: str,
+    source_state: Path,
+    cov_file: Path,
+    seed: bytes = POOR_SEED,
+    repo_root: Path = REPO_ROOT,
 ) -> Path:
     """A fresh five-directory tree (section 13.1) with one poor seed.
 
@@ -161,7 +184,7 @@ def prepare_target(
         capture_output=True, text=True, check=False,
     )
     shutil.copy(cov_file, target / "coverage" / cov_file.name)
-    (target / "inputs" / "poor.json").write_bytes(POOR_SEED)
+    (target / "inputs" / "poor.json").write_bytes(seed)
     return target
 
 
@@ -249,6 +272,7 @@ def run_arm(
     seeds: int,
     samples: int,
     dedup: bool = True,
+    label_prefix: str = "cmp",
 ) -> ArmResult:
     """Run one arm end to end and measure it."""
     import os
@@ -256,17 +280,45 @@ def run_arm(
     from orchestrator.scheduler import Scheduler
     from fuzzer.run import Campaign
 
-    label = f"cmp-{arm.name}"
+    # PREFIXED, because a second target's arms would otherwise write to `cmp-<arm>` and
+    # destroy the first target's evidence -- the same way GATE 4b's run once clobbered
+    # GATE 4's and made a passing gate fail retroactively (D-057).
+    label = f"{label_prefix}-{arm.name}"
     target_dir = prepare_target(
-        name=label, source_state=source_state, cov_file=cov_file
+        name=label,
+        source_state=source_state,
+        cov_file=cov_file,
+        seed=POOR_SEEDS.get(arm.module, POOR_SEED),
     )
 
     config = CampaignConfig.from_yaml(
         REPO_ROOT / "config" / "fuzz.yaml",
         REPO_ROOT / "config" / "target.yaml",
         worker_count=workers,
+        # The ARM's module, not config/target.yaml's. Without this every arm loaded
+        # `snapfuzz` -- the dev target's hand-written harness -- whatever module was asked
+        # for, and against another target's snapshot it died in Init with "Could not set a
+        # breakpoint at tlv_server!ProcessPacket": the dev target's entry symbol, while
+        # analysing a different program. from_yaml already accepts the override and D-056
+        # records why it exists; this call simply was not using it.
+        module=arm.module,
     )
-    config = dataclasses.replace(config, target_dir=target_dir, label=label)
+    # artifacts_dir POINTS AT THE TARGET'S OWN ARTIFACTS, derived from the A1 the caller
+    # passed -- that file identifies which target this is, and its directory holds
+    # harness_spec.json.
+    #
+    # Without this it resolved to the repo-level `artifacts/`, where there is no
+    # harness_spec.json since artifacts became per-target. So input_buffer_bytes was None,
+    # the harness relocated the test-case to the tail of the pointer's page, and on a stack
+    # pointer that lands above rsp among the caller frames: __security_check_cookie then
+    # fails on EVERY input and the arm reports a crash for every test-case it runs (D-083).
+    #
+    # The numbers would have looked excellent. That is the point -- a fabricated crash is
+    # worse than a missed one, and here it would have gone straight into the comparison
+    # that carries the project's central claim.
+    config = dataclasses.replace(
+        config, target_dir=target_dir, label=label, artifacts_dir=a1.parent
+    )
 
     previous = {k: os.environ.get(k) for k in arm.env}
     os.environ.update(arm.env)
@@ -361,6 +413,29 @@ def run_arm(
             )
         else:
             buckets = 0
+
+    # AN ARM THAT DID NOT FUZZ IS NOT A RESULT OF ZERO. Measured: two arms recorded
+    # `execs 0 corpus 0 buckets 0` because their workers died in a loop -- a stale wtf.exe
+    # from an earlier run still held port 31337, so the new master could not bind. The
+    # comparison table then printed
+    #
+    #     baseline-libfuzzer   0   0   0   None   0
+    #
+    # which reads as "libFuzzer found nothing" and is a statement about the port, not the
+    # mutator. On the arm that carries the project's central claim that is the worst
+    # possible confusion, and it is the same rule the pipeline learned at CP12: exit 0 is
+    # not evidence, and an empty artifact is not a measurement.
+    #
+    # Raised rather than recorded, because a comparison missing an arm is obviously
+    # incomplete while a comparison containing a fabricated zero looks finished.
+    if corpus.output_count() == 0 and peak_executions == 0:
+        raise ArmDidNotRun(
+            f"arm {arm.name!r} produced no corpus and no executions in "
+            f"{round(time.time() - started)}s. It did not fuzz, so there is nothing to "
+            f"compare. Check {config.artifacts_dir / 'logs' / 'workers'} -- the usual "
+            f"cause is a stale wtf.exe holding the master's port, which makes every "
+            f"worker fail to dial and be restarted forever."
+        )
 
     return ArmResult(
         arm=arm.name,
@@ -467,6 +542,19 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=REPO_ROOT / "targets" / "snapfuzz-gate7" / "coverage" / "tlv_server.cov",
     )
+    ap.add_argument(
+        "--module",
+        default="snapfuzz",
+        help="wtf --name for every arm. The arms hardcoded 'snapfuzz', the DEV target's "
+             "module, so the comparison could only ever run against one target -- and "
+             "CP10's claim is about the search, which one target cannot establish",
+    )
+    ap.add_argument(
+        "--label-prefix",
+        default="cmp",
+        help="prefix for the per-arm target dir and run label. A second target must not "
+             "reuse 'cmp-<arm>' or it destroys the first target's evidence (D-057)",
+    )
     ap.add_argument("--arms", nargs="*", help="arm names; default all")
     ap.add_argument("--out", type=Path, default=REPO_ROOT / "artifacts/runs/gate10")
     ap.add_argument(
@@ -495,13 +583,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {args.out / 'comparison.json'}")
         return 0
 
-    chosen = ARMS
+    # The module is a property of the TARGET, not of the experimental condition, so it is
+    # substituted into every arm rather than duplicated five times in ARMS.
+    arms = tuple(dataclasses.replace(a, module=args.module) for a in ARMS)
+    chosen = arms
     if args.arms:
         names = set(args.arms)
-        unknown = names - {a.name for a in ARMS}
+        unknown = names - {a.name for a in arms}
         if unknown:
             raise SystemExit(f"unknown arm(s): {sorted(unknown)}")
-        chosen = tuple(a for a in ARMS if a.name in names)
+        chosen = tuple(a for a in arms if a.name in names)
 
     args.out.mkdir(parents=True, exist_ok=True)
     results: list[ArmResult] = []
@@ -518,6 +609,7 @@ def main(argv: list[str] | None = None) -> int:
             plateau_execs=args.plateau_execs,
             seeds=args.seeds,
             samples=args.samples,
+            label_prefix=args.label_prefix,
         )
         results.append(result)
         (args.out / f"{arm.name}.json").write_text(
@@ -531,12 +623,34 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
 
+    # MERGE with the arms already on disk, rather than replace. A `--arms` subset is the
+    # normal way to re-run one arm that flaked, and writing only that subset SHRANK
+    # comparison.json from five arms to two -- silently deleting the record of three runs
+    # that had completed. The per-arm JSONs survived, so nothing was lost permanently, but
+    # the file everyone reads said the comparison was two arms wide.
+    #
+    # Same rule as the label prefix above and as D-057: a re-run must not destroy evidence
+    # it did not produce.
+    merged: dict[str, dict] = {}
+    for path in sorted(args.out.glob("*.json")):
+        if path.name == "comparison.json":
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and payload.get("arm"):
+            merged[payload["arm"]] = payload
+    for result in results:
+        merged[result.arm] = result.to_json()
+    ordered = [merged[a.name] for a in ARMS if a.name in merged]
+
     (args.out / "comparison.json").write_text(
         json.dumps(
             {
                 "budget_minutes": args.minutes,
                 "workers": args.workers,
-                "arms": [r.to_json() for r in results],
+                "arms": ordered,
             },
             indent=2,
         ),
