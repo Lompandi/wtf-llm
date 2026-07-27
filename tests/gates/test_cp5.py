@@ -86,8 +86,17 @@ def offline_client(tmp_path_factory) -> LlmClient:
     # that file names, making which provider gets tested depend on the machine.
     monkeypatch.setenv("SNAPFUZZ_LLM_PROVIDER", next(iter(providers)))
     with LlmClient.from_config(CONFIG) as c:
+        # UNDO IMMEDIATELY, not at teardown. This fixture is module-scoped, so a patch held
+        # across the yield stayed in force for every test that ran afterwards -- including
+        # the three LIVE ones, which then sent "offline-placeholder-not-a-key" and got
+        # 401. GATE 5's live conditions were therefore unrunnable: they were skipped
+        # without the flag and failed with it, so the gate could only ever be INCOMPLETE.
+        #
+        # Safe because `from_config` resolves the credential ONCE and stores it on the
+        # client (llm/client.py:328), so `c` keeps the placeholder while the environment
+        # goes back to what the machine actually has.
+        monkeypatch.undo()
         yield c
-    monkeypatch.undo()
 
 
 # --- config hygiene -------------------------------------------------------
