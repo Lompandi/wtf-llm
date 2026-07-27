@@ -308,3 +308,46 @@ def test_renamed_json_keys_are_caught() -> None:
 def test_the_spec_is_optional_so_older_callers_still_work() -> None:
     """`spec` defaults to None: the field-name check is skipped, not crashed."""
     assert check_generated(GOOD, _harness()) == []
+
+
+def test_the_repair_prompt_quotes_the_line_the_compiler_named() -> None:
+    """A diagnostic without its line throws away a third of what makes it useful.
+
+    Measured over five generations of one prompt: four compiled with ZERO repairs, and the
+    fifth reported
+
+        fuzzer_gen.cc(124): error C2440: cannot convert from 'uint64_t' to 'Gva_t'
+
+    three times -- the original answer and both repairs, identical. The loop was not
+    converging on that one at all, and what it had been sending explains why: the
+    diagnostic named line 124, the whole file was attached, and nothing indicated which
+    line 124 was. The model had to count, and regenerated the same line instead.
+    """
+    from fuzzer.codegen_llm import _offending_lines
+
+    lines = [f"filler {i}" for i in range(1, 20)]
+    lines[11] = "  const Gva_t Addr = ResolveModuleBase(kMod) + kRva;"
+    source = "\n".join(lines)
+
+    quoted = _offending_lines(
+        source, ["fuzzer_gen.cc(12): error C2440: cannot convert from uint64_t to Gva_t"]
+    )
+    assert "ResolveModuleBase(kMod) + kRva" in quoted, quoted
+    assert ">   12 |" in quoted, "the named line must be marked, not merely included"
+    # One line either side, because the error is often reported where an expression CLOSES
+    # while the mistake is where it opens.
+    assert "filler 11" in quoted and "filler 13" in quoted
+
+    # Robustness: the loop must not crash on a diagnostic it cannot parse, or on a line
+    # number past the end of a file the model truncated.
+    assert _offending_lines(source, ["LINK : fatal error LNK1169"]) == ""
+    assert _offending_lines(source, ["fuzzer_gen.cc(9999): error C2440: x"]) == ""
+    # And the same line named twice is quoted once.
+    twice = _offending_lines(
+        source,
+        [
+            "fuzzer_gen.cc(12): error C2440: a",
+            "fuzzer_gen.cc(12): error C2440: b",
+        ],
+    )
+    assert twice.count("The line MSVC named") == 1

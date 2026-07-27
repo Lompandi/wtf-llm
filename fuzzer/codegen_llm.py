@@ -530,6 +530,7 @@ def repair_by_compiling(
                 f"YOUR PREVIOUS ANSWER DID NOT COMPILE. MSVC reported, against the file "
                 f"you produced:\n"
                 + "".join(f"  {e}\n" for e in errors[:12])
+                + _offending_lines(text, errors)
                 + "\nReturn the WHOLE corrected file. Fix the reported lines; do not "
                 "restructure what compiled.\n\nYour previous answer was:\n"
                 f"{text}\n"
@@ -540,6 +541,44 @@ def repair_by_compiling(
         if own_client:
             client.close()
     return text, compile_errors(module_out)
+
+
+def _offending_lines(text: str, errors: list[str]) -> str:
+    """Quote the source line each diagnostic names, with its neighbours.
+
+    Measured need. Over five generations of the current prompt, four compiled with ZERO
+    repairs and one failed with
+
+        fuzzer_gen.cc(124): error C2440: cannot convert from 'uint64_t' to 'Gva_t'
+
+    reported THREE times -- the original and both repair attempts, identical. So the loop
+    was not converging at all on that one, and the reason is visible in what it sent: a
+    diagnostic naming line 124, the whole file, and no indication of which line 124 was.
+    The model had to find it by counting, and evidently regenerated the same line instead.
+
+    A compiler diagnostic is a good prompt because it names the line, the types and the
+    operation. Sending it WITHOUT the line throws away a third of that.
+    """
+    lines = text.splitlines()
+    seen: set[int] = set()
+    out: list[str] = []
+    for error in errors[:12]:
+        match = re.search(r"\((\d+)\)\s*:", error)
+        if not match:
+            continue
+        number = int(match.group(1))
+        if number in seen or not 1 <= number <= len(lines):
+            continue
+        seen.add(number)
+        # One line either side: the error is often reported on the line that CLOSES an
+        # expression, and the mistake is on the one that opens it.
+        lo, hi = max(1, number - 1), min(len(lines), number + 1)
+        body = "".join(
+            f"  {'>' if n == number else ' '} {n:>4} | {lines[n - 1]}\n"
+            for n in range(lo, hi + 1)
+        )
+        out.append(f"\nThe line MSVC named ({number}):\n{body}")
+    return "".join(out)
 
 
 def normalize_json_keys(text: str, spec: InputSpec) -> tuple[str, list[str]]:
