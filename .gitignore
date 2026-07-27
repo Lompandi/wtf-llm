@@ -33,6 +33,10 @@
 
 .vs
 src/wtf/fuzzer_*
+# The shared placement/resolution header is copied into src/wtf/ at build time by
+# fuzzer/build.py, for the same reason the modules are: the compiler resolves
+# #include relative to the STAGED .cc. Its tracked home is fuzzer/module/.
+src/wtf/snapfuzz_resolve.h
 src/build/
 src/build_msvc/
 src/out

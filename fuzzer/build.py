@@ -38,7 +38,17 @@ VSWHERE = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) /
 
 
 class BuildError(RuntimeError):
-    pass
+    """A failed build, carrying the compiler output.
+
+    `output` exists because the diagnostics are the only useful product of a failed
+    build, and they used to be printed to stderr and dropped. fuzzer/codegen_llm.py feeds
+    them back to the model that wrote the offending file, which is a better prompt than
+    any prose about the same rule -- it names the line, the types and the operation.
+    """
+
+    def __init__(self, message: str, output: str = "") -> None:
+        super().__init__(message)
+        self.output = output
 
 
 def sanitised_env() -> dict[str, str]:
@@ -96,9 +106,16 @@ def find_vcvars() -> Path:
 
 
 def stage_modules() -> list[Path]:
-    """Copy fuzzer/module/*.cc into src/wtf/ so CMake's glob picks them up."""
-    sources = sorted(MODULE_DIR.glob("*.cc"))
-    if not sources:
+    """Copy fuzzer/module/*.cc and *.h into src/wtf/ so CMake's glob picks them up.
+
+    HEADERS TOO, which was not obvious until a module included one. CMake globs `*.cc`,
+    so only sources need to arrive for the module to be COMPILED -- but the compiler
+    resolves `#include "snapfuzz_resolve.h"` relative to the staged .cc, which lives in
+    `src/wtf/`, not next to its original. Staging only sources gives C1083 naming a
+    header that plainly exists, two directories away.
+    """
+    sources = sorted(MODULE_DIR.glob("*.cc")) + sorted(MODULE_DIR.glob("*.h"))
+    if not any(p.suffix == ".cc" for p in sources):
         raise BuildError(f"no .cc files in {MODULE_DIR}")
 
     staged = []
@@ -158,9 +175,9 @@ def build(*, clean: bool = False, verbose: bool = False) -> Path:
         print(out[-8000:], file=sys.stderr)
 
     if proc.returncode != 0:
-        raise BuildError(f"build failed ({proc.returncode})")
+        raise BuildError(f"build failed ({proc.returncode})", out)
     if not WTF_EXE.exists():
-        raise BuildError(f"build reported success but {WTF_EXE} is missing")
+        raise BuildError(f"build reported success but {WTF_EXE} is missing", out)
 
     return WTF_EXE
 

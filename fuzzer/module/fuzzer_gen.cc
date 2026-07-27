@@ -6,7 +6,7 @@
 //
 // Both were derived from Ghidra pseudo-C by an LLM. Regenerate with:
 //
-//     python -m fuzzer.codegen --spec C:\Users\Caspe\AppData\Local\Temp\spec_aliased.json --harness artifacts\harness_spec.json \
+//     python -m fuzzer.codegen --spec artifacts\tlv_server\input_spec.json --harness artifacts\tlv_server\harness_spec.json \
 //         --module-out <this file>
 //
 // Target : tlv_server!ProcessPacket
@@ -33,6 +33,7 @@
 #include "crash_detection_umode.h"
 #include "mutator.h"
 #include "nlohmann/json.hpp"
+#include "snapfuzz_resolve.h"
 #include "targets.h"
 #include "utils.h"
 
@@ -127,18 +128,10 @@ inline void to_json(json::json &Json, const Packet_t &Value) {
 // entry written before a field was added.
 //
 inline void from_json(const json::json &Json, Packet_t &Value) {
-  if (Json.contains("Cmd")) Value.Cmd = Json.at("Cmd").get<uint32_t>();
-  else  if (Json.contains("Command")) Value.Cmd = Json.at("Command").get<uint32_t>();
-  else Value.Cmd = uint32_t(0);
-  if (Json.contains("HeaderInfo")) Value.HeaderInfo = Json.at("HeaderInfo").get<uint16_t>();
-  else  if (Json.contains("Id")) Value.HeaderInfo = Json.at("Id").get<uint16_t>();
-  else Value.HeaderInfo = uint16_t(0);
-  if (Json.contains("PayloadSize")) Value.PayloadSize = Json.at("PayloadSize").get<uint16_t>();
-  else  if (Json.contains("BodySize")) Value.PayloadSize = Json.at("BodySize").get<uint16_t>();
-  else Value.PayloadSize = uint16_t(0);
-  if (Json.contains("Payload")) Value.Payload = Json.at("Payload").get<std::vector<uint8_t>>();
-  else  if (Json.contains("Body")) Value.Payload = Json.at("Body").get<std::vector<uint8_t>>();
-  else Value.Payload = std::vector<uint8_t>{};
+  Value.Cmd = Json.value("Cmd", uint32_t(0));
+  Value.HeaderInfo = Json.value("HeaderInfo", uint16_t(0));
+  Value.PayloadSize = Json.value("PayloadSize", uint16_t(0));
+  Value.Payload = Json.value("Payload", std::vector<uint8_t>{});
   Value.WireSize = Json.value("WireSize", uint32_t(0));
 }
 
@@ -229,13 +222,34 @@ bool InsertTestcase(const uint8_t *Buffer, const size_t BufferSize) {
     return true;
   }
 
+  // A sequence is delivered one structure per hit of the entry
+  // breakpoint, which fires on the second and later passes.
   return true;
 }
 
 //
 // Init -- runs on the WORKER, once.
 //
+
+
+//
+// ResolveModuleBase and ResolveInputAddress come from snapfuzz_resolve.h. They used to
+// be emitted here, which meant the model-written path had no copy of them and each
+// generator could get the arithmetic wrong on its own (D-075).
+//
+using snapfuzz::ResolveInputAddress;
+using snapfuzz::ResolveModuleBase;
+
 bool Init(const Options_t &Opts, const CpuState_t &State) {
+  //
+  // Resolve the module BEFORE installing anything. Failing here is the difference
+  // between an error and a campaign that reports coverage while delivering nothing.
+  //
+  if (ResolveModuleBase("tlv_server") == 0) {
+    return false;
+  }
+
+
   GlobalState.Context = State;
 
   const Gva_t Rsp = Gva_t(g_Backend->Rsp());
@@ -285,8 +299,20 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
         // guard page must sit behind the real data, or an over-reported size would
         // read our own bytes instead of faulting.
         //
-        const uint64_t PageBase = Backend->Rcx();
-        uint64_t Address = PageBase + (kPageSize - Bytes);
+        // Flush against an UNMAPPED page, so a write past the data
+        // faults instead of silently landing in mapped memory. The
+        // boundary comes from prep/guard_page.py, which walked the
+        // dump's page tables to verify it; ResolveInputAddress falls
+        // back to the tail of this pointer's own page and says so.
+        //
+        // This was `PageBase = Backend->Rcx(); PageBase +
+        // (kPageSize - Bytes)`, which is wrong twice over: a register
+        // holds a POINTER, so without masking the low 12 bits the sum
+        // lands PAST the page end, and whether the next page is
+        // unmapped was never checked. The model that wrote the other
+        // generator was shown this file as its example and reproduced
+        // the same mistake.
+        uint64_t Address = ResolveInputAddress(Backend->Rcx(), Bytes);
         Backend->Rcx(Address);
 
         if (!Backend->VirtWriteStructDirty(Gva_t(Address),

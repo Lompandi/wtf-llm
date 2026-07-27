@@ -80,6 +80,8 @@ def build_env(
     symbol_paths: list[str] | None = None,
     seed_spool: Path | None = None,
     module_base: int | None = None,
+    guard_boundary: tuple[int, int] | None = None,
+    input_buffer_bytes: int | None = None,
 ) -> dict[str, str]:
     """The environment every wtf child needs."""
     env = dict(os.environ)
@@ -105,6 +107,31 @@ def build_env(
         # symbol-store.json had been written by an earlier run against a different
         # program and had no entry for this one (D-075).
         env["SNAPFUZZ_MODULE_BASE"] = hex(module_base)
+
+    if guard_boundary:
+        boundary, max_bytes = guard_boundary
+        # The first UNMAPPED address after a mapped page, established by
+        # prep/guard_page.py from the dump's own page tables. The harness places the
+        # input so it ENDS here, which turns an overflow of the buffer we supplied into
+        # an access violation -- a fault wtf's oracle already reports.
+        #
+        # Passed rather than derived in the module because walking page tables needs the
+        # dump file, and because an unverified guard page fails OPEN: the overflow lands
+        # in the next mapped page and nothing faults. Absent, the harness falls back to
+        # the tail of the pointer's own page and says that it did.
+        env["SNAPFUZZ_GUARD_BOUNDARY"] = hex(boundary)
+        # And the cap, in BYTES, which is not optional: the boundary tops a page whose
+        # trailing bytes are unused and whose earlier bytes are live. An input larger than
+        # the slack, placed at boundary-n, would start below it and overwrite state the
+        # target reads -- manufacturing a crash instead of finding one.
+        env["SNAPFUZZ_GUARD_MAX_BYTES"] = str(max_bytes)
+
+    if input_buffer_bytes:
+        # What the TARGET provides at the input pointer, from HarnessSpec. Checked before
+        # any relocation: writing a page-tail placement into a 32-byte buffer puts ~4 KB
+        # past it, and on a stack pointer that is the caller frames -- so the stack cookie
+        # fails on every input and the harness reports its own corruption as a bug (D-083).
+        env["SNAPFUZZ_INPUT_BUFFER_BYTES"] = str(input_buffer_bytes)
 
     return env
 
@@ -257,6 +284,101 @@ class Campaign:
             )
         return problems
 
+    def _guard_size_wanted(self) -> int:
+        """The largest number of bytes the harness writes into GUEST MEMORY.
+
+        NOT `max_len`, which is wtf's cap on the test-case buffer -- the JSON file. Those
+        are different quantities and using the wrong one silently disabled the guard page
+        on the first target it was tried against: `max_len` is 4096, the best boundary has
+        1951 bytes of slack, so the request was refused and the campaign fell back. The
+        probe's JSON is 86 bytes and encodes 13 bytes of packet, so the two numbers are not
+        even close. RULE 4's "units and encoding are stated" applied to a size in bytes of
+        two different things.
+        """
+        spec = self.config.artifacts_dir / "harness_spec.json"
+        if spec.is_file():
+            try:
+                return int(json.loads(spec.read_text(encoding="utf-8"))["max_input_bytes"])
+            except (ValueError, KeyError, OSError):
+                pass
+        return min(self.config.max_len, 0x1000)
+
+    def _input_buffer_bytes(self) -> int | None:
+        """What the target provides at the input pointer, or None if it is not known."""
+        spec = self.config.artifacts_dir / "harness_spec.json"
+        if not spec.is_file():
+            return None
+        try:
+            return json.loads(spec.read_text(encoding="utf-8")).get("input_buffer_bytes")
+        except (ValueError, OSError):
+            return None
+
+    def _guard_boundary(self) -> tuple[int, int] | None:
+        """The verified unmapped boundary to place inputs against, or None with a reason.
+
+        Best-effort ON PURPOSE. A snapshot with no large hole after a usable page still
+        fuzzes correctly -- it just cannot observe overflows of the buffer we supply --
+        so failing the campaign over it would trade a whole run for one bug class. What
+        must not happen is silence: the harness prints that it is falling back, and so
+        does this, because an unverified guard page fails OPEN and "no crashes" then
+        means "no crashes were observable" rather than "none happened".
+        """
+        from prep.guard_page import GuardPageError, find_guard_page
+
+        mem_dmp = self.config.target_dir / "state" / "mem.dmp"
+        if not mem_dmp.is_file():
+            return None
+
+        # Ask for the full write size first, then settle for less. The boundary is only
+        # usable for inputs that FIT in the page's unused tail, so what comes back is a
+        # boundary AND a cap, and the cap travels to the harness -- an input past it is
+        # placed without a guard page rather than over live guest state.
+        wanted = self._guard_size_wanted()
+        attempts = [wanted] + [n for n in (2048, 1024, 512, 256, 64) if n < wanted]
+        last: Exception | None = None
+        for size in attempts:
+            try:
+                # regs.json is NOT optional here. Without rsp the live thread stack cannot
+                # be excluded, and its top page is the best-SCORING candidate in a real
+                # snapshot -- 1951 bytes of trailing slack, 456 million unmapped pages
+                # above it -- while being live memory holding the caller frames. Using it
+                # corrupted an outer frame, so __security_check_cookie failed on every
+                # input: 3.3k instructions, cov 3089, crash 1, identical for a good input
+                # and an overflowing one. A perfect stack-overflow signature, entirely
+                # manufactured by the harness (D-083).
+                guard = find_guard_page(
+                    mem_dmp,
+                    size=size,
+                    regs_json=mem_dmp.with_name("regs.json"),
+                )
+            except GuardPageError as exc:
+                last = exc
+                continue
+            covered = min(guard.trailing_free, wanted)
+            log.info(
+                "clock=fast guard boundary {:#x}: page {:#x}, {} unmapped pages above, "
+                "{} unused trailing bytes. An input of n bytes goes at boundary-n, so a "
+                "write past it faults. Covers inputs up to {} of the {} the harness may "
+                "write{}",
+                guard.boundary,
+                guard.page_base,
+                guard.hole_pages,
+                guard.trailing_free,
+                covered,
+                wanted,
+                "" if covered >= wanted else " -- larger ones get no guard page",
+            )
+            return guard.boundary, covered
+
+        log.warning(
+            "clock=fast no guard page for inputs of {} bytes or smaller: {}. Overflows "
+            "of the buffer the harness supplies will not fault, so they will not be "
+            "detected and 'no crashes' means 'none were observable' (CLAUDE.md 2).",
+            wanted,
+            last,
+        )
+        return None
+
     def start(self) -> None:
         cfg = self.config
         env = build_env(
@@ -265,6 +387,8 @@ class Campaign:
             # From A1, so the harness can place its breakpoint even when the
             # snapshot's symbol-store.json does not name this module (D-075).
             module_base=self.space.module_base,
+            guard_boundary=self._guard_boundary(),
+            input_buffer_bytes=self._input_buffer_bytes(),
         )
         SeedSpool(cfg.seed_spool).ensure()
 

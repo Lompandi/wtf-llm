@@ -660,14 +660,23 @@ def generate_module(
     else:
         placement = "\n".join(
             [
-                "        // Flush against the end of the page, so the guard page sits",
-                "        // immediately behind the data and an over-read faults rather",
-                "        // than silently reading our own bytes. Valid because the target",
-                "        // provides a page-sized scratch area at this pointer.",
-                f"        const uint64_t PageBase = Backend->{input_reg_getter}();",
-                "        uint64_t Address = PageBase + (kPageSize - Bytes);",
+                "        // Flush against an UNMAPPED page, so a write past the data",
+                "        // faults instead of silently landing in mapped memory. The",
+                "        // boundary comes from prep/guard_page.py, which walked the",
+                "        // dump's page tables to verify it; ResolveInputAddress falls",
+                "        // back to the tail of this pointer's own page and says so.",
+                "        //",
+                "        // This was `PageBase = Backend->{getter}(); PageBase +",
+                "        // (kPageSize - Bytes)`, which is wrong twice over: a register",
+                "        // holds a POINTER, so without masking the low 12 bits the sum",
+                "        // lands PAST the page end, and whether the next page is",
+                "        // unmapped was never checked. The model that wrote the other",
+                "        // generator was shown this file as its example and reproduced",
+                "        // the same mistake.",
+                f"        uint64_t Address = ResolveInputAddress("
+                f"Backend->{input_reg_getter}(), Bytes);",
             ]
-        )
+        ).replace("{getter}", input_reg_getter)
     placement += f"\n        Backend->{input_reg_setter}(Address);"
 
     entry_module_name = entry_bp.symbol.split("!", 1)[0]

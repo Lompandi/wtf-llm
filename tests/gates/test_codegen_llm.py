@@ -60,7 +60,7 @@ bool InsertTestcase(const uint8_t *Buffer, const size_t BufferSize) { return tru
 bool Restore() { return true; }
 bool Init(const Options_t &Opts, const CpuState_t &) {
   SetupUsermodeCrashDetectionHooks();
-  if (!g_Backend->SetBreakpoint(Gva_t(g_Dbg->GetModuleBase("tlv_server") + 0x1150),
+  if (!g_Backend->SetBreakpoint(Gva_t(snapfuzz::ResolveModuleBase("tlv_server") + 0x1150),
                                 [](Backend_t *B) { }))
     return false;
   return true;
@@ -131,10 +131,11 @@ def test_symbol_resolved_breakpoints_are_caught_when_the_spec_has_rvas() -> None
     spec carries RVAs the code has to use them.
     """
     by_name = GOOD.replace(
-        'Gva_t(g_Dbg->GetModuleBase("tlv_server") + 0x1150)', '"tlv_server!ProcessPacket"'
+        'Gva_t(snapfuzz::ResolveModuleBase("tlv_server") + 0x1150)',
+        '"tlv_server!ProcessPacket"',
     )
     problems = check_generated(by_name, _harness())
-    assert any("GetModuleBase" in p for p in problems)
+    assert any("ResolveModuleBase" in p for p in problems)
 
     # And it is not demanded when the spec has no RVA to use.
     no_rva = _harness(
@@ -208,3 +209,102 @@ def test_the_prompt_carries_the_rva_and_the_legacy_names() -> None:
     assert "0x1150" in prompt, "the RVA is not in the prompt"
     assert "Command" in prompt, "the legacy name is not in the prompt"
     assert "snapfuzz_gen" in prompt, "the target name to register is not in the prompt"
+
+
+# --- the three rules added after the model's second generation ---------------
+#
+# Each of these is a mistake the 550B actually made, on a real target, in code that
+# compiled cleanly. That is the common thread: none of them is a compile error, none
+# moves a coverage number, and all three end in a campaign that runs at full speed and
+# finds nothing.
+
+
+def test_hand_rolled_page_tail_arithmetic_is_caught() -> None:
+    """A register is a POINTER, not a page base.
+
+    Written verbatim by the model, twice, on independent generations:
+
+        const uint64_t PageBase = Backend->Rcx();
+        uint64_t Address = PageBase + (kPageSize - Bytes);
+
+    With rcx = 0xd3d77ff7a0 that is 0xd3d7800790 -- past the end of the page, inside the
+    unmapped hole. It even named the variable PageBase, so the intent was right and only
+    the mask was missing. The fix is to call ResolveInputAddress rather than to mask,
+    because the helper also knows the VERIFIED boundary.
+    """
+    hand_rolled = GOOD.replace(
+        "bool Restore() { return true; }",
+        "bool Restore() {\n"
+        "  const uint64_t PageBase = g_Backend->Rcx();\n"
+        "  uint64_t Address = PageBase + (kPageSize - Bytes);\n"
+        "  return true;\n"
+        "}",
+    )
+    problems = check_generated(hand_rolled, _harness())
+    assert any("ResolveInputAddress" in p for p in problems), problems
+
+
+def test_a_raw_register_named_like_a_page_base_is_caught_on_its_own() -> None:
+    """The second check, which fires even when the arithmetic is elsewhere.
+
+    Two checks rather than one because the two halves can appear apart: the assignment in
+    Init and the addition inside a lambda. Either alone is the same bug.
+    """
+    problems = check_generated(
+        GOOD.replace(
+            "  SetupUsermodeCrashDetectionHooks();",
+            "  SetupUsermodeCrashDetectionHooks();\n"
+            "  const uint64_t PageBase = g_Backend->Rcx();",
+        ),
+        _harness(),
+    )
+    assert any("masking off the low 12 bits" in p for p in problems), problems
+
+
+def test_renamed_json_keys_are_caught() -> None:
+    """The keys are the corpus's wire contract, not a naming preference.
+
+    The model wrote `Json.at("Magic")` for a spec field named `magic`. nlohmann's `at`
+    THROWS on a missing key, InsertTestcase catches it, and every recorded test-case is
+    reported as "not valid JSON, skipping" -- silently, at full speed, while the campaign
+    reports coverage. C++ members may be named anything; the keys may not.
+    """
+    from arch.contracts import InputField, InputSpec
+
+    spec = InputSpec(
+        module="t",
+        entry_symbol="fuzzme",
+        struct_name="Packet_t",
+        header_bytes=5,
+        fields=[
+            InputField(name="magic", kind="scalar", ctype="uint32_t"),
+            InputField(name="payload_len", kind="length", ctype="uint8_t",
+                       counts_field="payload", unit="bytes"),
+            InputField(name="payload", kind="bytes"),
+        ],
+        rationale="fixture",
+        source_functions=["fuzzme"],
+    )
+
+    capitalised = GOOD.replace(
+        "bool Restore() { return true; }",
+        'bool Restore() { Json.at("Magic"); Json.at("PayloadLen"); '
+        'Json.at("Payload"); return true; }',
+    )
+    problems = check_generated(capitalised, _harness(), spec)
+    assert any("field names as JSON keys" in p for p in problems), problems
+    named = next(p for p in problems if "field names as JSON keys" in p)
+    assert "magic" in named and "payload_len" in named
+
+    # The control: the same module with the spec's spellings passes.
+    correct = GOOD.replace(
+        "bool Restore() { return true; }",
+        'bool Restore() { Json.at("magic"); Json.at("payload_len"); '
+        'Json.at("payload"); return true; }',
+    )
+    assert check_generated(correct, _harness(), spec) == []
+
+
+def test_the_spec_is_optional_so_older_callers_still_work() -> None:
+    """`spec` defaults to None: the field-name check is skipped, not crashed."""
+    assert check_generated(GOOD, _harness()) == []
