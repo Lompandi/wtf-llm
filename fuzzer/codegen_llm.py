@@ -525,14 +525,33 @@ def repair_by_compiling(
             print(f"  compile attempt {attempt + 1} failed:")
             for line in errors[:6]:
                 print(f"    {line}")
+            # A REPAIR PROMPT, NOT THE WHOLE TASK AGAIN.
+            #
+            # This used to re-send `base` -- the full requirements plus the 24 KB example
+            # module -- ahead of the errors and the previous answer. That reads as "here is
+            # the task, here is an attempt, here are some errors", and the model rewrote.
+            # Measured: one failure went from 2 errors in round 1 to 10 in round 2, which is
+            # the signature of a rewrite rather than an edit. Round 2 broke code that had
+            # compiled.
+            #
+            # So the repair carries only what a repair needs: the answer, the diagnostics,
+            # the lines they name, and an instruction to change nothing else. The
+            # requirements are already embodied in the previous answer -- it satisfied the
+            # structural checks -- so restating them competes with the edit instead of
+            # supporting it.
             repair = (
-                f"{base}\n\n"
-                f"YOUR PREVIOUS ANSWER DID NOT COMPILE. MSVC reported, against the file "
-                f"you produced:\n"
+                "The C++ file below does not compile. Fix ONLY the lines the compiler "
+                "names and return the complete file, byte-identical everywhere else.\n\n"
+                "Do NOT restructure, rename, reorder or 'improve' anything that compiled: "
+                "a rewrite turns two errors into ten.\n\n"
+                "MSVC reported:\n"
                 + "".join(f"  {e}\n" for e in errors[:12])
                 + _offending_lines(text, errors)
-                + "\nReturn the WHOLE corrected file. Fix the reported lines; do not "
-                "restructure what compiled.\n\nYour previous answer was:\n"
+                + "\nReminder of the two facts most often got wrong here: Gva_t's "
+                "constructor is EXPLICIT, so wrap with Gva_t(...) and never assign a "
+                "uint64_t to a Gva_t; and ResolveInputAddress returns Gva_t.\n\n"
+                "Output ONLY C++ source -- no prose, no markdown fence.\n\n"
+                "THE FILE:\n"
                 f"{text}\n"
             )
             completion = client.complete(role, repair, system=_SYSTEM)

@@ -351,3 +351,47 @@ def test_the_repair_prompt_quotes_the_line_the_compiler_named() -> None:
         ],
     )
     assert twice.count("The line MSVC named") == 1
+
+
+def test_the_repair_prompt_is_a_repair_not_the_whole_task_again() -> None:
+    """A repair that re-states the task invites a rewrite, and a rewrite makes it worse.
+
+    Measured across two runs of five generations. Both scored 4/5. The failures differed:
+
+        run 1  C2440 uint64_t -> Gva_t, errors IDENTICAL across both repair rounds
+        run 2  C2064 not callable,      errors changed 2 -> 10 between rounds
+
+    Run 1's loop was blind -- it never saw which line 124 was. Quoting the line fixed that,
+    and run 2's loop moved. It moved the wrong way: two errors became ten, which is a
+    rewrite, not an edit. Round 2 broke code that had compiled.
+
+    The prompt was the cause. It re-sent the full requirements and the 24 KB example module
+    ahead of the errors, which reads as "here is the task, here is an attempt, here are some
+    errors". The requirements are already embodied in the previous answer -- it passed the
+    structural checks -- so restating them competes with the edit.
+
+    Asserted against the prompt text because that is where the property lives, and because
+    whether the model then behaves better is a measurement, not a unit test.
+    """
+    import inspect
+
+    from fuzzer import codegen_llm
+
+    # `repair_by_compiling`, not `generate_module`. There are TWO retry prompts: one for
+    # STRUCTURAL problems (generate_module) and one for COMPILE errors. This property is
+    # about the compile one, and asserting it against the wrong function passed vacuously
+    # until the substring lookup raised.
+    source = inspect.getsource(codegen_llm.repair_by_compiling)
+    repair_block = source[source.index("repair = ("):]
+
+    assert "{base}" not in repair_block, (
+        "the repair prompt re-sends the base prompt, which invites a rewrite: measured, "
+        "one failure went from 2 errors to 10 between repair rounds"
+    )
+    for demanded in (
+        "Fix ONLY the lines",
+        "byte-identical everywhere else",
+        "Do NOT restructure",
+        "_offending_lines",
+    ):
+        assert demanded in repair_block, f"the repair prompt no longer says {demanded!r}"
