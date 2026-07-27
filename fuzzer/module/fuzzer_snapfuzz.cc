@@ -20,6 +20,7 @@
 #include "crash_detection_umode.h"
 #include "mutator.h"
 #include "nlohmann/json.hpp"
+#include "snapfuzz_resolve.h"
 #include "targets.h"
 #include "utils.h"
 
@@ -248,8 +249,19 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
         // page must sit behind the real data, or an over-reported size would
         // read our own bytes instead of faulting.
         //
-        const uint64_t PageBase = Backend->Rcx();
-        uint64_t PacketAddress = PageBase + (kPageSize - PacketSize);
+        // Via the shared helper, which masks the pointer to its page and prefers a
+        // VERIFIED unmapped boundary. This was `PageBase = Backend->Rcx()` followed by
+        // `PageBase + (kPageSize - PacketSize)`, and a register is a POINTER, not a page
+        // base -- so on an unaligned pointer the sum lands past the page end (D-078).
+        //
+        // It was benign HERE, and only by luck: this target's rcx is 0x20091325000, which
+        // is already page-aligned, so the unmasked arithmetic gave the right answer. That
+        // is why it survived long enough to be copied into both generators, one of which
+        // ran against a target whose rcx is 0xd3d77ff7a0 and put the test-case 0x790 bytes
+        // into an unmapped hole. A latent bug that is correct on the target you wrote it
+        // for is the hardest kind to see.
+        uint64_t PacketAddress =
+            snapfuzz::ResolveInputAddress(Backend->Rcx(), PacketSize).U64();
         Backend->Rcx(PacketAddress);
 
         //
