@@ -1,0 +1,590 @@
+<title>snapfuzz — 內建 mutator 對 LLM 引導</title>
+<style>
+  :root {
+    color-scheme: light;
+    --ground:      #f7f8fa;
+    --panel:       #ffffff;
+    --panel-sunk:  #f1f3f7;
+    --ink:         #101318;
+    --ink-2:       #4a5260;
+    --ink-3:       #7b8494;
+    --rule:        #e2e6ec;
+    --rule-strong: #cdd3dd;
+    --llm:         #2a78d6;
+    --base:        #eb6834;
+    --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "SFMono-Regular",
+            Consolas, "Liberation Mono", monospace;
+    --sans: ui-sans-serif, system-ui, "Segoe UI", "Microsoft JhengHei UI",
+            "Microsoft JhengHei", "PingFang TC", "Noto Sans TC", "Hiragino Sans TC",
+            "Heiti TC", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --ground:      #14161a;
+      --panel:       #1c1f24;
+      --panel-sunk:  #22262c;
+      --ink:         #f2f4f7;
+      --ink-2:       #a8b0bd;
+      --ink-3:       #79828f;
+      --rule:        #2a2f37;
+      --rule-strong: #3b424c;
+      --llm:         #3987e5;
+      --base:        #d95926;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --ground:      #14161a;
+    --panel:       #1c1f24;
+    --panel-sunk:  #22262c;
+    --ink:         #f2f4f7;
+    --ink-2:       #a8b0bd;
+    --ink-3:       #79828f;
+    --rule:        #2a2f37;
+    --rule-strong: #3b424c;
+    --llm:         #3987e5;
+    --base:        #d95926;
+  }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.8;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 940px;
+    margin: 0 auto;
+    padding: 40px 22px 80px;
+    display: flex;
+    flex-direction: column;
+    gap: 34px;
+  }
+  /* Latin-only, so it keeps the mono voice. */
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin: 0;
+    line-height: 1.5;
+  }
+  /* CJK headings take the sans and lean on weight, not letter-spacing --
+     tracking pushes Chinese glyphs apart instead of tightening them. */
+  h1 {
+    font-family: var(--sans);
+    font-size: clamp(24px, 4.2vw, 33px);
+    font-weight: 700;
+    line-height: 1.4;
+    margin: 8px 0 0;
+    text-wrap: balance;
+  }
+  h2 { font-family: var(--sans); font-size: 19px; font-weight: 700; line-height: 1.5; margin: 0; }
+  h3 { font-family: var(--sans); font-size: 15px; font-weight: 700; line-height: 1.6; margin: 0; }
+  p { margin: 0; max-width: 42em; }
+  .lede { color: var(--ink-2); font-size: 16.5px; margin-top: 12px; }
+  .muted { color: var(--ink-2); font-size: 15px; }
+  .fine { color: var(--ink-3); font-size: 13.5px; line-height: 1.7; }
+  b, strong { font-weight: 700; color: var(--ink); }
+  code {
+    font-family: var(--mono);
+    font-size: .88em;
+    background: var(--panel-sunk);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: .06em .34em;
+  }
+  a { color: var(--llm); }
+  :focus-visible { outline: 2px solid var(--llm); outline-offset: 2px; border-radius: 3px; }
+
+  .head { border-bottom: 1px solid var(--rule); padding-bottom: 26px; }
+  .protocol {
+    display: flex; flex-wrap: wrap; gap: 6px 18px;
+    font-size: 12.5px; color: var(--ink-3);
+    margin-top: 18px;
+  }
+  .protocol span { white-space: nowrap; }
+  .protocol b { font-family: var(--mono); font-weight: 600; color: var(--ink-2); }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    padding: 22px 22px 18px;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+  .panel-head { display: flex; flex-direction: column; gap: 6px; }
+
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 8px 22px;
+    font-size: 13px; color: var(--ink-2);
+  }
+  .legend i {
+    display: inline-block; width: 22px; height: 3px; border-radius: 2px;
+    vertical-align: 3px; margin-right: 8px;
+  }
+  .legend .sw-llm  { background: var(--llm); }
+  .legend .sw-base { background: var(--base); }
+
+  .findings { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+  .tile {
+    background: var(--panel); border: 1px solid var(--rule);
+    border-radius: 10px; padding: 16px 17px 15px;
+    display: flex; flex-direction: column; gap: 5px;
+  }
+  .tile .k {
+    font-size: 12px; color: var(--ink-3); line-height: 1.5;
+  }
+  .tile .k b { font-family: var(--mono); font-weight: 600; color: var(--ink-3); }
+  .tile .v {
+    font-family: var(--mono); font-size: 27px; font-weight: 600;
+    letter-spacing: -.02em; font-variant-numeric: tabular-nums;
+    color: var(--ink); line-height: 1.2;
+  }
+  .tile .v em { font-style: normal; color: var(--llm); }
+  .tile .v small { font-family: var(--sans); font-size: 14px; font-weight: 400; color: var(--ink-3); }
+  .tile .n { font-size: 13.5px; color: var(--ink-2); line-height: 1.7; }
+
+  figure { margin: 0; }
+  svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .grid line { stroke: var(--rule); stroke-width: 1; }
+  .axis text { font-family: var(--mono); font-size: 10.5px; fill: var(--ink-3); }
+  .lbl { font-family: var(--mono); font-size: 11px; font-weight: 600; }
+  .val { font-family: var(--mono); font-size: 11.5px; font-weight: 600; fill: var(--ink); font-variant-numeric: tabular-nums; }
+  .cap { font-family: var(--mono); font-size: 10.5px; fill: var(--ink-3); }
+  .cap-cjk { font-family: var(--sans); font-size: 11.5px; fill: var(--ink-3); }
+  .series { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .dot { stroke: var(--panel); stroke-width: 2; }
+  .bar { rx: 4; }
+  .bar-ghost { fill: none; stroke: var(--rule-strong); stroke-width: 1.5; stroke-dasharray: 3 3; rx: 4; }
+
+  .tablewrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 10px; background: var(--panel); }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  caption {
+    text-align: left; padding: 16px 18px 0;
+    font-family: var(--sans); font-size: 15px; font-weight: 700; color: var(--ink);
+  }
+  th, td {
+    padding: 9px 14px; text-align: right; white-space: nowrap;
+    border-bottom: 1px solid var(--rule);
+    font-variant-numeric: tabular-nums;
+    font-family: var(--mono);
+  }
+  th {
+    font-family: var(--sans); font-size: 12px; color: var(--ink-3); font-weight: 700;
+    border-bottom: 1px solid var(--rule-strong);
+  }
+  th:first-child, td:first-child { text-align: left; font-size: 12.5px; }
+  tbody tr:last-child td { border-bottom: none; }
+  tr.grouphead td {
+    background: var(--panel-sunk); font-family: var(--mono); font-size: 11.5px;
+    letter-spacing: .08em; color: var(--ink-2); text-align: left; font-weight: 600;
+  }
+  .chip {
+    display: inline-block; font-family: var(--sans); font-size: 11px;
+    padding: 1px 8px; border-radius: 999px; border: 1px solid currentColor;
+    vertical-align: 1.5px; margin-right: 6px;
+  }
+  .chip-llm { color: var(--llm); }
+  .chip-base { color: var(--base); }
+  .absent { color: var(--ink-3); font-family: var(--sans); font-size: 12.5px; }
+
+  .notes { display: flex; flex-direction: column; gap: 20px; }
+  .note { display: flex; flex-direction: column; gap: 7px; padding-left: 15px; border-left: 2px solid var(--rule-strong); }
+
+  .tt {
+    position: fixed; pointer-events: none; opacity: 0; transition: opacity .1s;
+    background: var(--panel); border: 1px solid var(--rule-strong);
+    border-radius: 7px; padding: 9px 11px; font-family: var(--mono); font-size: 11.5px;
+    color: var(--ink); box-shadow: 0 6px 22px rgba(0,0,0,.16); z-index: 20;
+    font-variant-numeric: tabular-nums; line-height: 1.6; max-width: 270px;
+  }
+  .tt.on { opacity: 1; }
+  .tt b { display: block; margin-bottom: 3px; }
+  .tt span { font-family: var(--sans); }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+
+  <header class="head">
+    <p class="eyebrow">snapfuzz · CP10 · GATE 10</p>
+    <h1>內建 mutator 與 LLM 引導的比較，在兩個 snapshot 上</h1>
+    <p class="lede">
+      wtf 自己的 libFuzzer 與 honggfuzz mutator，對上我們的 custom mutator 加 slow-clock
+      sidecar，以及各拿掉一項成分的兩個 ablation。同一個 target、同一個 snapshot、
+      同樣預算、同一顆刻意選差的種子。
+    </p>
+    <div class="protocol">
+      <span>每臂 <b>5 分鐘</b></span><span><b>2</b> 個 worker</span>
+      <span>後端 <b>bochscpu</b></span><span>五臂共用同一顆爛種子</span>
+      <span>bucket 由 <b>analysis.dedup</b> 判定</span>
+    </div>
+  </header>
+
+  <section class="findings">
+    <div class="tile">
+      <span class="k"><b>tlv_server</b> · 達到的覆蓋率</span>
+      <span class="v"><em>+32%</em></span>
+      <span class="n">LLM 臂 12,781，最好的 baseline 9,686 —— 花的是同樣的五分鐘。</span>
+    </div>
+    <div class="tile">
+      <span class="k"><b>tlv_server</b> · 找到幾個不同的 bug</span>
+      <span class="v"><em>4</em> <small>對</small> 2</span>
+      <span class="n">而 honggfuzz 只找到 1 個，執行的 test-case 卻是 llm-guided 的 91 倍。</span>
+    </div>
+    <div class="tile">
+      <span class="k"><b>fuzzing-base-test</b> · 每一臂</span>
+      <span class="v">1 <small>個 bucket</small></span>
+      <span class="n">這裡分不出差別。那是關於這個 target 的發現，不是平手。</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>覆蓋率隨時間變化 —— tlv_server</h2>
+      <p class="muted">master 回報的 unique coverage event。兩個 baseline 一起停住；
+        三個 LLM 臂一起停住，高出約三分之一。</p>
+    </div>
+    <div class="legend">
+      <span><i class="sw-llm"></i>我們的 mutator + sidecar，以及它的兩個 ablation</span>
+      <span><i class="sw-base"></i>wtf 內建 mutator</span>
+    </div>
+    <figure><svg id="cov" viewBox="0 0 900 340" role="img"
+      aria-label="tlv_server 的覆蓋率隨時間變化。三個 LLM 引導臂達到約 12,780 個 unique coverage event；兩個內建 mutator baseline 達到約 9,600 個。"></svg></figure>
+    <p class="fine">每條線在它的 master log 停止 flush 的地方結束（D-033），而不是在該臂停止
+      fuzzing 的地方 —— 五臂都跑滿了五分鐘。</p>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>不同的 crash bucket 數</h2>
+      <p class="muted">以靜態位址的 stack hash 去重，所以「不同」在每一臂都是同一個意思。</p>
+    </div>
+    <figure><svg id="buckets" viewBox="0 0 900 300" role="img"
+      aria-label="兩個 target 各臂的不同 crash bucket 數。在 tlv_server 上，LLM 臂找到 4、4、3 個，libFuzzer 找到 2 個，honggfuzz 找到 1 個。在 fuzzing-base-test 上，每個跑起來的臂都只找到 1 個。"></svg></figure>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>為此執行了多少 test-case —— tlv_server</h2>
+      <p class="muted">log 尺度，因為各臂相差兩個數量級。這是比較的代價那一面：
+        LLM 臂每秒的吞吐量慢約 30 倍。</p>
+    </div>
+    <figure><svg id="execs" viewBox="0 0 900 250" role="img"
+      aria-label="tlv_server 的執行次數，log 尺度。honggfuzz 執行了 590 萬個 test-case，libFuzzer 227 萬個，而 LLM 臂執行了 6.5 萬到 10.2 萬個。"></svg></figure>
+  </section>
+
+  <section class="tablewrap">
+    <table>
+      <caption>所有數字，兩個 target</caption>
+      <thead>
+        <tr>
+          <th scope="col">臂</th>
+          <th scope="col">bucket</th>
+          <th scope="col">覆蓋率峰值</th>
+          <th scope="col">執行次數</th>
+          <th scope="col">corpus</th>
+          <th scope="col">首次 crash</th>
+          <th scope="col">執行 / 秒</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </section>
+
+  <section class="notes">
+    <div class="note">
+      <h3>fuzzing-base-test 的 honggfuzz 臂沒跑起來 —— 那不是 0</h3>
+      <p class="muted">選用內建 mutator 且有 client 在驅動它時，wtf 的 master 會以
+        <code>0xC0000409</code>（<code>STATUS_STACK_BUFFER_OVERRUN</code>）退出。
+        <code>__fastfail</code> 不會 flush，所以 master 的 log 是零位元組，唯一看得到的症狀
+        是 worker 連不上一個已經不在的 master。用手寫模組也會重現，所以不是這裡生成的東西
+        造成的。記錄為缺席，而不是計為「什麼都沒找到」。</p>
+    </div>
+    <div class="note">
+      <h3>兩個 target，兩種形狀的問題</h3>
+      <p class="muted">tlv_server 需要一個與 body 不一致的長度、數個 command，以及一張填到
+        容量的表。fuzzing-base-test 只需要把一個位元組調大 —— 隨機 mutation 十五秒就到，
+        所以沒有東西留給 seed 生成貢獻，也沒有東西留給反編譯碼推理。引導在輸入空間有
+        mutator 撞不進去的結構時才划算；只報第一個 target 就是在挑對主張有利的那一個。</p>
+    </div>
+    <div class="note">
+      <h3>這些數字不能說明什麼</h3>
+      <p class="muted">fuzzing-base-test 的 <code>baseline-libfuzzer</code> 缺執行次數與首次
+        crash 時間，因為該臂結束時 master 的 stdout 緩衝還沒 flush；它的 corpus 與 bucket
+        數來自檔案系統，不受影響。每臂只跑一次、各五分鐘 —— 足以分開 4 個 bucket 和 1 個，
+        不足以給出信賴區間。兩個 snapshot 都是既有的，不是在這裡取得的，所以 snapshot
+        取得那條路徑仍未被執行過。</p>
+    </div>
+  </section>
+</div>
+
+<div class="tt" id="tt" role="status" aria-live="polite"></div>
+
+<script>
+const DATA = {"tlv_server":{"baseline-libfuzzer":{"execs":2269008,"corpus":28,"buckets":2,"first":4.0,"eps":7913.8,"ran":true,"peakcov":9686,"curve":[[4.0,0],[4.0,9377],[14.0,9686],[24.0,9686],[34.0,9686],[44.0,9686],[54.0,9686],[66.0,9686],[72.0,9686],[84.0,9686],[96.0,9686],[102.0,9686],[114.0,9686],[126.0,9686],[132.0,9686],[144.0,9686],[156.0,9686],[162.0,9686],[174.0,9686],[186.0,9686],[192.0,9686],[204.0,9686],[216.0,9686],[222.0,9686],[234.0,9686],[246.0,9686],[252.0,9686],[264.0,9686],[276.0,9686],[282.0,9686],[294.0,9686]]},"baseline-honggfuzz":{"execs":5927672,"corpus":2,"buckets":1,"first":66.0,"eps":22953.8,"ran":true,"peakcov":9549,"curve":[[4.0,0],[4.0,7629],[14.0,7629],[24.0,7629],[34.0,7629],[44.0,7629],[54.0,7629],[66.0,9549],[72.0,9549],[84.0,9549],[96.0,9549],[102.0,9549],[114.0,9549],[126.0,9549],[132.0,9549],[144.0,9549],[156.0,9549],[162.0,9549],[174.0,9549],[186.0,9549],[192.0,9549],[204.0,9549],[216.0,9549],[222.0,9549],[234.0,9549],[246.0,9549],[252.0,9549],[264.0,9549]]},"llm-guided":{"execs":64736,"corpus":41,"buckets":4,"first":14.0,"eps":746.1,"ran":true,"peakcov":12781,"curve":[[4.0,0],[4.0,0],[14.0,12778],[24.0,12781],[34.0,12781],[44.0,12781],[54.0,12781],[66.0,12781],[72.0,12781],[84.0,12781],[96.0,12781]]},"ablation-no-seedgen":{"execs":80161,"corpus":35,"buckets":4,"first":14.0,"eps":737.6,"ran":true,"peakcov":12761,"curve":[[4.0,0],[4.0,0],[14.0,12749],[24.0,12749],[34.0,12761],[44.0,12761],[54.0,12761],[66.0,12761],[72.0,12761],[84.0,12761],[96.0,12761],[102.0,12761],[114.0,12761]]},"ablation-no-pseudoc":{"execs":101788,"corpus":36,"buckets":3,"first":14.0,"eps":862.0,"ran":true,"peakcov":12751,"curve":[[4.0,0],[4.0,0],[14.0,12724],[24.0,12724],[34.0,12724],[44.0,12751],[54.0,12751],[66.0,12751],[72.0,12751],[84.0,12751],[96.0,12751],[102.0,12751],[114.0,12751],[126.0,12751]]}},"fuzzing-base-test":{"baseline-libfuzzer":{"execs":0,"corpus":19,"buckets":1,"first":null,"eps":0.0,"ran":true,"peakcov":0,"curve":[]},"baseline-honggfuzz":{"execs":0,"corpus":0,"buckets":0,"first":null,"eps":0.0,"ran":false,"peakcov":0,"curve":[]},"llm-guided":{"execs":28471,"corpus":18,"buckets":1,"first":15.0,"eps":150.2,"ran":true,"peakcov":57571,"curve":[[4.0,0],[5.0,57375],[15.0,57557],[25.0,57557],[35.0,57561],[45.0,57561],[55.0,57564],[66.0,57565],[72.0,57566],[84.0,57568],[96.0,57568],[108.0,57571],[114.0,57571],[126.0,57571],[132.0,57571],[144.0,57571],[156.0,57571],[168.0,57571],[174.0,57571],[186.0,57571],[192.0,57571]]},"ablation-no-seedgen":{"execs":26121,"corpus":15,"buckets":1,"first":15.0,"eps":132.5,"ran":true,"peakcov":57571,"curve":[[5.0,0],[5.0,0],[15.0,57551],[25.0,57558],[35.0,57564],[45.0,57564],[55.0,57564],[66.0,57570],[72.0,57570],[84.0,57570],[96.0,57570],[108.0,57571],[114.0,57571],[126.0,57571],[132.0,57571],[144.0,57571],[156.0,57571],[168.0,57571],[174.0,57571],[186.0,57571],[192.0,57571],[204.0,57571]]},"ablation-no-pseudoc":{"execs":25751,"corpus":19,"buckets":1,"first":15.0,"eps":149.8,"ran":true,"peakcov":57571,"curve":[[5.0,0],[5.0,57398],[15.0,57549],[25.0,57553],[35.0,57563],[45.0,57569],[55.0,57569],[66.0,57569],[72.0,57571],[84.0,57571],[96.0,57571],[108.0,57571],[114.0,57571],[126.0,57571],[132.0,57571],[144.0,57571],[156.0,57571],[168.0,57571],[174.0,57571],[186.0,57571]]}}};
+
+const NAMES = {
+  "baseline-libfuzzer":   "libfuzzer",
+  "baseline-honggfuzz":   "honggfuzz",
+  "llm-guided":           "llm-guided",
+  "ablation-no-seedgen":  "no-seedgen",
+  "ablation-no-pseudoc":  "no-pseudoc",
+};
+const ORDER = ["baseline-libfuzzer","baseline-honggfuzz","llm-guided",
+               "ablation-no-seedgen","ablation-no-pseudoc"];
+const isBase = a => a.startsWith("baseline");
+const hue = a => isBase(a) ? "var(--base)" : "var(--llm)";
+const fmt = n => n.toLocaleString("en-US");
+
+const NS = "http://www.w3.org/2000/svg";
+const el = (n, at = {}) => {
+  const e = document.createElementNS(NS, n);
+  for (const k in at) e.setAttribute(k, at[k]);
+  return e;
+};
+const tt = document.getElementById("tt");
+function showTip(evt, html) {
+  tt.innerHTML = html;
+  tt.classList.add("on");
+  const pad = 14, w = tt.offsetWidth, h = tt.offsetHeight;
+  let x = evt.clientX + pad, y = evt.clientY - h - pad;
+  if (x + w > innerWidth - 8) x = evt.clientX - w - pad;
+  if (y < 8) y = evt.clientY + pad;
+  tt.style.left = x + "px";
+  tt.style.top = y + "px";
+}
+const hideTip = () => tt.classList.remove("on");
+
+/* ---------- 覆蓋率隨時間 ---------- */
+(function coverage() {
+  const svg = document.getElementById("cov");
+  const W = 900, H = 340, L = 52, R = 128, T = 14, B = 40;
+  const arms = DATA["tlv_server"];
+  const pts = a => arms[a].curve.filter(p => p[1] > 0);
+  const maxT = Math.max(...ORDER.flatMap(a => pts(a).map(p => p[0])));
+  const maxV = Math.max(...ORDER.flatMap(a => pts(a).map(p => p[1]))) * 1.06;
+  const x = t => L + (t / maxT) * (W - L - R);
+  const y = v => H - B - (v / maxV) * (H - T - B);
+
+  const g = el("g", { class: "grid" });
+  const ticks = [0, 3000, 6000, 9000, 12000];
+  ticks.forEach(v => g.appendChild(el("line", { x1: L, x2: W - R, y1: y(v), y2: y(v) })));
+  svg.appendChild(g);
+
+  const ax = el("g", { class: "axis" });
+  ticks.forEach(v => {
+    const t = el("text", { x: L - 9, y: y(v) + 3.5, "text-anchor": "end" });
+    t.textContent = v === 0 ? "0" : (v / 1000) + "k";
+    ax.appendChild(t);
+  });
+  [0, 60, 120, 180, 240, 300].filter(s => s <= maxT + 6).forEach(s => {
+    const t = el("text", { x: x(s), y: H - B + 18, "text-anchor": "middle" });
+    t.textContent = s + "s";
+    ax.appendChild(t);
+  });
+  const yl = el("text", { x: L - 9, y: T + 4, "text-anchor": "end", class: "cap-cjk" });
+  yl.textContent = "事件";
+  ax.appendChild(yl);
+  svg.appendChild(ax);
+
+  // 三個 LLM 臂的高原幾乎重疊，所以把線末標籤錯開排列。
+  const ends = ORDER.map(a => {
+    const p = pts(a);
+    return { a, v: p[p.length - 1][1] };
+  }).sort((m, n) => n.v - m.v);
+  let prev = -Infinity;
+  ends.forEach(e => {
+    let ly = y(e.v) + 4;
+    if (ly - prev < 15) ly = prev + 15;
+    prev = ly;
+    e.ly = ly;
+  });
+
+  ORDER.forEach(a => {
+    const p = pts(a);
+    const d = p.map((q, i) => (i ? "L" : "M") + x(q[0]).toFixed(1) + " " + y(q[1]).toFixed(1)).join(" ");
+    svg.appendChild(el("path", { class: "series", d, stroke: hue(a) }));
+    const last = p[p.length - 1];
+    svg.appendChild(el("circle", { class: "dot", cx: x(last[0]), cy: y(last[1]), r: 4, fill: hue(a) }));
+
+    const e = ends.find(o => o.a === a);
+    const lab = el("text", { x: W - R + 12, y: e.ly, class: "lbl", fill: hue(a) });
+    lab.textContent = NAMES[a] + "  " + fmt(last[1]);
+    svg.appendChild(lab);
+
+    p.forEach(q => {
+      const hit = el("circle", { cx: x(q[0]), cy: y(q[1]), r: 11, fill: "transparent" });
+      hit.addEventListener("mousemove", ev => showTip(ev,
+        "<b>" + NAMES[a] + "</b>" + fmt(q[1]) + " <span>個事件</span><br>" +
+        "<span>於第</span> " + q[0] + " <span>秒</span>"));
+      hit.addEventListener("mouseleave", hideTip);
+      svg.appendChild(hit);
+    });
+  });
+})();
+
+/* ---------- bucket，依 target 分組 ---------- */
+(function buckets() {
+  const svg = document.getElementById("buckets");
+  const W = 900, H = 300, T = 34, B = 54, L = 26;
+  const targets = ["tlv_server", "fuzzing-base-test"];
+  const panelW = (W - L * 2 - 46) / 2;
+  const maxV = 4;
+  const plotH = H - T - B;
+  const y = v => T + plotH - (v / (maxV + .4)) * plotH;
+
+  targets.forEach((tname, ti) => {
+    const ox = L + ti * (panelW + 46);
+    const head = el("text", { x: ox, y: 16, class: "lbl", fill: "var(--ink)" });
+    head.textContent = tname;
+    svg.appendChild(head);
+
+    svg.appendChild(el("line", { x1: ox, x2: ox + panelW, y1: y(0), y2: y(0),
+                                 stroke: "var(--rule-strong)", "stroke-width": 1 }));
+
+    const arms = DATA[tname];
+    const step = panelW / ORDER.length;
+    const bw = Math.min(46, step - 12);
+    ORDER.forEach((a, i) => {
+      const cx = ox + step * i + step / 2;
+      const d = arms[a];
+      const lab = el("text", { x: cx, y: H - B + 17, class: "cap", "text-anchor": "middle" });
+      lab.textContent = NAMES[a];
+      svg.appendChild(lab);
+
+      if (!d || !d.ran) {
+        // 缺席，不是 0：一個一格高的虛線框，加上明說。
+        svg.appendChild(el("rect", { class: "bar-ghost", x: cx - bw / 2, y: y(1),
+                                     width: bw, height: y(0) - y(1) }));
+        const n = el("text", { x: cx, y: y(1) - 8, class: "cap-cjk", "text-anchor": "middle" });
+        n.textContent = "沒跑起來";
+        svg.appendChild(n);
+        const hit = el("rect", { x: cx - bw / 2, y: T, width: bw, height: plotH, fill: "transparent" });
+        hit.addEventListener("mousemove", ev => showTip(ev,
+          "<b>" + NAMES[a] + "</b><span>master 以 0xC0000409 死亡；<br>沒有數據，不是 0</span>"));
+        hit.addEventListener("mouseleave", hideTip);
+        svg.appendChild(hit);
+        return;
+      }
+
+      const h = Math.max(2, y(0) - y(d.buckets));
+      svg.appendChild(el("rect", { class: "bar", x: cx - bw / 2, y: y(d.buckets),
+                                   width: bw, height: h, fill: hue(a) }));
+      const v = el("text", { x: cx, y: y(d.buckets) - 8, class: "val", "text-anchor": "middle" });
+      v.textContent = d.buckets;
+      svg.appendChild(v);
+
+      const hit = el("rect", { x: cx - bw / 2, y: T, width: bw, height: plotH, fill: "transparent" });
+      hit.addEventListener("mousemove", ev => showTip(ev,
+        "<b>" + NAMES[a] + "</b>" + d.buckets + " <span>個不同的 bucket</span><br>" +
+        (d.execs ? fmt(d.execs) + " <span>次執行</span>" : "<span>執行次數未 flush</span>") +
+        "<br><span>corpus</span> " + d.corpus));
+      hit.addEventListener("mouseleave", hideTip);
+      svg.appendChild(hit);
+    });
+  });
+
+  const yl = el("text", { x: L, y: H - 10, class: "cap-cjk" });
+  yl.textContent = "柱高為不同的 crash bucket 數 · 虛線框 = 該臂沒有產出數據";
+  svg.appendChild(yl);
+})();
+
+/* ---------- 執行次數，log 尺度 ---------- */
+(function execs() {
+  const svg = document.getElementById("execs");
+  const W = 900, H = 250, L = 118, R = 92, T = 12, B = 40;
+  const arms = DATA["tlv_server"];
+  const lo = 1e4, hi = 1e7;
+  const lg = v => Math.log10(Math.max(v, lo));
+  const x = v => L + (lg(v) - lg(lo)) / (lg(hi) - lg(lo)) * (W - L - R);
+
+  const g = el("g", { class: "grid" });
+  [1e4, 1e5, 1e6, 1e7].forEach(v => {
+    g.appendChild(el("line", { x1: x(v), x2: x(v), y1: T, y2: H - B }));
+  });
+  svg.appendChild(g);
+
+  const ax = el("g", { class: "axis" });
+  [["1萬", 1e4], ["10萬", 1e5], ["100萬", 1e6], ["1000萬", 1e7]].forEach(([t, v]) => {
+    const n = el("text", { x: x(v), y: H - B + 18, "text-anchor": "middle", class: "cap-cjk" });
+    n.textContent = t;
+    ax.appendChild(n);
+  });
+  svg.appendChild(ax);
+
+  const rows = ORDER.filter(a => arms[a] && arms[a].execs > 0);
+  const step = (H - T - B) / rows.length;
+  const bh = Math.min(24, step - 10);
+  rows.forEach((a, i) => {
+    const cy = T + step * i + step / 2;
+    const lab = el("text", { x: L - 12, y: cy + 4, class: "lbl", "text-anchor": "end", fill: hue(a) });
+    lab.textContent = NAMES[a];
+    svg.appendChild(lab);
+
+    const w = Math.max(2, x(arms[a].execs) - L);
+    svg.appendChild(el("rect", { class: "bar", x: L, y: cy - bh / 2, width: w, height: bh, fill: hue(a) }));
+
+    const v = el("text", { x: L + w + 9, y: cy + 4, class: "val" });
+    v.textContent = fmt(arms[a].execs);
+    svg.appendChild(v);
+
+    const hit = el("rect", { x: L, y: cy - step / 2, width: W - L - R, height: step, fill: "transparent" });
+    hit.addEventListener("mousemove", ev => showTip(ev,
+      "<b>" + NAMES[a] + "</b>" + fmt(arms[a].execs) + " <span>個 test-case</span><br>" +
+      arms[a].eps + " <span>次/秒 ·</span> " + arms[a].buckets + " <span>個 bucket</span><br>" +
+      "<span>每個 bucket 花</span> " +
+      fmt(Math.round(arms[a].execs / Math.max(arms[a].buckets, 1))) + " <span>次執行</span>"));
+    hit.addEventListener("mouseleave", hideTip);
+    svg.appendChild(hit);
+  });
+
+  const note = el("text", { x: L, y: H - 8, class: "cap-cjk" });
+  note.textContent = "log 尺度 · 滑過可看每個 bucket 花了多少次執行";
+  svg.appendChild(note);
+})();
+
+/* ---------- 表格 ---------- */
+(function table() {
+  const tb = document.getElementById("rows");
+  ["tlv_server", "fuzzing-base-test"].forEach(tname => {
+    const hr = document.createElement("tr");
+    hr.className = "grouphead";
+    const hc = document.createElement("td");
+    hc.colSpan = 7;
+    hc.textContent = tname;
+    hr.appendChild(hc);
+    tb.appendChild(hr);
+
+    ORDER.forEach(a => {
+      const d = DATA[tname][a];
+      const tr = document.createElement("tr");
+      const chip = '<span class="chip ' + (isBase(a) ? "chip-base" : "chip-llm") + '">' +
+                   (isBase(a) ? "內建" : "我們的") + "</span>";
+      if (!d || !d.ran) {
+        // 每個量測值都缺席，而原因寫在臂名旁邊，不是丟進剛好在最後的那一欄。
+        tr.innerHTML =
+          "<td>" + chip + NAMES[a] +
+          ' <span class="absent">沒跑起來</span></td>' +
+          '<td class="absent">—</td>'.repeat(6);
+      } else {
+        tr.innerHTML =
+          "<td>" + chip + NAMES[a] + "</td>" +
+          "<td>" + d.buckets + "</td>" +
+          "<td>" + (d.peakcov ? fmt(d.peakcov) : '<span class="absent">—</span>') + "</td>" +
+          "<td>" + (d.execs ? fmt(d.execs) : '<span class="absent">未 flush</span>') + "</td>" +
+          "<td>" + d.corpus + "</td>" +
+          "<td>" + (d.first === null ? '<span class="absent">—</span>' : d.first + "s") + "</td>" +
+          "<td>" + (d.eps ? d.eps : '<span class="absent">—</span>') + "</td>";
+      }
+      tb.appendChild(tr);
+    });
+  });
+})();
+</script>
