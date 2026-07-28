@@ -98,3 +98,8 @@ snapfuzz_*review*.md
 # A second real target: a 4.1 GB mem.dmp plus its exe. Same reason as
 # targets/*/state/mem.dmp -- hashes travel in git, gigabytes do not (D-069).
 fuzzing-snapshot-2/
+
+# The downloadable data package. A build product: rebuilt from docs/figures/ and
+# artifacts/runs/ by the commands in its own MANIFEST.json, so tracking it would put a
+# stale copy of committed data in git.
+snapfuzz-cp10-data.zip
