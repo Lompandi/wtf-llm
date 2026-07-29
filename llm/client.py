@@ -48,6 +48,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, TypeVar
 
 import yaml
@@ -567,6 +568,7 @@ class LlmClient:
         system: str | None = None,
         max_tokens: int | None = None,
         retries: int = 1,
+        coerce: Callable[[dict], dict] | None = None,
     ) -> M:
         """Structured output, validated against ``model_cls`` (CP5).
 
@@ -613,6 +615,19 @@ class LlmClient:
             )
             candidate = extract_json_object(completion.content)
             try:
+                # `coerce` runs BEFORE validation so a caller can enforce an invariant
+                # rather than ask for it. The distinction that decides what belongs there:
+                # a schema INVARIANT has exactly one correct value, so requesting it wastes
+                # a round-trip and sometimes never converges -- `input_struct` retried
+                # twice on "field 'payload' is variable-length bytes and must not have a
+                # fixed ctype" with the rule stated plainly in the prompt. A JUDGEMENT
+                # does not belong here, because silently overwriting one hides a
+                # disagreement worth seeing.
+                if coerce is not None:
+                    payload = json.loads(candidate)
+                    if isinstance(payload, dict):
+                        payload = coerce(payload)
+                    return model_cls.model_validate(payload)
                 return model_cls.model_validate_json(candidate)
             except (ValidationError, ValueError) as exc:
                 last_error = exc

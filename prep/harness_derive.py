@@ -166,6 +166,17 @@ def _prompt(
         f"faults, and a small fixed buffer is written at the pointer itself. Getting it "
         f"wrong means the parser reads untouched memory and rejects every test-case. "
         f"Omit it only if the code genuinely does not say.\n"
+        f"    THE SIZE PARAMETER'S CURRENT VALUE IS NOT THE CAPACITY. "
+        f"{entry.size_param or 'The size register'} holds how many bytes the caller "
+        f"passed in the ONE snapshot that was taken; the buffer behind the pointer is "
+        f"usually far larger, and on a heap allocation its size is not in the code at "
+        f"all. Answering with that register's value is the specific mistake to avoid: "
+        f"the generated harness drops every test-case LARGER than this number, so a "
+        f"value of 8 read off rdx made a 21-byte seed vanish -- zero instructions "
+        f"executed, no crash, no error, and a campaign that looks like a clean run "
+        f"(D-090). A pointer into the heap or a page-aligned address is evidence you "
+        f"CANNOT tell: answer null, which selects the page-end placement. "
+        f"Null is the safe answer and a guess is not.\n"
         f"2. input_is_pointer -- is {entry.input_param} a POINTER TO the buffer, or "
         f"the buffer's address used directly? RULE 4 asks this explicitly; look at "
         f"how the code dereferences it.\n"
@@ -184,6 +195,39 @@ def _prompt(
     )
 
 
+def calls_taking_the_input(code: str, input_param_name: str = "param_1") -> set[str]:
+    """Functions in ``code`` called with the input buffer among their arguments.
+
+    A `silence_io` stub on one of these does not quieten the harness -- it DELETES the
+    thing being tested. The third real target made this concrete: its parser ends with
+
+        thunk_FUN_1400c08f0(local_100, param_1, (ulonglong)*(byte *)(param_1 + 4));
+
+    which is the memcpy that overflows a 224-byte stack buffer -- the entire bug. The model
+    marked it `silence_io / simulate_return` and explained: "Appears to be a
+    logging/printing routine called after successful parse; silencing avoids console I/O
+    overhead without affecting parse logic." A reasonable guess from a name like
+    `thunk_FUN_1400c08f0`, and it would have stubbed out the vulnerability. The campaign
+    would have run at full speed, reported coverage, and found nothing -- because the
+    harness skipped the call that crashes.
+
+    It survived only by luck: A2 had no address for that thunk, so the breakpoint stayed
+    name-resolved and Init failed loudly on a stripped target (D-091). Luck is not a check.
+
+    Mechanical and conservative: it looks for the input parameter's name in the argument
+    list. `param_1` is what Ghidra names a first parameter, and the name is passed in for
+    the cases where it is not.
+    """
+    hits: set[str] = set()
+    for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_:<>]*)\s*\(([^;]{0,400}?)\)\s*;", code):
+        name, args = match.group(1), match.group(2)
+        if name in {"if", "while", "for", "switch", "return", "sizeof", "do"}:
+            continue
+        if re.search(rf"\b{re.escape(input_param_name)}\b", args):
+            hits.add(name)
+    return hits
+
+
 def check_harness(
     spec: HarnessSpec, input_spec: InputSpec, code: str
 ) -> list[str]:
@@ -195,6 +239,28 @@ def check_harness(
     most needs to see.
     """
     warnings: list[str] = []
+
+    # A STUB ON A CALL THAT RECEIVES THE INPUT REMOVES THE BUG. Checked before anything
+    # else because it is the one inconsistency here that silently invalidates a whole
+    # campaign rather than merely making it noisier (D-091).
+    takes_input = calls_taking_the_input(code)
+    for breakpoint in spec.breakpoints:
+        name = breakpoint.symbol.split("!", 1)[-1]
+        if breakpoint.action != "simulate_return" or name not in takes_input:
+            continue
+        warnings.append(
+            f"REFUSED: {breakpoint.symbol} is stubbed with simulate_return, but the entry "
+            f"passes the INPUT BUFFER to it. Silencing it does not quieten the harness, it "
+            f"deletes the code under test -- on the third target this exact call was the "
+            f"memcpy that overflows. The breakpoint has been dropped; if it really is "
+            f"logging, say so in the rationale and name a call that does not take the "
+            f"input."
+        )
+    spec.breakpoints = [
+        b for b in spec.breakpoints
+        if not (b.action == "simulate_return"
+                and b.symbol.split("!", 1)[-1] in takes_input)
+    ]
 
     if spec.deliver_sequence != input_spec.supports_sequence:
         warnings.append(

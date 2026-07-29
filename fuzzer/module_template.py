@@ -223,7 +223,24 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {{
         //
         if (Bytes >= kPageSize || Bytes > kMaxInputBytes) {{
           GlobalState.Inputs.pop_front();
-          DebugPrint("input of {{}} bytes does not fit, bailing\\n", Bytes);
+          //
+          // LOUD, ONCE. "Every test-case is being dropped" is not a debug detail --
+          // it is the campaign not running. DebugPrint compiles to nothing
+          // (LoggingOn is false), so a harness whose size guard rejected everything
+          // reported 0 instructions, no crash and no error: indistinguishable from a
+          // clean run. That happened because input_buffer_bytes was 8, read off the
+          // size register, and the seed was 21 bytes (D-090).
+          //
+          static bool DropWarned = false;
+          if (!DropWarned) {{
+            DropWarned = true;
+            fmt::print("{namespace_name}: DROPPING test-cases -- {{}} bytes exceeds "
+                       "the {{}}-byte limit from the harness spec.\\n"
+                       "  Nothing will be delivered at this size. If the target's "
+                       "buffer is really larger,\\n"
+                       "  input_buffer_bytes in harness_spec.json is wrong.\\n",
+                       Bytes, kMaxInputBytes);
+          }}
           return Backend->Stop(Ok_t());
         }}
 

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 from arch.contracts import FuzzEntry, InputSpec
@@ -64,6 +65,60 @@ _SYSTEM = (
     "and what it compares or passes them to -- rather than from any declared "
     "type. Report only structure you can point at a line for."
 )
+
+
+_DAT_RE = re.compile(r"\bDAT_([0-9a-fA-F]{6,16})\b")
+
+
+def referenced_constants(code: str, binary: Path | None, limit: int = 8) -> str:
+    """The BYTES behind every `DAT_<addr>` the code mentions, read from the PE.
+
+    Decompilation names a constant and drops its value, so a parser that opens with
+    `memcmp(param_1, &DAT_1400c6174, 4)` gives the model a symbol and nothing else. On the
+    third real target it answered `magic_value: 0` -- a reasonable guess and completely
+    wrong; the constant is "FUZZ". A wrong magic means the comparison never matches, the
+    parser returns early on every input, and the campaign reports coverage while exploring
+    nothing (D-089).
+
+    Rendered three ways because the right one depends on how the code reads it: raw bytes
+    for a memcmp, ASCII because magics usually are, and a little-endian integer because
+    that is what `magic_value` wants for a 4-byte field.
+
+    Absent binary or unreadable address yields nothing rather than a guess.
+    """
+    if binary is None or not binary.is_file():
+        return ""
+    from prep.layout import read_static_bytes
+
+    seen: list[str] = []
+    blocks: list[str] = []
+    for match in _DAT_RE.finditer(code):
+        addr_text = match.group(1)
+        if addr_text in seen:
+            continue
+        seen.append(addr_text)
+        if len(seen) > limit:
+            break
+        raw = read_static_bytes(binary, int(addr_text, 16), 16)
+        if not raw:
+            continue
+        printable = "".join(chr(b) if 0x20 <= b <= 0x7E else "." for b in raw[:8])
+        line = (
+            f"  DAT_{addr_text}: bytes {raw[:8].hex(' ')}  ascii \"{printable}\""
+        )
+        if len(raw) >= 4:
+            le = int.from_bytes(raw[:4], "little")
+            line += f"  first 4 as little-endian uint32 = {le:#010x}"
+        blocks.append(line)
+
+    if not blocks:
+        return ""
+    return (
+        "CONSTANTS THE CODE COMPARES AGAINST, read from the binary itself. Decompilation "
+        "prints the symbol and drops the value, so these are the actual bytes. Use them "
+        "for magic_value -- do NOT invent one, and do not answer 0 because the value was "
+        "not in the listing:\n" + "\n".join(blocks) + "\n\n"
+    )
 
 
 def _prompt(entry: FuzzEntry, code: str, extra: str) -> str:
@@ -98,7 +153,17 @@ def _prompt(entry: FuzzEntry, code: str, extra: str) -> str:
         f"  * unit            -- \"bytes\" or \"elements\". Say which the code "
         f"actually uses; if it is passed straight to a memcpy length, it is bytes\n"
         f"  * includes_header -- true if the count covers the fixed header as "
-        f"well as the payload, false if it covers only the payload\n\n"
+        f"well as the payload, false if it covers only the payload\n"
+        f"A COUNT OVER THE WHOLE BUFFER IS STILL A LENGTH FIELD. When the value is "
+        f"passed as the size of a copy that starts at the START of the input rather "
+        f"than at the field after it -- `memcpy(dst, buf, buf[4])` -- there is no "
+        f"single field it 'sizes', and the honest reading is that it sizes nothing. "
+        f"Model it anyway: kind=length, counts_field naming the trailing bytes field, "
+        f"and includes_header=true. That is a CONVENTION of this schema and not "
+        f"something readable off the code, which is why it is stated here: it is what "
+        f"lets the harness express a length that DISAGREES with the bytes present, and "
+        f"that disagreement is the entire bug class such a parser gets wrong. Put the "
+        f"exact copy expression in the rationale so the reading stays checkable.\n\n"
         f"For a `magic` field give magic_value as an integer AND a ctype. A "
         f"magic field with no ctype is REJECTED by the contract -- the harness "
         f"cannot write a constant whose width it does not know -- and the "
@@ -394,6 +459,7 @@ def derive_input_spec(
     client: LlmClient,
     *,
     role: str = "input_struct",
+    binary: Path | None = None,
 ) -> tuple[InputSpec, list[str]]:
     """Derive an InputSpec for ``entry``. Returns the spec and any warnings.
 
@@ -402,9 +468,44 @@ def derive_input_spec(
     uncounted tail -- so this only adds the checks that need the source code.
     """
     code, extra, used = _gather_code(entry, cache)
+    extra = referenced_constants(code, binary) + extra
+
+    coerced: list[str] = []
+
+    def _enforce_invariants(payload: dict) -> dict:
+        """Fix what the schema allows exactly one answer for, rather than re-asking.
+
+        `bytes` means variable length, so a fixed `ctype` is not a different opinion about
+        the format -- it is a contradiction the contract rejects outright. The prompt says
+        so plainly ("Omit it only for `bytes`") and on the third real target the model
+        attached one anyway, twice, with the validation error fed back in between:
+
+            field 'payload' is variable-length bytes and must not have a fixed ctype
+
+        Two failed round-trips and a dead pipeline stage for a value that could only ever
+        have been null. Same reasoning as the JSON-key normaliser in fuzzer/codegen_llm.py:
+        state it in the prompt AND enforce it in code, because a rule the model overrides
+        is not a rule.
+
+        Deliberately narrow. Only an invariant belongs here -- something with one correct
+        value. A JUDGEMENT (which field is the length, what the magic is) must never be
+        silently rewritten, because that would hide a disagreement worth seeing.
+        """
+        for field in payload.get("fields") or []:
+            if isinstance(field, dict) and field.get("kind") == "bytes" and field.get("ctype"):
+                coerced.append(
+                    f"field {field.get('name')!r} is kind=bytes and carried "
+                    f"ctype={field['ctype']!r}; dropped (variable length has no fixed width)"
+                )
+                field["ctype"] = None
+        return payload
 
     spec = client.complete_json(
-        role, _prompt(entry, code, extra), InputSpec, system=_SYSTEM
+        role,
+        _prompt(entry, code, extra),
+        InputSpec,
+        system=_SYSTEM,
+        coerce=_enforce_invariants,
     )
 
     # The model is asked for these but must not be trusted to set them: the module
@@ -415,7 +516,9 @@ def derive_input_spec(
     if not spec.source_functions:
         spec.source_functions = used
 
-    return spec, check_against_pseudoc(spec, code)
+    # Coercions are reported, never silent: a rewrite of model output that nobody can see
+    # is how a generation stops being readable.
+    return spec, coerced + check_against_pseudoc(spec, code)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -434,13 +537,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--out", type=Path, default=REPO_ROOT / "artifacts" / "input_spec.json"
     )
+    ap.add_argument(
+        "--binary",
+        type=Path,
+        help="the target PE. Used to read the constants the parser compares against, "
+             "which decompilation names and does not print -- without it the model has "
+             "to invent a magic value (D-089)",
+    )
     args = ap.parse_args(argv)
 
     entry = FuzzEntry.model_validate_json(args.entry.read_text(encoding="utf-8"))
     print(f"deriving the input structure of {entry.module}!{entry.symbol}")
 
     with PseudoCCache(args.cache) as cache, LlmClient.from_config() as client:
-        spec, warnings = derive_input_spec(entry, cache, client)
+        spec, warnings = derive_input_spec(entry, cache, client, binary=args.binary)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(spec.model_dump_json(indent=2), encoding="utf-8")

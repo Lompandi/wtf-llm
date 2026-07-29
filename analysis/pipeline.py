@@ -63,6 +63,9 @@ class AnalysisConfig:
     data_symbols: Path | None = None
     replays: int = 3
     entry_symbol: str = "ProcessPacket"
+    # The entry's RVA, for finding it in a trace when it has no symbol to print. None
+    # means "only the symbol is available", which is correct for an exported entry.
+    entry_rva: int | None = None
     max_buckets: int | None = None
     # The target's PE on disk, for disassembling a fault that lands inside it.
     # None disables disassembly rather than reading bytes we cannot vouch for
@@ -272,12 +275,22 @@ def _trace_bucket(
     # failure (CP4), and a trace that never mentions the entry means this crash
     # says nothing about the target.
     text = symbolized.read_text(encoding="utf-8", errors="replace")
+    # BY SYMBOL OR BY ADDRESS. A stripped binary's internal entry has no PDB or export
+    # symbol, so symbolizer-rs prints `module+0x447c0` and a search for Ghidra's invented
+    # `FUN_1400447c0` never matches. The consequence is not a cosmetic one: this flag is
+    # triage signal 4, and on the third real target it reported False for all seven
+    # buckets, so the model was told "execution never entered the fuzz target" and
+    # discarded every one at 0.95 confidence -- reasoning correctly from an input this
+    # stage had got wrong. The faults were inside the target's own memcpy (D-092).
+    reached = config.entry_symbol in text
+    if not reached and config.entry_rva is not None:
+        reached = f"+{config.entry_rva:#x}" in text
     return TraceRef(
         bucket_id=bucket.bucket_id,
         trace_type="rip",
         raw_path=str(raw),
         symbolized_path=str(symbolized),
-        reached_fuzz_entry=config.entry_symbol in text,
+        reached_fuzz_entry=reached,
     )
 
 
@@ -473,6 +486,11 @@ def build_config(
         data_symbols=data_symbols or (artifacts / "a6_data_symbols.json"),
         replays=replays,
         entry_symbol=entry,
+        entry_rva=(
+            int(ref.entry_runtime_addr) - int(ref.module_base)
+            if ref.entry_runtime_addr and ref.module_base
+            else None
+        ),
         max_buckets=max_buckets,
         target_binary=resolved_binary,
         module_prefix=prefix,

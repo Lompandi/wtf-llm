@@ -459,13 +459,58 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
         # The frame may be mangled (`?fuzzme@@YAHPEAD@Z`) or plain, so match the bare
         # symbol as a substring rather than a whole frame -- the same mangled/demangled
         # mismatch that cost signal 5 in D-085.
-        if entry not in text:
+        # By ADDRESS as well, for the same reason the tool accepts it: a stripped binary's
+        # internal entry has no PDB or export symbol, so the trace names it
+        # `module+0x447c0` and a search for Ghidra's invented `FUN_1400447c0` can never
+        # match. On the third target delivery measured 13,731 instructions against 1 for an
+        # empty test-case, the trace's FIRST line was the entry, and this check still said
+        # it was never entered (D-092).
+        rva_needle = None
+        a1_for_rva = config.artifacts / "a1_snapshot.json"
+        if a1_for_rva.is_file():
+            try:
+                a1 = json.loads(a1_for_rva.read_text(encoding="utf-8"))
+                base, runtime = a1.get("module_base"), a1.get("entry_runtime_addr")
+                if base and runtime:
+                    rva_needle = f"+{int(runtime) - int(base):#x}"
+            except (OSError, json.JSONDecodeError, ValueError):
+                rva_needle = None
+
+        if entry not in text and not (rva_needle and rva_needle in text):
             head = "\n    ".join(text.splitlines()[:5])
             return (
                 f"the trace never enters {entry!r}: the harness runs and will report "
                 f"coverage, but it is not fuzzing the intended code. First frames:"
                 f"\n    {head}"
             )
+        return None
+
+    def generated_module_is_fresh() -> str | None:
+        """The generated module must be newer than BOTH specs it is rendered from.
+
+        Provenance stamps an artifact against the TARGET BINARY (D-073), which is right for
+        everything Ghidra produces and wrong here: the module is rendered from
+        `input_spec.json` and `harness_spec.json`, and re-deriving either leaves the binary
+        untouched. So stage 09 reported "already produced" and the tree kept a module built
+        from the previous specs.
+
+        Measured, and it cost an hour: `input_buffer_bytes` was corrected from 8 to null,
+        the harness spec was rewritten, and the module still carried `if (Bytes > 8) { pop;
+        Stop; }` — so every test-case was still dropped and the delivery gate still failed,
+        with the fix sitting on disk. Existence is not freshness (D-057), and neither is a
+        provenance stamp against the wrong input.
+        """
+        module = config.repo_root / "fuzzer" / "module" / "fuzzer_gen.cc"
+        if not module.is_file():
+            return "fuzzer_gen.cc is absent"
+        stamp = module.stat().st_mtime_ns
+        for spec in (spec_json, harness_json):
+            if spec.is_file() and spec.stat().st_mtime_ns > stamp:
+                return (
+                    f"{spec.name} is newer than the generated module, so the module was "
+                    f"rendered from an older spec. A stale size guard or field layout here "
+                    f"silently drops every test-case."
+                )
         return None
 
     def build_is_fresh() -> str | None:
@@ -714,6 +759,11 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
             argv=py(
                 "prep.input_struct", "--entry", str(entry_json),
                 "--cache", str(a2_db), "--out", str(spec_json),
+                # The binary, so the constants the parser compares against can be READ
+                # rather than guessed. Decompilation prints `&DAT_1400c6174` and drops the
+                # four bytes behind it; without this the model answered magic_value 0 and
+                # every input would have failed the memcmp (D-089).
+                "--binary", str(config.binary),
             ),
             needs=[entry_json, a2_db],
             produces=[spec_json],
@@ -793,7 +843,10 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
             # one target impossible (D-065/D-075). The hook below checks the property
             # the byte comparison stood in for.
             output_may_be_unchanged=True,
-            verify=generated_code_matches_the_spec,
+            # Freshness FIRST: a module rendered from an older spec satisfies the
+            # content check below, because the field names it looks for did not change
+            # when input_buffer_bytes did (D-090).
+            verify=lambda: generated_module_is_fresh() or generated_code_matches_the_spec(),
             calls_llm=(config.codegen == "llm" and use_generated_harness),
             note=(
                 "EDGE 14: the generated module is compiled by stage 10 and run by "
@@ -875,6 +928,13 @@ def build_stages(config: PipelineConfig) -> list[Stage]:
                 "--name", fuzzer_module,
                 "--input", str(validation_seed),
                 "--entry-symbol", entry_for_scoping,
+                # A1 too, so the tool can derive the entry's RVA. A stripped binary's
+                # internal entry has no PDB or export symbol: symbolizer-rs prints
+                # `module+0x447c0` and a name search for Ghidra's invented
+                # `FUN_1400447c0` can never match (D-092). A1 holds module_base and
+                # entry_runtime_addr, so the RVA is a subtraction rather than a third
+                # late-bound placeholder.
+                "--a1", str(a1_json),
                 "--binary-dir", str(config.binary.parent),
                 "--out", str(validation_dir),
             ),

@@ -284,6 +284,61 @@ def _pe_identity(data: bytes) -> tuple[int, int, int] | None:
     )
 
 
+def read_static_bytes(binary: Path, static_addr: int, count: int) -> bytes | None:
+    """`count` bytes at a STATIC address, read out of the PE on disk.
+
+    Exists because decompilation names a constant and drops its value. The third real
+    target's parser opens with
+
+        memcmp(param_1, &DAT_1400c6174, 4)
+
+    and the pseudo-C says exactly that -- the symbol, never the four bytes. The model read
+    it correctly and had to invent a value, answering `magic_value: 0`. With the wrong
+    magic the comparison never matches, so the campaign explores nothing, finds nothing,
+    and reports coverage the whole time (D-089).
+
+    Same shape as D-047, where decompilation stated a table's bound as an adjacent symbol
+    and dropped its capacity. The remedy is the same: read the fact out of the artifact
+    that has it.
+
+    Returns None when the address is outside every section, rather than guessing -- a
+    constant read from the wrong offset is worse than an absent one, because it looks
+    like an answer.
+    """
+    try:
+        data = binary.read_bytes()
+    except OSError:
+        return None
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        return None
+    pe = int.from_bytes(data[0x3C:0x40], "little")
+    if pe + 0x18 > len(data) or data[pe : pe + 4] != b"PE\0\0":
+        return None
+
+    sections = int.from_bytes(data[pe + 6 : pe + 8], "little")
+    opt_size = int.from_bytes(data[pe + 20 : pe + 22], "little")
+    image_base = int.from_bytes(data[pe + 24 + 24 : pe + 24 + 32], "little")
+
+    for i in range(sections):
+        off = pe + 24 + opt_size + i * 40
+        if off + 40 > len(data):
+            return None
+        virtual_size = int.from_bytes(data[off + 8 : off + 12], "little")
+        virtual_addr = int.from_bytes(data[off + 12 : off + 16], "little")
+        raw_size = int.from_bytes(data[off + 16 : off + 20], "little")
+        raw_ptr = int.from_bytes(data[off + 20 : off + 24], "little")
+        lo = image_base + virtual_addr
+        hi = lo + max(virtual_size, raw_size)
+        if lo <= static_addr < hi:
+            # Only the RAW part is on disk: a section's virtual size can exceed it (.bss
+            # style), and those bytes are zero at load rather than present in the file.
+            file_off = raw_ptr + (static_addr - lo)
+            if file_off >= raw_ptr + raw_size:
+                return None
+            return data[file_off : min(file_off + count, raw_ptr + raw_size)]
+    return None
+
+
 def module_base_from_dump(
     mem_dmp: Path, regs_json: Path, binary: Path
 ) -> tuple[int | None, str]:

@@ -507,11 +507,27 @@ def frames_before_fault(
     return approach[-count:]
 
 
-def first_hit(symbolized: Path, symbol: str) -> int | None:
-    """1-based line number of the first occurrence of ``symbol``, or None."""
+def first_hit(symbolized: Path, symbol: str, rva: int | None = None) -> int | None:
+    """1-based line number where the entry is first seen, by SYMBOL or by ADDRESS.
+
+    The address form is not a convenience. symbolizer-rs resolves against the PDB and the
+    export table, so a function with neither -- which is every internal function of a
+    stripped binary -- never appears by name. Ghidra names it `FUN_1400447c0`; the trace
+    says `fuzzing-test-cmp.exe+0x447c0`. Searching for the name then fails on a harness
+    that is working perfectly, and on the third real target it did: delivery measured
+    13,731 instructions against 1 for an empty test-case, the trace's FIRST line was the
+    entry, and the gate still reported "the trace never enters FUN_1400447c0" (D-092).
+
+    A check that cannot pass is worse than no check, because its failure gets believed. So
+    the RVA is accepted too, matched as `+0x<rva>` -- the form symbolizer-rs prints when it
+    has no symbol to offer.
+    """
+    needles = [symbol]
+    if rva is not None:
+        needles.append(f"+{rva:#x}")
     with symbolized.open("r", encoding="utf-8", errors="replace") as fd:
         for lineno, line in enumerate(fd, start=1):
-            if symbol in line:
+            if any(needle in line for needle in needles):
                 return lineno
     return None
 
@@ -591,6 +607,7 @@ def validate_harness(
     input_path: Path,
     entry_symbol: str,
     *,
+    entry_rva: int | None = None,
     trace_dir: Path,
     symbolized_path: Path,
     symbolizer: Path | None = None,
@@ -617,7 +634,7 @@ def validate_harness(
         trace_type="rip",
         raw_path=str(raw),
         symbolized_path=str(symbolized),
-        reached_fuzz_entry=first_hit(symbolized, entry_symbol) is not None,
+        reached_fuzz_entry=first_hit(symbolized, entry_symbol, entry_rva) is not None,
     )
 
 
@@ -635,6 +652,20 @@ def main(argv: list[str] | None = None) -> int:
              "stage has run, so no filename is known yet",
     )
     ap.add_argument("--entry-symbol", required=True, help="e.g. ProcessPacket")
+    ap.add_argument(
+        "--a1",
+        type=Path,
+        help="A1 snapshot JSON. The entry's RVA is derived from it as "
+             "entry_runtime_addr - module_base, which is how a stripped entry with no "
+             "symbol can still be found in a trace (D-092)",
+    )
+    ap.add_argument(
+        "--entry-rva",
+        type=lambda s: int(s, 0),
+        help="the entry's RVA. Needed when the entry has no PDB or export symbol -- every "
+             "internal function of a stripped binary -- because symbolizer-rs then prints "
+             "module+0xrva and a name search can never match (D-092)",
+    )
     ap.add_argument("--binary-dir", type=Path, help="directory holding the PDB")
     ap.add_argument("--symbolizer", type=Path)
     ap.add_argument("--out", type=Path, default=REPO_ROOT / "artifacts")
@@ -665,10 +696,21 @@ def main(argv: list[str] | None = None) -> int:
         symbol_paths=symbol_paths,
     )
 
+    entry_rva = args.entry_rva
+    if entry_rva is None and args.a1 and args.a1.is_file():
+        import json as _json
+
+        a1 = _json.loads(args.a1.read_text(encoding="utf-8"))
+        base, runtime = a1.get("module_base"), a1.get("entry_runtime_addr")
+        if base and runtime:
+            entry_rva = int(runtime) - int(base)
+            print(f"entry rva    : {entry_rva:#x} (from A1)")
+
     ref = validate_harness(
         target,
         chosen,
         args.entry_symbol,
+        entry_rva=entry_rva,
         # Per-module trace directory: two modules validated against the same
         # snapshot would otherwise write the same filename.
         trace_dir=args.out / "traces" / args.name,
@@ -677,7 +719,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     sym = Path(ref.symbolized_path)
-    line = first_hit(sym, args.entry_symbol)
+    line = first_hit(sym, args.entry_symbol, entry_rva)
     print(f"trace       : {ref.raw_path}")
     print(f"symbolized  : {ref.symbolized_path}")
     print(f"entry symbol: {args.entry_symbol}")

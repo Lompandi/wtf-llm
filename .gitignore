@@ -103,3 +103,7 @@ fuzzing-snapshot-2/
 # artifacts/runs/ by the commands in its own MANIFEST.json, so tracking it would put a
 # stale copy of committed data in git.
 snapfuzz-cp10-data.zip
+
+# The third target's snapshot: a 3.76 GB dump, supplied rather than produced here.
+fuzzing-snapshot-3/
+fuzzing-test-cmp.zip

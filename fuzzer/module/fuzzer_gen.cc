@@ -6,18 +6,18 @@
 //
 // Both were derived from Ghidra pseudo-C by an LLM. Regenerate with:
 //
-//     python -m fuzzer.codegen --spec artifacts\fuzzing-base-test\input_spec.json --harness artifacts\fuzzing-base-test\harness_spec.json \
+//     python -m fuzzer.codegen --spec D:\wtf-llm\artifacts\fuzzing-test-cmp\input_spec.json --harness D:\wtf-llm\artifacts\fuzzing-test-cmp\harness_spec.json \
 //         --module-out <this file>
 //
-// Target : fuzzing-base-test!fuzzme
-// Input  : rcx
-// Source : FUN_1400011a0, fuzzme
+// Target : fuzzing-test-cmp!FUN_1400447c0
+// Input  : rcx, length in rdx
+// Source : FUN_1400447c0, FUN_140044aa0, __CheckForDebuggerJustMyCode, memcmp, thunk_FUN_1400c08f0
 //
 // The model's reading of the format:
-//   The parser expects a 4-byte magic "test" followed by a 1-byte length field that indicates how many subsequent bytes constitute the payload. The payload may be up to 0x41 bytes; the total buffer is limited to 32 bytes, and the length field is after the magic. The entry function validates the magic and length before processing the payload, and it is invoked only once per test case, so the format does not support a sequence of packets.
+//   The parser expects a 4-byte magic value, followed by a 1-byte length field, then that many bytes of payload. The magic is validated first; if it matches the function proceeds, otherwise it rejects. The length field determines the size of the following payload, which is read as a raw byte array.
 //
 // The model's reading of how to drive it:
-//   The fuzz input arrives in RCX as a pointer to a null-terminated string buffer. The caller FUN_1400011a0 prepares a 32-byte stack buffer, initializes it to zeros, and passes it to fuzzme. The function fuzzme expects the string 'test' followed by an optional fifth byte. No output or nondeterministic functions are called that require silencing; FUN_140001020 appears to be a logging function but its behavior is unclear, so it is left unsilenced. The snapshot restore will reset all memory including the stack buffer between iterations. Max input is set to 4096 bytes, though the parser only reads up to 5 bytes.
+//   The fuzz target FUN_1400447c0 receives a pointer to input in RCX and length in RDX. It checks for a 4-byte magic header (DAT_1400c6174) and if matched, passes the buffer and a length derived from the 5th byte to thunk_FUN_1400c08f0. The caller FUN_140044aa0 allocates a 0x2000-byte heap buffer via VirtualAlloc, writes a test structure with a 5-byte header (0x46,0x55,0x5a,0x5a,0x04) followed by 3 bytes of payload, and calls the entry with length 8. Since the heap buffer size (0x2000) is not encoded in the entry's signature, input_buffer_bytes is left null to use page-end placement. __CheckForDebuggerJustMyCode is silenced to avoid debugger-dependent behavior. No other I/O or nondeterministic calls are evident in the entry; thunk_FUN_1400c08f0 appears to be the core parser and is not silenced. The snapshot restore handles global state, so restore_globals is empty.
 //
 // THIS FILE IS NOT THE BUILD LOCATION. .gitignore's `src/wtf/fuzzer_*` would
 // silently untrack it there (D-012); fuzzer/build.py copies it in at build time.
@@ -45,7 +45,7 @@
 #include <system_error>
 #include <vector>
 
-namespace GenFuzzingBaseTest {
+namespace GenFuzzingTestCmp {
 
 namespace sfs = std::filesystem;
 namespace json = nlohmann;
@@ -55,7 +55,7 @@ constexpr bool LoggingOn = false;
 template <typename... Args_t>
 void DebugPrint(const char *Format, const Args_t &...args) {
   if constexpr (LoggingOn) {
-    fmt::print("GenFuzzingBaseTest: ");
+    fmt::print("GenFuzzingTestCmp: ");
     fmt::print(Format, args...);
   }
 }
@@ -64,8 +64,8 @@ void DebugPrint(const char *Format, const Args_t &...args) {
 // The symbols this harness hooks. Every one was chosen by the model from the
 // target's decompiled code; none is hardcoded here by a human.
 //
-constexpr const char *kFuzzEntry = "fuzzing-base-test!fuzzme";
-constexpr const char *kSkip01 = "fuzzing-base-test!FUN_140001020";  // silence_io: Console I/O. Left unsilenced by the model because its behaviour was unclear; it blocks, th
+constexpr const char *kFuzzEntry = "fuzzing-test-cmp!FUN_1400447c0";
+constexpr const char *kSkip01 = "fuzzing-test-cmp!__CheckForDebuggerJustMyCode";  // silence_io: Debugger check that may produce side effects or terminate; safe to stub as no-op with zero
 
 //
 // Page-tail alignment. Writing the structure flush against the end of the page
@@ -84,12 +84,12 @@ constexpr size_t kMaxInputBytes = 4096;
 //
 constexpr const char *kSpoolEnvVar = "SNAPFUZZ_SEED_SPOOL";
 
-struct Packet_t {
-  // magic; parser compares against 0x74736574 -- The code checks param_1[0]=='t', param_1[1]=='e', param_1[2]=='s', param_1[3]=='t' which together form the ASCII string "test"; interpreted as a 32-bit little-endian magic value 0x74736574.
-  uint32_t magic = 0x74736574;
-  // length; counts payload in bytes -- param_1[4] is used as the length for the following payload (passed as the third argument to FUN_14001b1b0). The code only processes a payload when the total input length exceeds 4 bytes.
-  uint8_t payload_len;
-  // bytes; capped at 65 bytes -- The remaining bytes of the 32-byte buffer up to the length indicated by payload_len are processed; the function is called with a constant 0x41 which appears to be an upper bound for the payload size. Terminated by 0x00: fuzzme opens with while (param_1[i] != 0) i++, so the buffer is a C string and an unterminated input makes that scan read past the end of the data. Set after the derivation missed it -- the scan is the first statement in the pseudo-C.
+struct FuzzPacket {
+  // magic; parser compares against 0x5a5a5546 -- The first 4 bytes at offset 0 are compared with constant 0x5a5a5546 ("FUZZ") via memcmp(param_1,&DAT_1400c6174,4).
+  uint32_t magic = 0x5a5a5546;
+  // length; counts payload in elements -- Byte at offset 4 (param_1[4]) is read as a length value that tells how many payload bytes follow.
+  uint8_t total_len;
+  // bytes; capped at 255 bytes -- Variable length data after the length byte; the number of bytes to read is given by the total_len field.
   std::vector<uint8_t> payload;
 
   //
@@ -109,10 +109,10 @@ struct Packet_t {
 // JSON is the on-disk corpus format. Fields are named exactly as the model named
 // them, so a corpus is readable against the spec that produced this file.
 //
-inline void to_json(json::json &Json, const Packet_t &Value) {
+inline void to_json(json::json &Json, const FuzzPacket &Value) {
   Json = json::json{
       {"magic", Value.magic},
-      {"payload_len", Value.payload_len},
+      {"total_len", Value.total_len},
       {"payload", Value.payload},
       {"WireSize", Value.WireSize}
   };
@@ -124,9 +124,9 @@ inline void to_json(json::json &Json, const Packet_t &Value) {
 // which InsertTestcase would catch and skip, silently rejecting every corpus
 // entry written before a field was added.
 //
-inline void from_json(const json::json &Json, Packet_t &Value) {
+inline void from_json(const json::json &Json, FuzzPacket &Value) {
   Value.magic = Json.value("magic", uint32_t(0));
-  Value.payload_len = Json.value("payload_len", uint8_t(0));
+  Value.total_len = Json.value("total_len", uint8_t(0));
   Value.payload = Json.value("payload", std::vector<uint8_t>{});
   Value.WireSize = Json.value("WireSize", uint32_t(0));
 }
@@ -138,7 +138,7 @@ inline void from_json(const json::json &Json, Packet_t &Value) {
 // wtf's to restore.
 //
 struct {
-  std::deque<Packet_t> Inputs;
+  std::deque<FuzzPacket> Inputs;
   CpuState_t Context;
 
   void RestoreGprs(Backend_t *B) {
@@ -165,7 +165,7 @@ struct {
 //
 // Bytes on the wire for one structure, as the target will see it.
 //
-inline size_t WireSizeOf(const Packet_t &Value) {
+inline size_t WireSizeOf(const FuzzPacket &Value) {
   return 5 + Value.payload.size();
 }
 
@@ -191,7 +191,7 @@ bool InsertTestcase(const uint8_t *Buffer, const size_t BufferSize) {
 
   try {
     const auto &Root = json::json::parse(Buffer, Buffer + BufferSize);
-    GlobalState.Inputs.emplace_back(Root.get<Packet_t>());
+    GlobalState.Inputs.emplace_back(Root.get<FuzzPacket>());
   } catch (const std::exception &E) {
     DebugPrint("input is not valid JSON ({}), skipping\n", E.what());
     return true;
@@ -209,7 +209,7 @@ bool InsertTestcase(const uint8_t *Buffer, const size_t BufferSize) {
 
     if (!g_Backend->VirtWriteStructDirty(Gva_t(Address),
                        &Input.magic)) {
-      fmt::print("GenFuzzingBaseTest: failed to write magic\n");
+      fmt::print("GenFuzzingTestCmp: failed to write magic\n");
       return true;
     }
     Address += sizeof(Input.magic);
@@ -220,17 +220,17 @@ bool InsertTestcase(const uint8_t *Buffer, const size_t BufferSize) {
     // trigger; recomputing here would neuter every overflow.
     //
     if (!g_Backend->VirtWriteStructDirty(Gva_t(Address),
-                       &Input.payload_len)) {
-      fmt::print("GenFuzzingBaseTest: failed to write payload_len\n");
+                       &Input.total_len)) {
+      fmt::print("GenFuzzingTestCmp: failed to write total_len\n");
       return true;
     }
-    Address += sizeof(Input.payload_len);
+    Address += sizeof(Input.total_len);
 
     if (!Input.payload.empty() &&
         !g_Backend->VirtWriteDirty(Gva_t(Address),
                      Input.payload.data(),
                      Input.payload.size())) {
-      fmt::print("GenFuzzingBaseTest: failed to write payload\n");
+      fmt::print("GenFuzzingTestCmp: failed to write payload\n");
       return true;
     }
   }
@@ -255,7 +255,7 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
   // Resolve the module BEFORE installing anything. Failing here is the difference
   // between an error and a campaign that reports coverage while delivering nothing.
   //
-  if (ResolveModuleBase("fuzzing-base-test") == 0) {
+  if (ResolveModuleBase("fuzzing-test-cmp") == 0) {
     return false;
   }
 
@@ -269,7 +269,7 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
   // The fuzz entry. Each hit delivers the next structure; an empty queue ends the
   // test-case.
   //
-  if (!g_Backend->SetBreakpoint(Gva_t(ResolveModuleBase("fuzzing-base-test") + 0x10d0), [](Backend_t *Backend) {
+  if (!g_Backend->SetBreakpoint(Gva_t(ResolveModuleBase("fuzzing-test-cmp") + 0x447c0), [](Backend_t *Backend) {
         if (GlobalState.Inputs.empty()) {
           return Backend->Stop(Ok_t());
         }
@@ -283,12 +283,40 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
         //
         if (Bytes >= kPageSize || Bytes > kMaxInputBytes) {
           GlobalState.Inputs.pop_front();
-          DebugPrint("input of {} bytes does not fit, bailing\n", Bytes);
+          //
+          // LOUD, ONCE. "Every test-case is being dropped" is not a debug detail --
+          // it is the campaign not running. DebugPrint compiles to nothing
+          // (LoggingOn is false), so a harness whose size guard rejected everything
+          // reported 0 instructions, no crash and no error: indistinguishable from a
+          // clean run. That happened because input_buffer_bytes was 8, read off the
+          // size register, and the seed was 21 bytes (D-090).
+          //
+          static bool DropWarned = false;
+          if (!DropWarned) {
+            DropWarned = true;
+            fmt::print("GenFuzzingTestCmp: DROPPING test-cases -- {} bytes exceeds "
+                       "the {}-byte limit from the harness spec.\n"
+                       "  Nothing will be delivered at this size. If the target's "
+                       "buffer is really larger,\n"
+                       "  input_buffer_bytes in harness_spec.json is wrong.\n",
+                       Bytes, kMaxInputBytes);
+          }
           return Backend->Stop(Ok_t());
         }
 
-        // No separate length parameter was identified, so the target
-        // must derive the length from the data itself.
+        //
+        // rdx carries the length, in BYTES.
+        //
+        // WireSize, when set, reports FEWER (or more) bytes than
+        // were written -- modelling a short read on a socket. It is
+        // what makes a `size < header` guard reachable at all
+        // (D-040).
+        //
+        size_t Reported = Bytes;
+        if (Input.WireSize != 0 && Input.WireSize < kPageSize) {
+          Reported = Input.WireSize;
+        }
+        Backend->Rdx(Reported);
 
         //
         // rcx HOLDS the buffer address. Slide the write to the tail of the page
@@ -298,24 +326,25 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
         // guard page must sit behind the real data, or an over-reported size would
         // read our own bytes instead of faulting.
         //
-        // The target provides 32 bytes at rcx, which is smaller than a page, so the
-        // test-case is written AT the pointer. The page-end placement
-        // below is only valid for a page-sized scratch area: against a
-        // 32-byte buffer it would write ~4096 bytes past
-        // it and the parser would read untouched memory (D-075).
-        uint64_t Address = Backend->Rcx();
-        if (Bytes > 32) {
-          // More than the target can hold. Truncating silently would
-          // make an over-long case indistinguishable from a valid one,
-          // so the case is skipped and the next one delivered.
-          GlobalState.Inputs.pop_front();
-          return Backend->Stop(Ok_t());
-        }
+        // Flush against an UNMAPPED page, so a write past the data
+        // faults instead of silently landing in mapped memory. The
+        // boundary comes from prep/guard_page.py, which walked the
+        // dump's page tables to verify it; ResolveInputAddress falls
+        // back to the tail of this pointer's own page and says so.
+        //
+        // This was `PageBase = Backend->Rcx(); PageBase +
+        // (kPageSize - Bytes)`, which is wrong twice over: a register
+        // holds a POINTER, so without masking the low 12 bits the sum
+        // lands PAST the page end, and whether the next page is
+        // unmapped was never checked. The model that wrote the other
+        // generator was shown this file as its example and reproduced
+        // the same mistake.
+        uint64_t Address = ResolveInputAddress(Backend->Rcx(), Bytes).U64();
         Backend->Rcx(Address);
 
         if (!Backend->VirtWriteStructDirty(Gva_t(Address),
                                            &Input.magic)) {
-          fmt::print("GenFuzzingBaseTest: failed to write magic\n");
+          fmt::print("GenFuzzingTestCmp: failed to write magic\n");
           std::abort();
         }
         Address += sizeof(Input.magic);
@@ -326,22 +355,22 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
         // trigger; recomputing here would neuter every overflow.
         //
         if (!Backend->VirtWriteStructDirty(Gva_t(Address),
-                                           &Input.payload_len)) {
-          fmt::print("GenFuzzingBaseTest: failed to write payload_len\n");
+                                           &Input.total_len)) {
+          fmt::print("GenFuzzingTestCmp: failed to write total_len\n");
           std::abort();
         }
-        Address += sizeof(Input.payload_len);
+        Address += sizeof(Input.total_len);
 
         if (!Input.payload.empty() &&
             !Backend->VirtWriteDirty(Gva_t(Address),
                                      Input.payload.data(),
                                      Input.payload.size())) {
-          fmt::print("GenFuzzingBaseTest: failed to write payload\n");
+          fmt::print("GenFuzzingTestCmp: failed to write payload\n");
           std::abort();
         }
         GlobalState.Inputs.pop_front();
       })) {
-    fmt::print("GenFuzzingBaseTest: failed to SetBreakpoint on {}\n", kFuzzEntry);
+    fmt::print("GenFuzzingTestCmp: failed to SetBreakpoint on {}\n", kFuzzEntry);
     return false;
   }
 
@@ -383,18 +412,18 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
         GlobalState.RestoreGprs(Backend);
         DebugPrint("back at the entry point, ready for the next input\n");
       })) {
-    fmt::print("GenFuzzingBaseTest: failed to SetBreakpoint on the return address\n");
+    fmt::print("GenFuzzingTestCmp: failed to SetBreakpoint on the return address\n");
     return false;
   }
 
   //
-  // fuzzing-base-test!FUN_140001020: silence_io.
-  // Console I/O. Left unsilenced by the model because its behaviour was unclear; it blocks, the thread context-switches into nt!SwapContext, and the test-case ends before the memset th
+  // fuzzing-test-cmp!__CheckForDebuggerJustMyCode: silence_io.
+  // Debugger check that may produce side effects or terminate; safe to stub as no-op with zero return to avoid interference.
   //
-  if (!g_Backend->SetBreakpoint(Gva_t(ResolveModuleBase("fuzzing-base-test") + 0x1020), [](Backend_t *Backend) {
+  if (!g_Backend->SetBreakpoint(Gva_t(ResolveModuleBase("fuzzing-test-cmp") + 0x45094), [](Backend_t *Backend) {
         Backend->SimulateReturnFromFunction(0);
       })) {
-    fmt::print("GenFuzzingBaseTest: failed to SetBreakpoint on {}\n", kSkip01);
+    fmt::print("GenFuzzingTestCmp: failed to SetBreakpoint on {}\n", kSkip01);
     return false;
   }
 
@@ -409,7 +438,7 @@ bool Init(const Options_t &Opts, const CpuState_t &State) {
   // every Windows target.
   //
   if (!SetupUsermodeCrashDetectionHooks()) {
-    fmt::print("GenFuzzingBaseTest: failed to SetupUsermodeCrashDetectionHooks\n");
+    fmt::print("GenFuzzingTestCmp: failed to SetupUsermodeCrashDetectionHooks\n");
     return false;
   }
 
@@ -446,15 +475,15 @@ public:
     if (const char *Env = std::getenv("SNAPFUZZ_MUTATOR"); Env && *Env) {
       const std::string Which(Env);
       if (Which == "libfuzzer") {
-        fmt::print("GenFuzzingBaseTest: BASELINE arm -- libfuzzer mutator\n");
+        fmt::print("GenFuzzingTestCmp: BASELINE arm -- libfuzzer mutator\n");
         return LibfuzzerMutator_t::Create(Rng, TestcaseMaxSize);
       }
       if (Which == "honggfuzz") {
-        fmt::print("GenFuzzingBaseTest: BASELINE arm -- honggfuzz mutator\n");
+        fmt::print("GenFuzzingTestCmp: BASELINE arm -- honggfuzz mutator\n");
         return HonggfuzzMutator_t::Create(Rng, TestcaseMaxSize);
       }
       if (Which != "custom") {
-        fmt::print("GenFuzzingBaseTest: SNAPFUZZ_MUTATOR={} is not "
+        fmt::print("GenFuzzingTestCmp: SNAPFUZZ_MUTATOR={} is not "
                    "libfuzzer/honggfuzz/custom; refusing to guess the arm\n",
                    Which);
         std::fflush(stdout);
@@ -562,19 +591,19 @@ private:
   // disagree, because that disagreement is the bug.
   //
   std::string Generate() {
-    Packet_t Root;
-        Packet_t Item;
+    FuzzPacket Root;
+        FuzzPacket Item;
         // The parser compares this against a constant, so a random
       // value is rejected immediately. Kept correct MOST of the
       // time so the corpus gets past the check at all.
       Item.magic = GetUint32(1, 10) == 1
                               ? uint32_t(GetUint32(0, 0xffff))
-                              : uint32_t(0x74736574);
+                              : uint32_t(0x5a5a5546);
         // Consistent with the payload: an inconsistent length is
       // rejected at the parser's first check, and a corpus of
       // rejected inputs teaches the fuzzer nothing (CP4).
-      Item.payload_len = uint8_t(Item.payload.size());
-        const uint32_t Len = GetUint32(0, 65);
+      Item.total_len = uint8_t(Item.payload.size());
+        const uint32_t Len = GetUint32(0, 255);
         Item.payload.resize(Len);
         for (uint32_t I = 0; I < Len; I++) {
           Item.payload[I] = uint8_t(GetUint32(0, 255));
@@ -589,15 +618,15 @@ private:
   }
 
   std::string Mutate(uint8_t *Data, const size_t DataLen, const size_t MaxSize) {
-    Packet_t Root;
+    FuzzPacket Root;
     try {
       const auto &Parsed = json::json::parse(Data, Data + DataLen);
-      Root = Parsed.get<Packet_t>();
+      Root = Parsed.get<FuzzPacket>();
     } catch (const std::exception &) {
       // Not our format -- start fresh rather than aborting the master.
       return Generate();
     }
-    std::vector<Packet_t> Items{Root};
+    std::vector<FuzzPacket> Items{Root};
     if (Items.empty()) {
       return Generate();
     }
@@ -614,7 +643,7 @@ private:
         Item.magic = uint32_t(GetUint32(0, 0xffff));
         break;
       case 1:
-        Item.payload_len = uint8_t(GetUint32(0, 0xffff));
+        Item.total_len = uint8_t(GetUint32(0, 0xffff));
         break;
       }
       break;
@@ -653,13 +682,13 @@ private:
   }
 };
 
-} // namespace GenFuzzingBaseTest
+} // namespace GenFuzzingTestCmp
 
 //
 // The registration. ONE artifact, loaded by the master (which uses
 // CustomMutator_t) and every worker (which uses Init / InsertTestcase / Restore).
 // Both roles, one module (edges 21a and 21b).
 //
-Target_t GenFuzzingBaseTestTarget("snapfuzz_gen", GenFuzzingBaseTest::Init,
-                      GenFuzzingBaseTest::InsertTestcase, GenFuzzingBaseTest::Restore,
-                      GenFuzzingBaseTest::CustomMutator_t::Create);
+Target_t GenFuzzingTestCmpTarget("snapfuzz_gen", GenFuzzingTestCmp::Init,
+                      GenFuzzingTestCmp::InsertTestcase, GenFuzzingTestCmp::Restore,
+                      GenFuzzingTestCmp::CustomMutator_t::Create);
