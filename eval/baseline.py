@@ -71,8 +71,16 @@ POOR_SEED = b'{"Packets":[{"Id":1,"Command":0,"BodySize":0,"Body":[]}]}'
 # has to mean for a comparison to be about the SEARCH rather than the starting point.
 POOR_SEEDS: dict[str, bytes] = {
     "snapfuzz": POOR_SEED,
-    "snapfuzz_gen": b'{"magic":1953719668,"payload_len":0,"payload":[]}',
 }
+
+# KEYED ON THE MODULE WAS WRONG, and only a third target showed it: every generated harness
+# is registered as `snapfuzz_gen`, so two targets share the key while having completely
+# different wire formats. Target 2's magic is "test" and target 3's is "FUZZ", so target 3
+# would have started from a seed that fails its own memcmp -- every arm exploring nothing,
+# and the comparison measuring the seed rather than the search.
+#
+# So the seed is a CLI argument now. `--poor-seed` for an explicit file, and the caller is
+# the only thing that knows which target it is pointing at.
 
 
 class ArmDidNotRun(RuntimeError):
@@ -273,6 +281,7 @@ def run_arm(
     samples: int,
     dedup: bool = True,
     label_prefix: str = "cmp",
+    seed_bytes: bytes = POOR_SEED,
 ) -> ArmResult:
     """Run one arm end to end and measure it."""
     import os
@@ -555,6 +564,14 @@ def main(argv: list[str] | None = None) -> int:
         help="prefix for the per-arm target dir and run label. A second target must not "
              "reuse 'cmp-<arm>' or it destroys the first target's evidence (D-057)",
     )
+    ap.add_argument(
+        "--poor-seed",
+        type=Path,
+        help="the single deliberately poor seed every arm starts from. Required for a "
+             "target whose wire format is not the development one: the built-in default "
+             "is tlv_server's, and starting from a seed that fails the target's own magic "
+             "check measures the seed instead of the search",
+    )
     ap.add_argument("--arms", nargs="*", help="arm names; default all")
     ap.add_argument("--out", type=Path, default=REPO_ROOT / "artifacts/runs/gate10")
     ap.add_argument(
@@ -594,23 +611,54 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"unknown arm(s): {sorted(unknown)}")
         chosen = tuple(a for a in arms if a.name in names)
 
+    poor_seed = POOR_SEEDS.get(args.module, POOR_SEED)
+    if args.poor_seed:
+        poor_seed = args.poor_seed.read_bytes()
+        print(f"poor seed  : {args.poor_seed} ({len(poor_seed)} bytes)")
+    elif args.module not in POOR_SEEDS:
+        raise SystemExit(
+            f"no built-in poor seed for module {args.module!r} and --poor-seed was not "
+            f"given. Starting from the development target's seed would fail this target's "
+            f"own magic check, so every arm would explore nothing and the comparison "
+            f"would measure the seed rather than the search."
+        )
+
     args.out.mkdir(parents=True, exist_ok=True)
     results: list[ArmResult] = []
 
+    absent: list[str] = []
     for arm in chosen:
         print(f"\n=== {arm.name}: {arm.description} ===", flush=True)
-        result = run_arm(
-            arm,
-            minutes=args.minutes,
-            workers=args.workers,
-            a1=args.a1,
-            cov_file=args.cov_file,
-            source_state=args.source_state,
-            plateau_execs=args.plateau_execs,
-            seeds=args.seeds,
-            samples=args.samples,
-            label_prefix=args.label_prefix,
-        )
+        try:
+            result = run_arm(
+                arm,
+                minutes=args.minutes,
+                workers=args.workers,
+                a1=args.a1,
+                cov_file=args.cov_file,
+                source_state=args.source_state,
+                plateau_execs=args.plateau_execs,
+                seeds=args.seeds,
+                samples=args.samples,
+                label_prefix=args.label_prefix,
+                seed_bytes=poor_seed,
+            )
+        except ArmDidNotRun as exc:
+            # ONE ARM THAT CANNOT RUN MUST NOT TAKE THE OTHERS WITH IT. Raising was right --
+            # an arm with no executions is not a result of zero -- but raising out of the
+            # LOOP meant wtf's built-in-mutator crash (0xC0000409) killed the whole
+            # comparison at arm 1, so the three LLM arms were never measured either. The arm
+            # is recorded as absent, loudly, and the run continues.
+            absent.append(arm.name)
+            print(f"  ARM DID NOT RUN: {exc}", flush=True)
+            stale = args.out / f"{arm.name}.json"
+            if stale.is_file():
+                # A previous run's numbers for an arm that just failed would be read as this
+                # run's -- the same class of error as any other stale artifact.
+                stale.unlink()
+                print(f"  removed a previous {stale.name}; it is not this run's result")
+            continue
+
         results.append(result)
         (args.out / f"{arm.name}.json").write_text(
             json.dumps(result.to_json(), indent=2), encoding="utf-8"
@@ -666,6 +714,9 @@ def main(argv: list[str] | None = None) -> int:
             f"{str(result.distinct_buckets):>9}"
             f"{str(result.seconds_to_first_crash):>11}{result.mean_exec_per_s:>9.0f}"
         )
+    if absent:
+        print(f"\nARMS THAT DID NOT RUN: {', '.join(absent)}")
+        print("  Absent from the comparison, not zero. See the log above for the cause.")
     print(f"\nwrote {args.out / 'comparison.json'}")
     return 0
 
